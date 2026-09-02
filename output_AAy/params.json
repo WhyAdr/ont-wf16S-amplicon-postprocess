@@ -1,0 +1,86 @@
+{
+    "help": false,
+    "version": false,
+    "fastq": "/data/FAHBIMAIN_17062026/FAHBIMAIN_1/20260617_1820_3F_PBE95983_3b3175a2/fastq_pass/AmbarAyunda",
+    "bam": null,
+    "sample": "AmbarAyunda_minimap2_16S",
+    "sample_sheet": null,
+    "classifier": "minimap2",
+    "exclude_host": null,
+    "max_len": 1600,
+    "min_len": 1400,
+    "min_read_qual": 10,
+    "threads": 128,
+    "taxonomy": null,
+    "reference": null,
+    "ref2taxid": null,
+    "database": null,
+    "taxonomic_rank": "S",
+    "minimap2filter": null,
+    "minimap2exclude": false,
+    "keep_bam": false,
+    "minimap2_by_reference": true,
+    "min_percent_identity": 85,
+    "min_ref_coverage": 85,
+    "store_dir": "/home/prom/epi2melabs/data",
+    "out_dir": "/home/prom/epi2melabs/instances/wf-16s_01KVD4F5R19EA9F545BFCTPB56/output",
+    "include_read_assignments": true,
+    "igv": true,
+    "output_unclassified": true,
+    "bracken_length": null,
+    "bracken_threshold": 10,
+    "kraken2_memory_mapping": false,
+    "kraken2_confidence": 0,
+    "database_set": "ncbi_16s_18s_28s_ITS",
+    "database_sets": {
+        "ncbi_16s_18s": {
+            "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/ncbi_targeted_loci_16s_18s.fna",
+            "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/ncbi_targeted_loci_kraken2.tar.gz",
+            "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/ref2taxid.targloci.tsv",
+            "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/new_taxdump_2025-01-01.zip"
+        },
+        "ncbi_16s_18s_28s_ITS": {
+            "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS.fna",
+            "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS_kraken2.tar.gz",
+            "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ref2taxid.ncbi_16s_18s_28s_ITS.tsv",
+            "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/new_taxdump_2025-01-01.zip"
+        },
+        "SILVA_138_1": {
+            "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/SILVA_138_1/silva.fna",
+            "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/SILVA_138_1/kraken2.tar.gz",
+            "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/SILVA_138_1/seqid2taxid.map",
+            "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/SILVA_138_1/taxonomy.tar.gz"
+        },
+        "Greengenes2_plus": {
+            "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/Greengenes2_plus/sequences_mm2format.fasta",
+            "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/Greengenes2_plus/kraken2.tar.gz",
+            "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/Greengenes2_plus/sequences_mm2format.taxid.map",
+            "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/Greengenes2_plus/taxdump.tar.gz"
+        }
+    },
+    "abundance_threshold": 1,
+    "n_taxa_barplot": 9,
+    "amr": false,
+    "amr_db": "resfinder",
+    "amr_minid": 80,
+    "amr_mincov": 80,
+    "aws_image_prefix": null,
+    "aws_queue": null,
+    "disable_ping": false,
+    "monochrome_logs": false,
+    "validate_params": true,
+    "show_hidden_params": false,
+    "analyse_unclassified": false,
+    "schema_ignore_params": "show_hidden_params,validate_params,monochrome_logs,aws_queue,aws_image_prefix,wf,database_sets,amr,amr_db,amr_minid,amr_mincov",
+    "wf": {
+        "example_cmd": [
+            "--fastq 'wf-16s-demo/test_data'",
+            "--minimap2_by_reference"
+        ],
+        "agent": "epi2melabs/5.2.5",
+        "container_sha": "sha38db033c15c74ae7cac3c609fdfe2c8d2a53ef6f",
+        "common_sha": "shafdd79f8e4a6faad77513c36f623693977b92b08e",
+        "epi2me_user": "guest",
+        "epi2me_instance": "01KVD4F5R19EA9F545BFCTPB56"
+    }
+}

@@ -1,0 +1,21 @@
+{
+    "reference": {
+        "id": "ref",
+        "name": "ref",
+        "wholeGenomeView": false,
+        "fastaURL": "igv_reference/reduced_reference.fasta.gz",
+        "indexURL": "igv_reference/reduced_reference.fasta.gz.fai",
+        "compressedIndexURL": "igv_reference/reduced_reference.fasta.gz.gzi"
+    },
+    "tracks": [
+        {
+            "name": "AmbarAyunda_minimap2_16S.reference.bam",
+            "type": "alignment",
+            "format": "bam",
+            "url": "bams/AmbarAyunda_minimap2_16S.reference.bam",
+            "indexURL": "bams/AmbarAyunda_minimap2_16S.reference.bam.bai",
+            "displayMode": "SQUISHED",
+            "colorBy": "strand"
+        }
+    ]
+}

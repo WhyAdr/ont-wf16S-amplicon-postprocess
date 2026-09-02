@@ -1,0 +1,25 @@
+# Large binary and genomic sequencing files
+*.bam
+*.bai
+*.fq.gz
+*.fastq.gz
+*.fasta.gz
+*.sam
+
+# Pipeline heavy directories / reports
+output_AAy/bams/
+output_AAy/unclassified/
+output_AAy/igv_reference/
+output_AAy/execution/
+output_AAy/wf-16s-report.html
+
+# R & Python temporary files
+.Rhistory
+.RData
+.Rproj.user/
+__pycache__/
+*.pyc
+
+# OS generated files
+.DS_Store
+Thumbs.db
