@@ -1,0 +1,82 @@
+# =============================================================================
+# Example Pipeline Configuration for ONT wf-16s Post-Processing
+# =============================================================================
+schema_version: 1
+project_name: "Cohort_Experiment_Example"
+
+# Analysis mode:
+#   - 'auto': automatically selects 'single' for 1 sample, 'cohort' for >=2 samples
+#   - 'single': requires exactly 1 sample (cohort modules skipped)
+#   - 'cohort': requires >= 2 samples and a valid metadata file
+mode: "auto"
+
+# Random seed for reproducible rarefaction and permutations
+seed: 42
+
+input:
+  # Path to wf-16s abundance_table_species.tsv (required)
+  abundance_table: "output_AAy/abundance_table_species.tsv"
+
+  # Path to sample metadata TSV (required for cohort mode, optional for single)
+  # Must contain unique 'SampleID' and 'Group' columns
+  metadata: "metadata.example.tsv"
+
+  # Upstream wf-16s params.json for reading min_len, max_len, abundance_threshold
+  params_json: "output_AAy/params.json"
+
+  # Column name containing 8-rank lineage strings
+  tax_column: "tax"
+
+  # Columns to treat as aggregates (excluded from sample selection)
+  aggregate_columns: ["total"]
+
+  # Subset of sample columns to include (null = all detected non-aggregate columns)
+  include_samples: null
+
+  # Optional per-sample Minimap2 read assignments files
+  # If null, abundance-only modules run and QC read-length diagnostics are skipped
+  assignments:
+    AmbarAyunda_minimap2_16S: "output_AAy/reads_assignments/AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv"
+
+output:
+  # Base output directory (all module subdirectories derived automatically)
+  base_dir: "output"
+
+qc:
+  # Fallback length thresholds for plotting if not found in params.json
+  display_min_length: 1200
+  display_max_length: 1800
+  target_min_length: null
+  target_max_length: null
+
+alpha:
+  rarefaction_points: 25
+  resample_depth: 50000
+  resample_fraction_cap: 0.90
+  resample_iterations: 100
+
+composition:
+  top_n_taxa: 15
+  heatmap_rank: "genus"
+  heatmap_transform: "log10_relative"
+
+beta:
+  distances: ["bray", "jaccard"]
+  permutations: 999
+  strata_column: null
+  resampling:
+    enabled: false
+    iterations: 100
+    depth_fraction_of_minimum: 0.75
+
+shared_taxa:
+  rank: "species"
+  minimum_count: 1
+  group_prevalence: 0.5
+
+taxonomy:
+  cache: "output_AAy/taxonomy_cache.json"
+  network_mode: "cache_only"  # 'cache_only' (offline default) or 'refresh'
+  unresolved_policy: "warn"  # 'warn' or 'error'
+  email_env: "NCBI_EMAIL"
+  api_key_env: "NCBI_API_KEY"

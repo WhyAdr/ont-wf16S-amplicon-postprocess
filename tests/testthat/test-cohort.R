@@ -1,0 +1,110 @@
+# =============================================================================
+# Unit Tests: Cohort Modules & Synthetic Multi-Sample Gating
+# =============================================================================
+
+source(file.path("..", "..", "analysis", "utils", "config.R"))
+source(file.path("..", "..", "analysis", "utils", "io.R"))
+source(file.path("..", "..", "analysis", "utils", "metrics.R"))
+source(file.path("..", "..", "analysis", "utils", "plotting.R"))
+source(file.path("..", "..", "analysis", "03_beta_diversity.R"))
+source(file.path("..", "..", "analysis", "05_ordination.R"))
+source(file.path("..", "..", "analysis", "06_shared_taxa.R"))
+
+test_that("Single-sample context skips beta, ordination, and shared_taxa gracefully", {
+  tmp <- tempdir()
+  ab_file <- create_temp_abundance(tmp, n_species = 5, sample_names = c("S1"))
+  
+  cfg <- get_default_config()
+  cfg$input$abundance_table <- ab_file
+  cfg$output$base_dir <- file.path(tmp, "out_single")
+  cfg$output$dirs <- list(
+    beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"),
+    ordination = file.path(cfg$output$base_dir, "05_Ordination"),
+    shared_taxa = file.path(cfg$output$base_dir, "06_Shared_Taxa")
+  )
+  
+  context <- build_context(cfg)
+  expect_equal(context$mode, "single")
+  
+  # Run beta
+  res_beta <- run_beta(context)
+  expect_equal(res_beta$status, "skipped")
+  expect_true(file.exists(file.path(cfg$output$dirs$beta, "beta_diversity_skipped.tsv")))
+  
+  # Run ordination
+  res_ord <- run_ordination(context)
+  expect_equal(res_ord$status, "skipped")
+  expect_true(file.exists(file.path(cfg$output$dirs$ordination, "ordination_skipped.tsv")))
+  
+  # Run shared taxa
+  res_shared <- run_shared_taxa(context)
+  expect_equal(res_shared$status, "skipped")
+  expect_true(file.exists(file.path(cfg$output$dirs$shared_taxa, "shared_taxa_skipped.tsv")))
+})
+
+test_that("Synthetic cohort (2 groups x 3 replicates) passes cohort gates and pairs PERMANOVA with betadisper", {
+  tmp <- tempdir()
+  sample_names <- c("Ctrl1", "Ctrl2", "Ctrl3", "Trt1", "Trt2", "Trt3")
+  ab_file <- create_temp_abundance(tmp, n_species = 20, sample_names = sample_names)
+  meta_file <- create_temp_metadata(tmp, sample_names = sample_names,
+                                    groups = c("Control", "Control", "Control", "Treated", "Treated", "Treated"))
+  
+  cfg <- get_default_config()
+  cfg$mode <- "cohort"
+  cfg$input$abundance_table <- ab_file
+  cfg$input$metadata <- meta_file
+  cfg$output$base_dir <- file.path(tmp, "out_cohort")
+  cfg$output$dirs <- list(
+    beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"),
+    ordination = file.path(cfg$output$base_dir, "05_Ordination"),
+    shared_taxa = file.path(cfg$output$base_dir, "06_Shared_Taxa")
+  )
+  
+  context <- build_context(cfg)
+  expect_equal(context$mode, "cohort")
+  expect_equal(length(context$samples), 6)
+  
+  # Run beta
+  res_beta <- run_beta(context)
+  expect_equal(res_beta$status, "completed")
+  expect_true(file.exists(file.path(cfg$output$dirs$beta, "permanova.tsv")))
+  expect_true(file.exists(file.path(cfg$output$dirs$beta, "betadisper.tsv")))
+  expect_true(file.exists(file.path(cfg$output$dirs$beta, "pcoa_scores_bray.tsv")))
+  
+  # Run ordination
+  res_ord <- run_ordination(context)
+  expect_equal(res_ord$status, "completed")
+  expect_true(file.exists(file.path(cfg$output$dirs$ordination, "pca_scores.tsv")))
+  expect_true(file.exists(file.path(cfg$output$dirs$ordination, "pca_variance.tsv")))
+  
+  # Run shared taxa
+  res_shared <- run_shared_taxa(context)
+  expect_equal(res_shared$status, "completed")
+  expect_true(file.exists(file.path(cfg$output$dirs$shared_taxa, "core_taxa.tsv")))
+  expect_true(file.exists(file.path(cfg$output$dirs$shared_taxa, "unique_taxa.tsv")))
+  expect_true(file.exists(file.path(cfg$output$dirs$shared_taxa, "group_prevalence.tsv")))
+})
+
+test_that("Under-replicated cohort skips PERMANOVA with explicit reason", {
+  tmp <- tempdir()
+  # 2 groups with only 1 sample each
+  sample_names <- c("Ctrl1", "Trt1")
+  ab_file <- create_temp_abundance(tmp, n_species = 10, sample_names = sample_names)
+  meta_file <- create_temp_metadata(tmp, sample_names = sample_names, groups = c("Control", "Treated"))
+  
+  cfg <- get_default_config()
+  cfg$mode <- "cohort"
+  cfg$input$abundance_table <- ab_file
+  cfg$input$metadata <- meta_file
+  cfg$output$base_dir <- file.path(tmp, "out_underrep")
+  cfg$output$dirs <- list(beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"))
+  
+  context <- build_context(cfg)
+  res_beta <- run_beta(context)
+  
+  perm_tsv <- file.path(cfg$output$dirs$beta, "permanova.tsv")
+  expect_true(file.exists(perm_tsv))
+  perm_df <- read.delim(perm_tsv)
+  expect_equal(perm_df$Status[1], "Skipped")
+  expect_match(perm_df$Reason[1], "requires at least 2 groups with >= 2 samples")
+})

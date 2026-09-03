@@ -1,0 +1,7 @@
+SampleID	Group	Batch	Description
+Sample_A1	Control	Batch_1	Synthetic control replicate 1 (demo only)
+Sample_A2	Control	Batch_1	Synthetic control replicate 2 (demo only)
+Sample_A3	Control	Batch_2	Synthetic control replicate 3 (demo only)
+Sample_B1	Treated	Batch_1	Synthetic treated replicate 1 (demo only)
+Sample_B2	Treated	Batch_2	Synthetic treated replicate 2 (demo only)
+Sample_B3	Treated	Batch_2	Synthetic treated replicate 3 (demo only)
