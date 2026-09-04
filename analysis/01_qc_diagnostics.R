@@ -12,7 +12,7 @@ run_qc <- function(context) {
   cfg <- context$config
   qc_dir <- cfg$output$dirs$qc
   assignments_map <- context$assignments
-  
+
   if (is.null(assignments_map) || length(assignments_map) == 0) {
     return(list(
       status = "skipped",
@@ -20,13 +20,13 @@ run_qc <- function(context) {
       outputs = character(0)
     ))
   }
-  
+
   dir.create(qc_dir, recursive = TRUE, showWarnings = FALSE)
-  
+
   all_outputs <- character(0)
   reconciliation_rows <- list()
   length_summary_rows <- list()
-  
+
   # Target lengths from params.json or config fallbacks
   min_len_target <- if (!is.null(context$params$min_len)) {
     context$params$min_len
@@ -38,39 +38,42 @@ run_qc <- function(context) {
   } else {
     cfg$qc$target_max_length
   }
-  
+
   display_min <- cfg$qc$display_min_length %||% 1200L
   display_max <- cfg$qc$display_max_length %||% 1800L
-  
+
   for (sample_id in context$samples) {
     asgn_path <- assignments_map[[sample_id]]
     if (is.null(asgn_path) || !file.exists(asgn_path)) {
       next
     }
-    
+
     sample_out_dir <- file.path(qc_dir, sanitize_filename(sample_id))
     dir.create(sample_out_dir, recursive = TRUE, showWarnings = FALSE)
-    
+
     # Expected counts from abundance context
     stat_row <- context$sample_stats[context$sample_stats$SampleID == sample_id, ]
     exp_total <- stat_row$TotalReads[1]
     exp_class <- stat_row$ClassifiedReads[1]
     exp_unclass <- stat_row$UnclassifiedReads[1]
-    
-    reads <- read_assignments_file(
-      path = asgn_path,
-      sample_id = sample_id,
-      expected_total = exp_total,
-      expected_classified = exp_class,
-      expected_unclassified = exp_unclass
-    )
-    
+
+    reads <- context$assignment_data[[sample_id]]
+    if (is.null(reads)) {
+      reads <- read_assignments_file(
+        path = asgn_path,
+        sample_id = sample_id,
+        expected_total = exp_total,
+        expected_classified = exp_class,
+        expected_unclassified = exp_unclass
+      )
+    }
+
     n_status_C <- sum(reads$status == "C")
     n_status_U <- sum(reads$status == "U")
     n_qc_reclass <- sum(reads$status == "C" & reads$taxid == 0)
     n_eff_class <- sum(reads$effective_classified)
     n_eff_unclass <- sum(!reads$effective_classified)
-    
+
     # 1. Reconciliation Table Row
     reconciliation_rows[[sample_id]] <- data.frame(
       SampleID = sample_id,
@@ -86,14 +89,14 @@ run_qc <- function(context) {
       ReconciliationPass = (n_eff_class == exp_class) && (nrow(reads) == exp_total),
       stringsAsFactors = FALSE
     )
-    
+
     # 2. Length summary statistics
     reads$status_category <- ifelse(
       reads$status == "C" & reads$taxid != 0, "Classified",
       ifelse(reads$status == "C" & reads$taxid == 0, "QC-filtered", "Never aligned")
     )
     reads$effective_status <- ifelse(reads$effective_classified, "Classified", "Unclassified")
-    
+
     for (cat_name in c("All", "Classified", "Unclassified", "QC-filtered")) {
       sub_lens <- if (cat_name == "All") {
         reads$read_length
@@ -102,7 +105,7 @@ run_qc <- function(context) {
       } else {
         reads$read_length[reads$status_category == cat_name]
       }
-      
+
       if (length(sub_lens) > 0) {
         length_summary_rows[[paste(sample_id, cat_name, sep = "_")]] <- data.frame(
           SampleID = sample_id,
@@ -119,7 +122,7 @@ run_qc <- function(context) {
         )
       }
     }
-    
+
     # 3. Figure 1a: Donut Plot
     donut_df <- reads %>%
       count(effective_status) %>%
@@ -129,7 +132,7 @@ run_qc <- function(context) {
         ymin = c(0, head(ymax, -1)),
         label = sprintf("%s\n%s reads\n(%.1f%%)", effective_status, scales::comma(n), 100 * frac)
       )
-    
+
     p1a <- ggplot(donut_df, aes(ymin = ymin, ymax = ymax, xmin = 3, xmax = 4, fill = effective_status)) +
       geom_rect(color = "white", linewidth = 1.2) +
       coord_polar(theta = "y") +
@@ -142,11 +145,11 @@ run_qc <- function(context) {
       theme(legend.position = "bottom", plot.title = element_text(face = "bold", hjust = 0.5, size = 13)) +
       geom_text(aes(x = 3.5, y = (ymin + ymax) / 2, label = label), inherit.aes = FALSE,
                 data = donut_df, color = "black", size = 3.3, fontface = "bold")
-    
+
     p1a_path <- file.path(sample_out_dir, "01a_classification_donut.png")
     save_plot(p1a_path, p1a, width = 5.5, height = 5.5)
     all_outputs <- c(all_outputs, p1a_path)
-    
+
     # 4. Figure 1b: Read Length Histogram
     p1b <- ggplot(reads, aes(x = read_length, fill = effective_status)) +
       geom_histogram(binwidth = 10, alpha = 0.85, position = "identity") +
@@ -165,18 +168,18 @@ run_qc <- function(context) {
       ) +
       theme_amplicon() +
       theme(legend.position = "bottom")
-    
+
     if (!is.null(min_len_target)) {
       p1b <- p1b + geom_vline(xintercept = min_len_target, linetype = "dotted", color = "grey30")
     }
     if (!is.null(max_len_target)) {
       p1b <- p1b + geom_vline(xintercept = max_len_target, linetype = "dotted", color = "grey30")
     }
-    
+
     p1b_path <- file.path(sample_out_dir, "01b_read_length_distribution.png")
     save_plot(p1b_path, p1b, width = 7.5, height = 5)
     all_outputs <- c(all_outputs, p1b_path)
-    
+
     # 5. Figure 1c: Diagnostic Bar (Why raw status != effective classification)
     qc_diag_df <- data.frame(
       Category = factor(
@@ -189,7 +192,7 @@ run_qc <- function(context) {
       ),
       Count = c(n_eff_class, n_qc_reclass, n_status_U)
     )
-    
+
     p1c <- ggplot(qc_diag_df, aes(x = Category, y = Count, fill = Category)) +
       geom_col(width = 0.6) +
       geom_text(aes(label = scales::comma(Count)), vjust = -0.4, size = 3.6, fontface = "bold") +
@@ -209,11 +212,11 @@ run_qc <- function(context) {
       ) +
       theme_amplicon() +
       theme(legend.position = "none")
-    
+
     p1c_path <- file.path(sample_out_dir, "01c_qc_filter_diagnostic.png")
     save_plot(p1c_path, p1c, width = 7, height = 5.5)
     all_outputs <- c(all_outputs, p1c_path)
-    
+
     # 6. Figure 1d: Violin & Boxplot of Read Length by Effective Class
     p1d <- ggplot(reads, aes(x = effective_status, y = read_length, fill = effective_status)) +
       geom_violin(alpha = 0.6, trim = FALSE) +
@@ -228,12 +231,12 @@ run_qc <- function(context) {
       ) +
       theme_amplicon() +
       theme(legend.position = "none")
-    
+
     p1d_path <- file.path(sample_out_dir, "01d_read_length_violin.png")
     save_plot(p1d_path, p1d, width = 6, height = 5)
     all_outputs <- c(all_outputs, p1d_path)
   }
-  
+
   # Export summary TSVs
   reconciliation_file <- file.path(qc_dir, "classification_reconciliation.tsv")
   if (length(reconciliation_rows) > 0) {
@@ -241,14 +244,14 @@ run_qc <- function(context) {
                 sep = "\t", row.names = FALSE, quote = FALSE)
     all_outputs <- c(all_outputs, reconciliation_file)
   }
-  
+
   length_file <- file.path(qc_dir, "read_length_by_status.tsv")
   if (length(length_summary_rows) > 0) {
     write.table(do.call(rbind, length_summary_rows), length_file,
                 sep = "\t", row.names = FALSE, quote = FALSE)
     all_outputs <- c(all_outputs, length_file)
   }
-  
+
   list(
     status = "completed",
     outputs = all_outputs

@@ -9,19 +9,19 @@ RANK_CODES_8 <- c("D", "K", "P", "C", "O", "F", "G", "S")
 
 build_kreport_tree <- function(lineages_str, counts) {
   lineages <- strsplit(lineages_str, ";")
-  counts <- as.integer(round(counts))
-  
+  counts <- round(as.numeric(counts))
+
   node_env <- new.env(hash = TRUE, parent = emptyenv())
-  
+
   for (i in seq_along(lineages)) {
     lin <- lineages[[i]]
     cnt <- counts[i]
-    
+
     if (lin[1] == "Unclassified" || cnt == 0) next
-    
+
     for (j in seq_along(lin)) {
       path <- paste(lin[1:j], collapse = ";")
-      
+
       if (exists(path, envir = node_env)) {
         node <- get(path, envir = node_env)
         node$reads_clade <- node$reads_clade + cnt
@@ -40,7 +40,7 @@ build_kreport_tree <- function(lineages_str, counts) {
       }
     }
   }
-  
+
   all_paths <- ls(node_env)
   if (length(all_paths) == 0) {
     return(data.frame(
@@ -50,10 +50,10 @@ build_kreport_tree <- function(lineages_str, counts) {
       stringsAsFactors = FALSE
     ))
   }
-  
+
   nodes_list <- lapply(all_paths, function(p) get(p, envir = node_env))
   nodes_df <- do.call(rbind.data.frame, c(nodes_list, stringsAsFactors = FALSE))
-  
+
   # Depth-first search sorting with abundance tie-breaking
   dfs_order <- function(parent) {
     children <- nodes_df[nodes_df$parent_path == parent, , drop = FALSE]
@@ -66,7 +66,7 @@ build_kreport_tree <- function(lineages_str, counts) {
     }
     res
   }
-  
+
   ordered_paths <- dfs_order("")
   nodes_sorted <- nodes_df[match(ordered_paths, nodes_df$path), ]
   rownames(nodes_sorted) <- NULL
@@ -75,60 +75,60 @@ build_kreport_tree <- function(lineages_str, counts) {
 
 validate_kreport_tree <- function(nodes_df, total_reads, uncl_reads) {
   cl_reads <- total_reads - uncl_reads
-  
+
   # 1. Total reads check
   root_nodes <- nodes_df[nodes_df$parent_path == "", , drop = FALSE]
   sum_root_clade <- sum(root_nodes$reads_clade)
-  
+
   if (sum_root_clade != cl_reads) {
     stop(sprintf("Kreport tree validation error: root clades sum (%d) != total classified reads (%d)",
                  sum_root_clade, cl_reads), call. = FALSE)
   }
-  
+
   if (uncl_reads + sum_root_clade != total_reads) {
     stop(sprintf("Kreport tree validation error: unclassified (%d) + root (%d) != total reads (%d)",
                  uncl_reads, sum_root_clade, total_reads), call. = FALSE)
   }
-  
+
   # 2. Clade = direct + sum(child clades) check
   for (i in seq_len(nrow(nodes_df))) {
     p <- nodes_df$path[i]
     clade_cnt <- nodes_df$reads_clade[i]
     direct_cnt <- nodes_df$reads_taxon[i]
-    
+
     children <- nodes_df[nodes_df$parent_path == p, , drop = FALSE]
     child_sum <- if (nrow(children) > 0) sum(children$reads_clade) else 0L
-    
+
     if (clade_cnt != (direct_cnt + child_sum)) {
       stop(sprintf("Kreport tree validation error at '%s': clade (%d) != direct (%d) + child sum (%d)",
                    p, clade_cnt, direct_cnt, child_sum), call. = FALSE)
     }
   }
-  
+
   invisible(TRUE)
 }
 
 format_kreport_lines <- function(nodes_sorted, total_reads, uncl_reads, taxid_cache = list()) {
   cl_reads <- total_reads - uncl_reads
-  
+
   lines <- character(nrow(nodes_sorted) + 2)
-  
+
   # Line 1: unclassified
-  lines[1] <- sprintf("%.2f\t%d\t%d\tU\t0\tunclassified",
+  lines[1] <- sprintf("%.2f\t%.0f\t%.0f\tU\t0\tunclassified",
                       100 * uncl_reads / total_reads, uncl_reads, uncl_reads)
-  
+
   # Line 2: root
-  lines[2] <- sprintf("%.2f\t%d\t%d\tR\t1\troot",
+  lines[2] <- sprintf("%.2f\t%.0f\t%.0f\tR\t1\troot",
                       100 * cl_reads / total_reads, cl_reads, 0L)
-  
+
   for (i in seq_len(nrow(nodes_sorted))) {
     indent <- strrep("  ", nodes_sorted$depth[i])
     p <- nodes_sorted$path[i]
     taxid <- taxid_cache[[p]]
     if (is.null(taxid)) taxid <- 0L
-    
+
     pct <- 100 * nodes_sorted$reads_clade[i] / total_reads
-    lines[i + 2] <- sprintf("%.2f\t%d\t%d\t%s\t%s\t%s%s",
+    lines[i + 2] <- sprintf("%.2f\t%.0f\t%.0f\t%s\t%s\t%s%s",
                             pct,
                             nodes_sorted$reads_clade[i],
                             nodes_sorted$reads_taxon[i],
@@ -137,6 +137,6 @@ format_kreport_lines <- function(nodes_sorted, total_reads, uncl_reads, taxid_ca
                             indent,
                             nodes_sorted$name[i])
   }
-  
+
   lines
 }

@@ -17,8 +17,11 @@ get_script_dir <- function() {
 script_dir <- get_script_dir()
 repo_root <- normalizePath(dirname(script_dir), winslash = "/", mustWork = FALSE)
 
-# Source all utilities
+# Bootstrap dependency checking before sourcing files that attach packages.
 source(file.path(script_dir, "utils", "dependencies.R"))
+check_dependencies()
+
+# Source all remaining utilities
 source(file.path(script_dir, "utils", "cli.R"))
 source(file.path(script_dir, "utils", "config.R"))
 source(file.path(script_dir, "utils", "io.R"))
@@ -37,21 +40,19 @@ source(file.path(script_dir, "07_kreport_pavian.R"))
 
 start_time <- Sys.time()
 
-# 1. Dependency check
-check_dependencies()
-
-# 2. Parse CLI options
+# 1. Parse CLI options
 cli_opts <- parse_cli_args()
 
-# 3. Load and resolve configuration
+# 2. Load and resolve configuration
 cfg <- tryCatch({
   load_config(cli_opts$config, cli_opts = cli_opts)
 }, error = function(e) {
   cat(sprintf("[FATAL] Configuration error: %s\n", e$message), file = stderr())
   quit(status = 1)
 })
+cfg$pipeline_root <- repo_root
 
-# 4. Build and validate shared context
+# 3. Build and validate shared context
 context <- tryCatch({
   build_context(cfg)
 }, error = function(e) {
@@ -59,32 +60,7 @@ context <- tryCatch({
   quit(status = 1)
 })
 
-# 5. Handle --validate-only
-if (cfg$cli$validate_only) {
-  cat("=== ONT wf-16s Pipeline Validation Check ===\n")
-  cat(sprintf("Config file:      %s\n", cfg$config_file))
-  cat(sprintf("Mode:             %s\n", context$mode))
-  cat(sprintf("Samples (%d):      %s\n", length(context$samples), paste(context$samples, collapse = ", ")))
-  cat(sprintf("Total reads:      %s\n", format(sum(context$sample_stats$TotalReads), big.mark = ",")))
-  cat(sprintf("Classified reads: %s\n", format(sum(context$sample_stats$ClassifiedReads), big.mark = ",")))
-  cat(sprintf("Abundance SHA256: %s\n", context$file_hashes$abundance_table))
-  cat("Validation check PASSED. Zero filesystem mutations performed.\n")
-  quit(status = 0)
-}
-
-# 6. Overwrite check
-if (!cfg$cli$overwrite && file.exists(cfg$output$manifest_file)) {
-  cat(sprintf(
-    "[FATAL] Output file already exists: '%s'\nUse --overwrite to allow replacing existing outputs.\n",
-    cfg$output$manifest_file
-  ), file = stderr())
-  quit(status = 1)
-}
-
-# Create base output directory
-dir.create(cfg$output$base_dir, recursive = TRUE, showWarnings = FALSE)
-
-# Module registry
+# Module registry and request validation must happen before any output mutation.
 module_registry <- list(
   qc          = run_qc,
   alpha       = run_alpha,
@@ -104,6 +80,40 @@ if (length(invalid_modules) > 0) {
   quit(status = 1)
 }
 
+# 4. Handle --validate-only
+if (cfg$cli$validate_only) {
+  cat("=== ONT wf-16s Pipeline Validation Check ===\n")
+  cat(sprintf("Config file:      %s\n", cfg$config_file))
+  cat(sprintf("Mode:             %s\n", context$mode))
+  cat(sprintf("Samples (%d):      %s\n", length(context$samples), paste(context$samples, collapse = ", ")))
+  cat(sprintf("Total reads:      %s\n", format(sum(context$sample_stats$TotalReads), big.mark = ",")))
+  cat(sprintf("Classified reads: %s\n", format(sum(context$sample_stats$ClassifiedReads), big.mark = ",")))
+  cat(sprintf("Abundance SHA256: %s\n", context$file_hashes$abundance_table))
+  cat("Validation check PASSED. Zero filesystem mutations performed.\n")
+  quit(status = 0)
+}
+
+# 5. Overwrite check: protect every known module output, including partial runs
+# that failed before a manifest could be written.
+known_existing <- c(
+  c(cfg$output$manifest_file, cfg$output$resolved_config_file, cfg$output$session_info_file)[
+    file.exists(c(cfg$output$manifest_file, cfg$output$resolved_config_file, cfg$output$session_info_file))
+  ],
+  unlist(lapply(cfg$output$dirs, function(path) {
+    if (dir.exists(path)) list.files(path, recursive = TRUE, full.names = TRUE, all.files = TRUE) else character(0)
+  }), use.names = FALSE)
+)
+if (!cfg$cli$overwrite && length(known_existing) > 0L) {
+  cat(sprintf(
+    "[FATAL] Refusing to overwrite %d existing pipeline output(s); first path: '%s'\nUse --overwrite to allow replacement.\n",
+    length(known_existing), known_existing[1]
+  ), file = stderr())
+  quit(status = 1)
+}
+
+# Create base output directory
+dir.create(cfg$output$base_dir, recursive = TRUE, showWarnings = FALSE)
+
 cat("=============================================================================\n")
 cat(sprintf("ONT wf-16s Amplicon Post-Processing Pipeline\n"))
 cat(sprintf("Project: %s | Mode: %s | Samples: %d\n",
@@ -118,7 +128,7 @@ for (mod_name in requested_modules) {
   cat(sprintf("\n>>> Executing module [%s]...\n", mod_name))
   mod_fn <- module_registry[[mod_name]]
   mod_start <- Sys.time()
-  
+
   mod_res <- tryCatch({
     mod_fn(context)
   }, error = function(e) {
@@ -129,11 +139,13 @@ for (mod_name in requested_modules) {
       outputs = character(0)
     )
   })
-  
+
   mod_end <- Sys.time()
+  mod_res$start_time <- format(mod_start, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+  mod_res$end_time <- format(mod_end, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
   mod_res$duration_seconds <- as.numeric(difftime(mod_end, mod_start, units = "secs"))
   module_results[[mod_name]] <- mod_res
-  
+
   if (mod_res$status == "failed") {
     any_failed <- TRUE
     if (!cfg$cli$keep_going) {
@@ -151,20 +163,20 @@ for (mod_name in requested_modules) {
 end_time <- Sys.time()
 overall_status <- if (any_failed) "failed" else "completed"
 
-# 7. Write session info
-sink(cfg$output$session_info_file)
-cat("=== System & Interpreter ===\n")
-cat(sprintf("R version: %s\n", R.version.string))
-cat(sprintf("Platform:  %s\n", R.version$platform))
-cat(sprintf("Run time:  %s to %s\n\n", start_time, end_time))
-cat("=== Package Versions ===\n")
 deps <- get_dependency_versions()
-for (pkg in names(deps)) {
-  cat(sprintf("  %-15s: %s\n", pkg, deps[[pkg]]))
-}
-cat("\n=== Full sessionInfo() ===\n")
-print(sessionInfo())
-sink()
+session_lines <- c(
+  "=== System & Interpreter ===",
+  sprintf("R version: %s", R.version.string),
+  sprintf("Platform:  %s", R.version$platform),
+  sprintf("Run time:  %s to %s", start_time, end_time),
+  "",
+  "=== Package Versions ===",
+  sprintf("  %-15s: %s", names(deps), deps),
+  "",
+  "=== Full sessionInfo() ===",
+  capture.output(print(sessionInfo()))
+)
+writeLines(session_lines, cfg$output$session_info_file)
 
 # 8. Write resolved config
 yaml::write_yaml(cfg, cfg$output$resolved_config_file)
@@ -194,8 +206,27 @@ input_meta <- list(
     size_bytes = file.info(cfg$taxonomy$cache)$size,
     mtime = as.character(file.info(cfg$taxonomy$cache)$mtime),
     sha256 = context$file_hashes$taxonomy_cache
-  ) else NULL
+  ) else NULL,
+  assignments = if (length(context$assignments) > 0L) {
+    lapply(names(context$assignments), function(sample_id) {
+      path <- context$assignments[[sample_id]]
+      list(
+        sample_id = sample_id,
+        path = path,
+        size_bytes = file.info(path)$size,
+        mtime = as.character(file.info(path)$mtime),
+        sha256 = context$file_hashes[[paste0("assignment_", sample_id)]]
+      )
+    })
+  } else NULL
 )
+
+unresolved_file <- file.path(cfg$output$dirs$kreport, "unresolved_taxids.tsv")
+unresolved_count <- if (file.exists(unresolved_file)) {
+  max(0L, length(readLines(unresolved_file, warn = FALSE)) - 1L)
+} else {
+  NA_integer_
+}
 
 manifest <- list(
   pipeline = "ont-wf16s-postprocess",
@@ -208,8 +239,18 @@ manifest <- list(
   mode = context$mode,
   seed = cfg$seed,
   samples = context$samples,
+  config_file = cfg$config_file,
+  output_root = cfg$output$base_dir,
+  cli = cfg$cli,
   inputs = input_meta,
   modules = module_results,
+  warnings = context$warnings,
+  taxonomy = list(
+    network_mode = cfg$taxonomy$network_mode,
+    unresolved_policy = cfg$taxonomy$unresolved_policy,
+    unresolved_count = unresolved_count
+  ),
+  interpreter = list(r = R.version.string, platform = R.version$platform),
   package_versions = deps
 )
 

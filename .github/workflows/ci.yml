@@ -1,0 +1,28 @@
+name: validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install R dependencies
+        run: Rscript analysis/install_packages.R --install
+      - name: Parse R and Python sources
+        run: |
+          Rscript -e "files <- list.files('analysis', pattern='[.]R$', recursive=TRUE, full.names=TRUE); invisible(lapply(files, parse))"
+          python -m compileall -q analysis tests
+      - name: Run unit and regression tests
+        run: |
+          Rscript tests/testthat.R
+          python -m unittest -v tests/test_ncbi_taxonomy.py
+      - name: Validate the tracked real fixture without writes or network
+        run: Rscript analysis/00_run_pipeline.R --config config.yml --validate-only
+      - name: Check whitespace in the proposed change
+        run: git diff --check "${{ github.event.pull_request.base.sha || github.event.before }}" HEAD

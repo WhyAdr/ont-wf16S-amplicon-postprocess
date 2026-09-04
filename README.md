@@ -6,7 +6,7 @@ Modular, config-driven downstream post-processing, statistical analysis, diversi
 
 ## Architecture & Overview
 
-This repository transforms primary outputs from ONT's Nextflow-based `wf-16s` pipeline into reproducible, publication-ready statistical figures, tables, and Pavian-compatible Kraken reports (`.kreport`).
+This repository transforms primary outputs from ONT's Nextflow-based `wf-16s` pipeline into reproducible statistical figures, tables, and Pavian-compatible Kraken reports (`.kreport`). Treat species-level calls and richness estimates as conditional on the upstream classifier, reference database, and abundance threshold—not as independent validation of organism presence.
 
 ```
 analysis/
@@ -90,7 +90,9 @@ The pipeline supports two execution modes:
   6. Indented scientific name (2 spaces per depth level)
 - **NCBI Taxonomy Resolution**:
   - Offline default (`network_mode: cache_only`): resolves TaxIDs using local `taxonomy_cache.json` without internet requests.
+  - Assignment-derived TaxIDs are written to a run-local resolved cache; an offline run does not mutate the configured source cache.
   - Opt-in refresh (`--refresh-taxonomy`): queries NCBI Entrez E-utilities with bounded exponential backoff, rate pacing, and atomic cache file replacement.
+  - Unresolved and conflicting mappings are exported explicitly. Named nodes with TaxID `0` should be resolved before treating the report as taxonomy-complete in Pavian.
 - **Interactive Sankey Visualization**:
   - Generated `.kreport` files can be uploaded to [Pavian](https://fbreitwieser.shinyapps.io/pavian/) for interactive Sankey and sunburst diagrams.
 
@@ -120,6 +122,18 @@ Rscript analysis/00_run_pipeline.R --config config.yml
 # Override output directory and allow overwrite
 Rscript analysis/00_run_pipeline.R --config config.yml --output-dir output --overwrite
 ```
+
+### Validation
+
+```bash
+Rscript -e "files <- list.files('analysis', pattern='[.]R$', recursive=TRUE, full.names=TRUE); invisible(lapply(files, parse))"
+python -m compileall -q analysis tests
+Rscript tests/testthat.R
+python -m unittest -v tests/test_ncbi_taxonomy.py
+Rscript analysis/00_run_pipeline.R --config config.yml --validate-only
+```
+
+The included cohort fixture is synthetic and verifies software behavior only. It is not biological validation of cohort statistics or species-level classification accuracy. For reproducible publication work, record the wf-16S/database versions and create an `renv.lock` from the R environment used for the final analysis.
 
 ### Command-Line Options
 | Option | Description |

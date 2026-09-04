@@ -48,7 +48,7 @@ if (length(missing_pkgs) > 0) {
     cat(sprintf("\nAttempting installation of %d missing packages...\n", length(missing_pkgs)))
     repos <- "https://cloud.r-project.org"
     install.packages(missing_pkgs, repos = repos)
-    
+
     # Re-verify
     installed_now <- rownames(installed.packages())
     still_missing <- setdiff(REQUIRED_PACKAGES, installed_now)

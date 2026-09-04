@@ -1,239 +1,260 @@
 #!/usr/bin/env python3
-# =============================================================================
-# NCBI Taxonomy Resolver & Cache Manager
-# =============================================================================
+"""Resolve NCBI TaxIDs without mutating the source cache in offline mode."""
 
+import argparse
+import csv
+import hashlib
+import json
 import os
 import sys
-import json
-import argparse
-import time
-import urllib.request
-import urllib.parse
-import xml.etree.ElementTree as ET
 import tempfile
-import hashlib
+import time
+import urllib.parse
+import urllib.request
 from collections import Counter
 
 TOOL_NAME = "ont_wf16s_postprocess"
 
+
 def normalize_abundance_path_to_7(path):
-    """Normalize 8-rank abundance path (omits kingdom) to match 7-rank minimap2 lineage."""
+    """Omit the eight-rank abundance schema's kingdom field."""
     parts = path.split(";")
-    if len(parts) >= 8:
-        # omit rank index 1 (kingdom)
-        return "|".join([parts[0]] + parts[2:8])
-    return "|".join(parts)
+    return "|".join([parts[0]] + parts[2:8]) if len(parts) == 8 else "|".join(parts)
+
 
 def compute_sha256(filepath):
     if not filepath or not os.path.exists(filepath):
         return None
-    h = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        while chunk := f.read(65536):
-            h.update(chunk)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with open(filepath, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def atomic_write_json(path, payload):
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=directory, delete=False, encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            temp_path = handle.name
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def load_cache(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            cache = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read taxonomy cache safely: {exc}") from exc
+    if not isinstance(cache, dict):
+        raise ValueError("Taxonomy cache root must be a JSON object.")
+    for taxon_path, taxid in cache.items():
+        if not isinstance(taxon_path, str) or not isinstance(taxid, int) or isinstance(taxid, bool) or taxid < 0:
+            raise ValueError(f"Invalid cache entry for {taxon_path!r}: expected a non-negative integer TaxID.")
+    return cache
+
+
+def read_abundance_paths(path, tax_column):
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None or tax_column not in reader.fieldnames:
+            raise ValueError(f"Abundance table does not contain tax column {tax_column!r}.")
+        paths = [row[tax_column].strip() for row in reader if row.get(tax_column, "").strip()]
+    return list(dict.fromkeys(paths))
+
+
+def read_assignment_taxids(paths):
+    lineage_to_taxids = {}
+    for path in paths:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.rstrip("\r\n"):
+                    continue
+                fields = line.rstrip("\r\n").split("\t")
+                if len(fields) != 5:
+                    raise ValueError(f"{path}:{line_number}: expected exactly 5 assignment fields.")
+                taxid_text = fields[2].strip()
+                lineage = fields[4].strip()
+                if not taxid_text.isdigit():
+                    raise ValueError(f"{path}:{line_number}: invalid TaxID {taxid_text!r}.")
+                taxid = int(taxid_text)
+                if taxid > 0 and lineage:
+                    lineage_to_taxids.setdefault(lineage, []).append(taxid)
+
+    resolved = {}
+    conflicts = []
+    for lineage in sorted(lineage_to_taxids):
+        counts = Counter(lineage_to_taxids[lineage])
+        maximum = max(counts.values())
+        winner = min(taxid for taxid, count in counts.items() if count == maximum)
+        resolved[lineage] = winner
+        if len(counts) > 1:
+            conflicts.append({
+                "lineage": lineage,
+                "winner_taxid": winner,
+                "counts": {str(key): counts[key] for key in sorted(counts)},
+            })
+    return resolved, conflicts
+
+
+def find_unresolved(abundance_paths, cache):
+    unresolved = {}
+    for path in abundance_paths:
+        if path.startswith("Unclassified;"):
+            continue
+        parts = path.split(";")
+        for depth in range(1, len(parts) + 1):
+            subpath = ";".join(parts[:depth])
+            if cache.get(subpath, 0) <= 0:
+                unresolved[subpath] = {"path": subpath, "depth": depth, "name": parts[depth - 1]}
+    return [unresolved[path] for path in sorted(unresolved)]
+
+
+def query_exact_scientific_name(name, email, api_key, attempts=3):
+    params = {
+        "db": "taxonomy",
+        "term": f'"{name}"[Scientific Name]',
+        "retmode": "json",
+        "tool": TOOL_NAME,
+        "email": email,
+    }
+    if api_key:
+        params["api_key"] = api_key
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(params)
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": f"{TOOL_NAME}/1.0"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            ids = result.get("esearchresult", {}).get("idlist", [])
+            return (min(map(int, ids)) if ids else 0), None
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt + 1 < attempts:
+                time.sleep(2 ** attempt)
+    return 0, last_error
+
+
+def write_unresolved_tsv(path, unresolved):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["Depth", "NodeName", "TaxonPath"])
+        for item in unresolved:
+            writer.writerow([item["depth"], item["name"], item["path"]])
+
+
+def write_conflicts_tsv(path, conflicts):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["Lineage", "WinnerTaxID", "TaxIDCountsJSON"])
+        for item in conflicts:
+            writer.writerow([item["lineage"], item["winner_taxid"], json.dumps(item["counts"], sort_keys=True)])
+
 
 def main():
     parser = argparse.ArgumentParser(description="Resolve NCBI TaxIDs from wf-16s data")
-    parser.add_argument("--abundance", required=True, help="Path to abundance_table_species.tsv")
-    parser.add_argument("--assignments", default=None, help="Path to read assignments TSV")
-    parser.add_argument("--cache", required=True, help="Path to taxonomy_cache.json")
+    parser.add_argument("--abundance", required=True)
+    parser.add_argument("--tax-column", default="tax")
+    parser.add_argument("--assignments", action="append", default=[])
+    parser.add_argument("--cache", required=True, help="Read-only source cache in cache_only mode")
+    parser.add_argument("--resolved-cache", required=True, help="Run-local resolved cache output")
     parser.add_argument("--mode", choices=["cache_only", "refresh"], default="cache_only")
-    parser.add_argument("--email", default=None, help="NCBI Contact Email")
-    parser.add_argument("--api-key", default=None, help="NCBI API Key")
+    parser.add_argument("--email-env", default="NCBI_EMAIL")
+    parser.add_argument("--api-key-env", default="NCBI_API_KEY")
     parser.add_argument("--unresolved-policy", choices=["warn", "error"], default="warn")
-    parser.add_argument("--unresolved-tsv", default=None, help="Path to write unresolved TaxIDs")
-    parser.add_argument("--provenance", default=None, help="Path to write resolver provenance JSON")
+    parser.add_argument("--unresolved-tsv", required=True)
+    parser.add_argument("--conflicts-tsv", required=True)
+    parser.add_argument("--provenance", required=True)
     args = parser.parse_args()
 
-    print(f"[taxonomy] Running in '{args.mode}' mode...")
+    try:
+        if not os.path.exists(args.abundance):
+            raise ValueError(f"Abundance file not found: {args.abundance}")
+        abundance_paths = read_abundance_paths(args.abundance, args.tax_column)
+        cache_sha_before = compute_sha256(args.cache)
+        cache = load_cache(args.cache)
+        assignment_map, conflicts = read_assignment_taxids(args.assignments)
 
-    # 1. Load abundance table lineages
-    if not os.path.exists(args.abundance):
-        print(f"[taxonomy] ERROR: Abundance file not found: {args.abundance}", file=sys.stderr)
-        sys.exit(1)
+        for path in abundance_paths:
+            parts = path.split(";")
+            if len(parts) == 8 and cache.get(path, 0) <= 0:
+                assignment_taxid = assignment_map.get(normalize_abundance_path_to_7(path), 0)
+                if assignment_taxid > 0:
+                    cache[path] = assignment_taxid
 
-    ab_paths = []
-    with open(args.abundance, "r", encoding="utf-8") as f:
-        header = f.readline().strip().split("\t")
-        for line in f:
-            parts = line.strip().split("\t")
-            if parts and parts[0]:
-                ab_paths.append(parts[0])
+        unresolved = find_unresolved(abundance_paths, cache)
+        query_failures = []
+        cache_updated = False
 
-    print(f"[taxonomy] Loaded {len(ab_paths)} lineages from abundance table.")
+        if args.mode == "refresh" and unresolved:
+            email = os.environ.get(args.email_env, "").strip()
+            if not email:
+                raise ValueError(f"Environment variable {args.email_env!r} is required for refresh mode.")
+            api_key = os.environ.get(args.api_key_env, "").strip() or None
+            delay = 0.12 if api_key else 0.35
+            name_results = {}
+            for item in unresolved:
+                name = item["name"]
+                if name not in name_results:
+                    name_results[name] = query_exact_scientific_name(name, email, api_key)
+                    time.sleep(delay)
+                taxid, error = name_results[name]
+                if error:
+                    query_failures.append({"path": item["path"], "name": name, "error": error})
+                elif taxid > 0:
+                    cache[item["path"]] = taxid
 
-    # 2. Parse assignments for normalized lineage -> TaxID mapping
-    lineage_to_taxids = {}
-    if args.assignments and os.path.exists(args.assignments):
-        print(f"[taxonomy] Parsing assignments file: {args.assignments}")
-        with open(args.assignments, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 5:
-                    taxid = parts[2].strip()
-                    lineage = parts[4].strip()
-                    if taxid and taxid != "0" and lineage:
-                        if lineage not in lineage_to_taxids:
-                            lineage_to_taxids[lineage] = []
-                        lineage_to_taxids[lineage].append(taxid)
+            unresolved = find_unresolved(abundance_paths, cache)
+            if not query_failures:
+                atomic_write_json(args.cache, cache)
+                cache_updated = True
 
-    # Resolve conflicts via majority vote
-    resolved_lineage_taxid = {}
-    conflict_records = []
-    for lin, tids in lineage_to_taxids.items():
-        counts = Counter(tids)
-        most_common = counts.most_common()
-        winner = most_common[0][0]
-        resolved_lineage_taxid[lin] = int(winner)
-        if len(most_common) > 1:
-            conflict_records.append({
-                "lineage": lin,
-                "winner_taxid": int(winner),
-                "counts": dict(counts)
-            })
+        atomic_write_json(args.resolved_cache, cache)
+        write_unresolved_tsv(args.unresolved_tsv, unresolved)
+        write_conflicts_tsv(args.conflicts_tsv, conflicts)
 
-    if conflict_records:
-        print(f"[taxonomy] Resolved {len(conflict_records)} multi-TaxID conflicts via majority voting.")
-
-    # 3. Load existing cache
-    cache = {}
-    if os.path.exists(args.cache):
-        try:
-            with open(args.cache, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-            print(f"[taxonomy] Loaded existing cache with {len(cache)} entries.")
-        except Exception as e:
-            print(f"[taxonomy] WARNING: Could not read cache: {e}", file=sys.stderr)
-
-    # 4. In offline mode, identify unresolved nodes
-    unresolved_nodes = []
-    for path in ab_paths:
-        if path.startswith("Unclassified"):
-            continue
-        parts = path.split(";")
-        for j in range(1, len(parts) + 1):
-            subpath = ";".join(parts[:j])
-            current_taxid = cache.get(subpath, 0)
-            if current_taxid == 0:
-                # Try matching from assignments if leaf
-                if j == 8:
-                    norm_7 = normalize_abundance_path_to_7(subpath)
-                    asgn_taxid = resolved_lineage_taxid.get(norm_7)
-                    if asgn_taxid:
-                        cache[subpath] = asgn_taxid
-                        current_taxid = asgn_taxid
-                
-            if current_taxid == 0:
-                unresolved_nodes.append({
-                    "path": subpath,
-                    "depth": j,
-                    "name": parts[j - 1]
-                })
-
-    # De-duplicate unresolved nodes
-    seen_unresolved = set()
-    dedup_unresolved = []
-    for u in unresolved_nodes:
-        if u["path"] not in seen_unresolved:
-            seen_unresolved.add(u["path"])
-            dedup_unresolved.append(u)
-
-    print(f"[taxonomy] Unresolved nodes in cache: {len(dedup_unresolved)}")
-
-    # 5. Refresh mode (if requested and authorized)
-    if args.mode == "refresh" and dedup_unresolved:
-        email = args.email or os.environ.get("NCBI_EMAIL")
-        if not email:
-            print("[taxonomy] ERROR: NCBI_EMAIL environment variable or --email is required for refresh mode.", file=sys.stderr)
-            sys.exit(1)
-        api_key = args.api_key or os.environ.get("NCBI_API_KEY")
-
-        # Collect unique species names to query
-        needed_names = list({u["name"] for u in dedup_unresolved if u["depth"] == 8})
-        print(f"[taxonomy] Querying NCBI for {len(needed_names)} species...")
-
-        # Batch querying NCBI esearch / efetch with bounded retries
-        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-        delay = 0.35 if api_key else 1.0
-
-        for sp_name in needed_names:
-            params = {
-                "db": "taxonomy",
-                "term": sp_name,
-                "retmode": "json",
-                "tool": TOOL_NAME,
-                "email": email
-            }
-            if api_key:
-                params["api_key"] = api_key
-
-            url = f"{base_url}?{urllib.parse.urlencode(params)}"
-            retries = 3
-            found_taxid = 0
-            while retries > 0:
-                try:
-                    req = urllib.request.Request(url, headers={"User-Agent": f"{TOOL_NAME}/1.0"})
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        res_json = json.loads(resp.read().decode("utf-8"))
-                        id_list = res_json.get("esearchresult", {}).get("idlist", [])
-                        if id_list:
-                            found_taxid = int(id_list[0])
-                    break
-                except Exception as ex:
-                    retries -= 1
-                    time.sleep(2.0)
-
-            if found_taxid > 0:
-                for path in ab_paths:
-                    if path.endswith(f";{sp_name}"):
-                        cache[path] = found_taxid
-
-            time.sleep(delay)
-
-        # Atomic write back to cache
-        cache_dir = os.path.dirname(os.path.abspath(args.cache))
-        with tempfile.NamedTemporaryFile("w", dir=cache_dir, delete=False, encoding="utf-8") as tmp_f:
-            json.dump(cache, tmp_f, indent=2)
-            tmp_path = tmp_f.name
-        os.replace(tmp_path, args.cache)
-        print(f"[taxonomy] Successfully updated cache atomically: {args.cache}")
-
-    # 6. Write unresolved TSV
-    if args.unresolved_tsv:
-        os.makedirs(os.path.dirname(os.path.abspath(args.unresolved_tsv)), exist_ok=True)
-        with open(args.unresolved_tsv, "w", encoding="utf-8") as f:
-            f.write("Depth\tNodeName\tTaxonPath\n")
-            for u in dedup_unresolved:
-                f.write(f"{u['depth']}\t{u['name']}\t{u['path']}\n")
-        print(f"[taxonomy] Wrote unresolved nodes to: {args.unresolved_tsv}")
-
-    # 7. Write provenance sidecar
-    if args.provenance:
-        os.makedirs(os.path.dirname(os.path.abspath(args.provenance)), exist_ok=True)
-        prov = {
+        provenance = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "mode": args.mode,
             "tool": TOOL_NAME,
             "abundance_sha256": compute_sha256(args.abundance),
-            "assignments_sha256": compute_sha256(args.assignments) if args.assignments else None,
-            "cache_sha256": compute_sha256(args.cache),
-            "total_lineages": len(ab_paths),
-            "unresolved_count": len(dedup_unresolved),
-            "conflicts_count": len(conflict_records),
-            "conflicts": conflict_records[:50]
+            "assignments_sha256": {path: compute_sha256(path) for path in args.assignments},
+            "source_cache_sha256_before": cache_sha_before,
+            "source_cache_sha256_after": compute_sha256(args.cache),
+            "resolved_cache_sha256": compute_sha256(args.resolved_cache),
+            "source_cache_updated": cache_updated,
+            "total_lineages": len(abundance_paths),
+            "unresolved_count": len(unresolved),
+            "conflicts_count": len(conflicts),
+            "conflicts": conflicts,
+            "query_failures": query_failures,
         }
-        with open(args.provenance, "w", encoding="utf-8") as f:
-            json.dump(prov, f, indent=2)
+        atomic_write_json(args.provenance, provenance)
 
-    # 8. Check policy
-    if args.unresolved_policy == "error" and len(dedup_unresolved) > 0:
-        print(f"[taxonomy] ERROR: unresolved_policy is 'error' and {len(dedup_unresolved)} nodes unresolved.", file=sys.stderr)
-        sys.exit(1)
+        if query_failures:
+            print(f"[taxonomy] ERROR: {len(query_failures)} NCBI query failure(s); source cache preserved.", file=sys.stderr)
+            return 1
+        if args.unresolved_policy == "error" and unresolved:
+            print(f"[taxonomy] ERROR: {len(unresolved)} taxonomy nodes remain unresolved.", file=sys.stderr)
+            return 1
+        print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
+        return 0
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"[taxonomy] ERROR: {exc}", file=sys.stderr)
+        return 1
 
-    print("[taxonomy] Resolution complete.")
-    sys.exit(0)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

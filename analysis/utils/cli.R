@@ -56,7 +56,7 @@ get_cli_parser <- function() {
       help = "Allow overwriting existing output files"
     )
   )
-  
+
   optparse::OptionParser(
     usage = "%prog [options]",
     description = "ONT wf-16s Post-Processing Analytical Pipeline",
