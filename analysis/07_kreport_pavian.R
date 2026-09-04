@@ -61,7 +61,7 @@ run_kreport <- function(context) {
   }
 
   # Run Python script
-  res_code <- system2(python_cmd, args = shQuote(cmd_args))
+  res_code <- system2(python_cmd, args = cmd_args)
   if (res_code != 0) {
     stop(sprintf("NCBI taxonomy resolver failed with exit status %d", res_code), call. = FALSE)
   }

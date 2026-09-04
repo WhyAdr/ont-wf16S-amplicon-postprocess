@@ -101,17 +101,17 @@ run_ordination <- function(context) {
 
     # PCA plot (when at least 2 PCs are identifiable)
     if (max_axes >= 2L) {
-    p_pca <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Group)) +
-      geom_point(size = 3.5, alpha = 0.85) +
-      labs(
-        title = "Hellinger PCA (Classified Relative Abundance)",
-        x = sprintf("PC1 (%.1f%%)", var_exp[1]),
-        y = sprintf("PC2 (%.1f%%)", var_exp[2])
-      ) +
-      theme_amplicon()
+      p_pca <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Group)) +
+        geom_point(size = 3.5, alpha = 0.85) +
+        labs(
+          title = "Hellinger PCA (Classified Relative Abundance)",
+          x = sprintf("PC1 (%.1f%%)", var_exp[1]),
+          y = sprintf("PC2 (%.1f%%)", var_exp[2])
+        ) +
+        theme_amplicon()
 
-    pca_plot_path <- file.path(ord_dir, "05a_pca_plot.png")
-    save_plot(pca_plot_path, p_pca, width = 7, height = 5.5)
+      pca_plot_path <- file.path(ord_dir, "05a_pca_plot.png")
+      save_plot(pca_plot_path, p_pca, width = 7, height = 5.5)
       all_outputs <- c(all_outputs, pca_plot_path)
     }
   }
