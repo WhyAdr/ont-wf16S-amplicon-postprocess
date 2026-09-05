@@ -18,6 +18,17 @@ def changed_paths() -> list[pathlib.PurePosixPath]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    shallow = subprocess.run(
+        [*GIT, "rev-parse", "--is-shallow-repository"],
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    if parent.returncode != 0 and shallow.stdout.strip() == b"true":
+        raise RuntimeError(
+            "HEAD parent is unavailable in a shallow checkout; "
+            "configure checkout fetch-depth >= 2."
+        )
+
     command = [
         *GIT,
         "diff-tree",
