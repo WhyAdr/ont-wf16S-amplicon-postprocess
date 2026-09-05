@@ -80,4 +80,4 @@ jobs:
       - name: Check committed whitespace
         if: runner.os == 'Linux'
         shell: bash
-        run: git show --check --oneline --no-renames HEAD
+        run: git diff-tree --check --root -r --no-commit-id HEAD
