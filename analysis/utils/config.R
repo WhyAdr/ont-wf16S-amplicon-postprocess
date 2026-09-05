@@ -232,6 +232,15 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   raw_yaml <- yaml::read_yaml(config_file_abs)
   default_cfg <- get_default_config()
   cfg <- merge_config(default_cfg, raw_yaml)
+  cli_refresh <- isTRUE(cli_opts$refresh_taxonomy) ||
+    isTRUE(cli_opts[["refresh-taxonomy"]])
+
+  if (identical(cfg$taxonomy$network_mode, "refresh") && !cli_refresh) {
+    stop(paste(
+      "YAML cannot enable taxonomy refresh.",
+      "Keep taxonomy.network_mode: cache_only and pass --refresh-taxonomy explicitly."
+    ), call. = FALSE)
+  }
 
   # CLI overrides
   if (!is.null(cli_opts$output_dir) && nzchar(cli_opts$output_dir)) {
@@ -240,7 +249,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     cfg$output$base_dir <- cli_opts[["output-dir"]]
   }
 
-  if (isTRUE(cli_opts$refresh_taxonomy) || isTRUE(cli_opts[["refresh-taxonomy"]])) {
+  if (cli_refresh) {
     cfg$taxonomy$network_mode <- "refresh"
   }
 
@@ -250,6 +259,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     validate_only = isTRUE(cli_opts$validate_only) || isTRUE(cli_opts[["validate-only"]]),
     keep_going = isTRUE(cli_opts$keep_going) || isTRUE(cli_opts[["keep-going"]]),
     overwrite = isTRUE(cli_opts$overwrite),
+    refresh_taxonomy = cli_refresh,
     modules = if (!is.null(cli_opts$modules) && nzchar(cli_opts$modules)) {
       strsplit(cli_opts$modules, "[, ]+")[[1]]
     } else {

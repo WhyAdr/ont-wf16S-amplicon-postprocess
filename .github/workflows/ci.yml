@@ -4,25 +4,80 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / R ${{ matrix.r }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        r: ['4.5']
+        python: ['3.12']
+
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
       - uses: r-lib/actions/setup-r@v2
         with:
+          r-version: ${{ matrix.r }}
           use-public-rspm: true
-      - name: Install R dependencies
-        run: Rscript analysis/install_packages.R --install
+
+      - name: Install R dependencies with pak
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::yaml
+            any::optparse
+            any::dplyr
+            any::tidyr
+            any::stringr
+            any::ggplot2
+            any::scales
+            any::vegan
+            any::RColorBrewer
+            any::jsonlite
+            any::pheatmap
+            any::UpSetR
+            any::ggrepel
+            any::digest
+            any::processx
+            any::testthat
+          cache-version: 1
+
       - name: Parse R and Python sources
+        shell: bash
         run: |
           Rscript -e "files <- list.files('analysis', pattern='[.]R$', recursive=TRUE, full.names=TRUE); invisible(lapply(files, parse))"
           python -m compileall -q analysis tests
+
       - name: Run unit and regression tests
+        shell: bash
         run: |
           Rscript tests/testthat.R
           python -m unittest -v tests/test_ncbi_taxonomy.py
-      - name: Validate the tracked real fixture without writes or network
-        run: Rscript analysis/00_run_pipeline.R --config config.yml --validate-only
-      - name: Check whitespace in the proposed change
-        run: git diff --check "${{ github.event.pull_request.base.sha || github.event.before }}" HEAD
+
+      - name: Validate without filesystem mutation
+        shell: bash
+        run: |
+          test ! -e "ci validation output"
+          Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci validation output" --validate-only
+          test ! -e "ci validation output"
+
+      - name: Run full release integration
+        shell: bash
+        run: |
+          Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci integration output"
+          Rscript tests/verify_release_run.R "ci integration output"
+
+      - name: Check committed whitespace
+        if: runner.os == 'Linux'
+        shell: bash
+        run: git show --check --oneline --no-renames HEAD

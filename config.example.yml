@@ -2,7 +2,7 @@
 # Example Pipeline Configuration for ONT wf-16s Post-Processing
 # =============================================================================
 schema_version: 1
-project_name: "Cohort_Experiment_Example"
+project_name: "AmbarAyunda_Regression_Template"
 
 # Analysis mode:
 #   - 'auto': automatically selects 'single' for 1 sample, 'cohort' for >=2 samples
@@ -17,9 +17,9 @@ input:
   # Path to wf-16s abundance_table_species.tsv (required)
   abundance_table: "output_AAy/abundance_table_species.tsv"
 
-  # Path to sample metadata TSV (required for cohort mode, optional for single)
-  # Must contain unique 'SampleID' and 'Group' columns
-  metadata: "metadata.example.tsv"
+  # Leave null for the tracked one-sample demonstration. For a real cohort,
+  # provide metadata whose SampleID set exactly matches the abundance columns.
+  metadata: null
 
   # Upstream wf-16s params.json for reading min_len, max_len, abundance_threshold
   params_json: "output_AAy/params.json"
@@ -77,7 +77,8 @@ shared_taxa:
 
 taxonomy:
   cache: "output_AAy/taxonomy_cache.json"
-  network_mode: "cache_only"  # 'cache_only' (offline default) or 'refresh'
+  # YAML is deliberately offline-only. Use --refresh-taxonomy for an online run.
+  network_mode: "cache_only"
   unresolved_policy: "warn"  # 'warn' or 'error'
   email_env: "NCBI_EMAIL"
   api_key_env: "NCBI_API_KEY"

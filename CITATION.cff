@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "ONT wf-16S Amplicon Post-Processing Pipeline"
+authors:
+  - name: "WhyAdr"
+version: 0.1.0
+date-released: 2026-09-05
+license: MIT
+repository-code: "https://github.com/WhyAdr/ont-wf16S-amplicon-postprocess"
+url: "https://github.com/WhyAdr/ont-wf16S-amplicon-postprocess"
+type: software

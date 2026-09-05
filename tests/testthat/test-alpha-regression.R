@@ -5,6 +5,8 @@
 source(file.path("..", "..", "analysis", "utils", "config.R"))
 source(file.path("..", "..", "analysis", "utils", "io.R"))
 source(file.path("..", "..", "analysis", "utils", "metrics.R"))
+source(file.path("..", "..", "analysis", "utils", "plotting.R"))
+source(file.path("..", "..", "analysis", "02_alpha_diversity.R"))
 
 test_that("Real Ambar Ayunda fixture reproduces exact Section 2.3 alpha regression metrics", {
   ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
@@ -61,4 +63,28 @@ test_that("Detected classified taxa count by rank matches Section 2.3 targets", 
   expect_equal(length(unique(tax_df$family)), 281)
   expect_equal(length(unique(tax_df$genus)), 867)
   expect_equal(length(unique(tax_df$species)), 1836)
+})
+
+test_that("Seeded rarefaction resample output is byte-stable", {
+  root <- tempfile("alpha_determinism_")
+  dir.create(root)
+  abundance <- create_temp_abundance(root, n_species = 8, sample_names = "S1")
+
+  run_once <- function(output_name) {
+    cfg <- get_default_config()
+    cfg$input$abundance_table <- abundance
+    cfg$alpha$resample_depth <- 100L
+    cfg$alpha$resample_iterations <- 10L
+    cfg$output$base_dir <- file.path(root, output_name)
+    cfg$output$dirs <- list(alpha = file.path(cfg$output$base_dir, "02_Alpha_Diversity"))
+    run_alpha(build_context(cfg))
+    file.path(cfg$output$dirs$alpha, "rarefaction_resamples.tsv")
+  }
+
+  first <- run_once("first")
+  second <- run_once("second")
+  expect_equal(
+    digest::digest(file = first, algo = "sha256"),
+    digest::digest(file = second, algo = "sha256")
+  )
 })

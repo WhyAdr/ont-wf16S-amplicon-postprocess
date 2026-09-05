@@ -56,3 +56,17 @@ test_that("unknown config keys fail closed", {
   bad <- get_default_config()
   expect_error(merge_config(bad, list(alhpa = list())), "Unknown configuration key.*alhpa")
 })
+
+test_that("taxonomy refresh requires explicit CLI opt-in", {
+  tmp <- tempfile("refresh_config_")
+  dir.create(tmp)
+  cfg <- get_default_config()
+  cfg$taxonomy$network_mode <- "refresh"
+  path <- file.path(tmp, "config.yml")
+  yaml::write_yaml(cfg, path)
+
+  expect_error(load_config(path), "YAML cannot enable taxonomy refresh")
+  resolved <- load_config(path, cli_opts = list(refresh_taxonomy = TRUE))
+  expect_equal(resolved$taxonomy$network_mode, "refresh")
+  expect_true(resolved$cli$refresh_taxonomy)
+})

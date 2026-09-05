@@ -131,3 +131,50 @@ test_that("Under-replicated cohort skips PERMANOVA with explicit reason", {
   expect_equal(perm_df$Status[1], "Skipped")
   expect_match(perm_df$Reason[1], "at least 2 groups with >= 2 samples")
 })
+
+test_that("Cohort distance results are invariant to sample and metadata order", {
+  root <- tempfile("cohort_order_")
+  dir.create(root)
+  samples <- c("Ctrl1", "Ctrl2", "Ctrl3", "Trt1", "Trt2", "Trt3")
+  abundance_a <- create_temp_abundance(root, n_species = 12, sample_names = samples)
+  abundance_df <- read.delim(abundance_a, check.names = FALSE)
+  permuted <- rev(samples)
+  abundance_b <- file.path(root, "synthetic_abundance_permuted.tsv")
+  write.table(
+    abundance_df[, c("tax", permuted, "total")], abundance_b,
+    sep = "\t", row.names = FALSE, quote = FALSE
+  )
+  groups <- c(Ctrl1 = "Control", Ctrl2 = "Control", Ctrl3 = "Control",
+              Trt1 = "Treated", Trt2 = "Treated", Trt3 = "Treated")
+  metadata_a <- create_temp_metadata(root, samples, unname(groups[samples]))
+  metadata_b <- file.path(root, "metadata_permuted.tsv")
+  write.table(
+    data.frame(SampleID = permuted, Group = unname(groups[permuted])), metadata_b,
+    sep = "\t", row.names = FALSE, quote = FALSE
+  )
+
+  run_beta_fixture <- function(abundance, metadata, output_name) {
+    cfg <- get_default_config()
+    cfg$mode <- "cohort"
+    cfg$input$abundance_table <- abundance
+    cfg$input$metadata <- metadata
+    cfg$beta$permutations <- 19L
+    cfg$output$base_dir <- file.path(root, output_name)
+    cfg$output$dirs <- list(beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"))
+    context <- build_context(cfg)
+    expect_equal(run_beta(context)$status, "completed")
+    result <- read.delim(
+      file.path(cfg$output$dirs$beta, "distance_bray.tsv"),
+      check.names = FALSE
+    )
+    result <- result[order(result$SampleID), c("SampleID", sort(samples))]
+    rownames(result) <- NULL
+    result
+  }
+
+  expect_equal(
+    run_beta_fixture(abundance_a, metadata_a, "first"),
+    run_beta_fixture(abundance_b, metadata_b, "second"),
+    tolerance = 1e-12
+  )
+})

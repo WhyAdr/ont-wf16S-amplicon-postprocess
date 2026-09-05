@@ -5,6 +5,7 @@
 suppressMessages({
   library(jsonlite)
   library(dplyr)
+  library(processx)
 })
 
 run_kreport <- function(context) {
@@ -19,6 +20,7 @@ run_kreport <- function(context) {
 
   unresolved_tsv <- file.path(kreport_dir, "unresolved_taxids.tsv")
   conflicts_tsv <- file.path(kreport_dir, "taxonomy_conflicts.tsv")
+  resolution_sources_tsv <- file.path(kreport_dir, "taxonomy_resolution_sources.tsv")
   prov_json <- file.path(kreport_dir, "taxonomy_provenance.json")
   resolved_cache <- file.path(kreport_dir, "resolved_taxonomy_cache.json")
 
@@ -27,19 +29,7 @@ run_kreport <- function(context) {
     stop(sprintf("Taxonomy resolver script not found: '%s'", py_script), call. = FALSE)
   }
 
-  python_candidates <- unname(c(Sys.which("python3"), Sys.which("python")))
-  python_candidates <- python_candidates[nzchar(python_candidates)]
-  python_cmd <- NA_character_
-  for (cand in python_candidates) {
-    status <- suppressWarnings(system2(cand, "--version", stdout = FALSE, stderr = FALSE))
-    if (identical(status, 0L)) {
-      python_cmd <- cand
-      break
-    }
-  }
-  if (is.na(python_cmd) || !nzchar(python_cmd)) {
-    stop("Neither 'python3' nor 'python' was found on PATH.", call. = FALSE)
-  }
+  python_cmd <- find_python()
 
   cmd_args <- c(
     py_script,
@@ -53,6 +43,7 @@ run_kreport <- function(context) {
     "--unresolved-policy", unresolved_policy,
     "--unresolved-tsv", unresolved_tsv,
     "--conflicts-tsv", conflicts_tsv,
+    "--resolution-sources-tsv", resolution_sources_tsv,
     "--provenance", prov_json
   )
   assignment_paths <- unname(unlist(context$assignments, use.names = FALSE))
@@ -60,13 +51,21 @@ run_kreport <- function(context) {
     cmd_args <- c(cmd_args, as.vector(rbind("--assignments", assignment_paths)))
   }
 
-  # Run Python script
-  res_code <- system2(python_cmd, args = cmd_args)
-  if (res_code != 0) {
-    stop(sprintf("NCBI taxonomy resolver failed with exit status %d", res_code), call. = FALSE)
+  # processx passes a true argument vector on Windows and Unix; do not shell-quote.
+  resolver <- processx::run(
+    command = python_cmd,
+    args = cmd_args,
+    echo = TRUE,
+    error_on_status = FALSE
+  )
+  if (!identical(resolver$status, 0L)) {
+    stop(sprintf("NCBI taxonomy resolver failed with exit status %d", resolver$status),
+         call. = FALSE)
   }
 
-  required_resolver_outputs <- c(resolved_cache, unresolved_tsv, conflicts_tsv, prov_json)
+  required_resolver_outputs <- c(
+    resolved_cache, unresolved_tsv, conflicts_tsv, resolution_sources_tsv, prov_json
+  )
   missing_resolver_outputs <- required_resolver_outputs[!file.exists(required_resolver_outputs)]
   if (length(missing_resolver_outputs) > 0L) {
     stop(sprintf("Taxonomy resolver omitted expected output(s): %s",
@@ -77,6 +76,12 @@ run_kreport <- function(context) {
   # Load the run-local cache so assignment-derived TaxIDs are available without
   # mutating the configured source cache in cache_only mode.
   tax_cache <- jsonlite::fromJSON(resolved_cache, simplifyVector = FALSE)
+  source_df <- read.delim(resolution_sources_tsv, check.names = FALSE, stringsAsFactors = FALSE)
+  if (!identical(names(source_df), c("TaxonPath", "TaxID", "ResolutionSource")) ||
+      anyDuplicated(source_df$TaxonPath)) {
+    stop("Invalid taxonomy resolution-source output from resolver.", call. = FALSE)
+  }
+  resolution_sources <- setNames(source_df$ResolutionSource, source_df$TaxonPath)
 
   # Generate .kreport for each sample
   samples <- context$samples
@@ -119,6 +124,7 @@ run_kreport <- function(context) {
         TaxonPath = p,
         TaxID = as.integer(tid),
         Status = if (tid > 0) "Resolved" else "Unresolved",
+        ResolutionSource = unname(resolution_sources[[p]] %||% "unresolved"),
         stringsAsFactors = FALSE
       )
     }

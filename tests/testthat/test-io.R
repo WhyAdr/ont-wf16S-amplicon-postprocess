@@ -126,3 +126,18 @@ test_that("Metadata rejects empty groups", {
   writeLines(c("SampleID\tGroup", "S1\t"), meta_file)
   expect_error(read_metadata_table(meta_file, "S1"), "empty Group")
 })
+
+test_that("Sample IDs reject unsafe names and post-sanitization collisions", {
+  invalid_sets <- list(
+    c("S1", "bad/name"),
+    c("S1", "bad\\name"),
+    c("S1", "."),
+    c("S1", ".."),
+    c("S1", "bad\nname"),
+    c("A B", "A?B")
+  )
+  for (sample_ids in invalid_sets) {
+    expect_error(validate_sample_ids(sample_ids), "Sample ID validation error")
+  }
+  expect_error(validate_sample_ids(c("S1", "")), "Empty or NA")
+})

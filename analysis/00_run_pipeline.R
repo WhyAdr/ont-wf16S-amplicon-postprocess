@@ -16,6 +16,11 @@ get_script_dir <- function() {
 
 script_dir <- get_script_dir()
 repo_root <- normalizePath(dirname(script_dir), winslash = "/", mustWork = FALSE)
+version_file <- file.path(repo_root, "VERSION")
+pipeline_version <- trimws(readLines(version_file, n = 1L, warn = FALSE))
+if (!grepl("^[0-9]+\\.[0-9]+\\.[0-9]+$", pipeline_version)) {
+  stop("VERSION must contain a semantic version such as 0.1.0", call. = FALSE)
+}
 
 # Bootstrap dependency checking before sourcing files that attach packages.
 source(file.path(script_dir, "utils", "dependencies.R"))
@@ -228,8 +233,36 @@ unresolved_count <- if (file.exists(unresolved_file)) {
   NA_integer_
 }
 
+taxonomy_provenance_file <- file.path(cfg$output$dirs$kreport, "taxonomy_provenance.json")
+taxonomy_provenance <- if (file.exists(taxonomy_provenance_file)) {
+  jsonlite::fromJSON(taxonomy_provenance_file, simplifyVector = FALSE)
+} else {
+  NULL
+}
+
+python_cmd <- tryCatch(find_python(), error = function(e) NA_character_)
+python_version <- if (!is.na(python_cmd)) {
+  tryCatch({
+    probe <- processx::run(python_cmd, "--version", error_on_status = FALSE)
+    trimws(paste(c(probe$stdout, probe$stderr), collapse = " "))
+  }, error = function(e) NA_character_)
+} else {
+  NA_character_
+}
+
+git_commit <- tryCatch({
+  result <- processx::run(
+    "git", c("-c", paste0("safe.directory=", repo_root),
+             "-C", repo_root, "rev-parse", "HEAD"),
+    error_on_status = FALSE
+  )
+  if (identical(result$status, 0L)) trimws(result$stdout) else NULL
+}, error = function(e) NULL)
+
 manifest <- list(
   pipeline = "ont-wf16s-postprocess",
+  pipeline_version = pipeline_version,
+  git_commit = git_commit,
   schema_version = cfg$schema_version,
   run_status = overall_status,
   start_time = format(start_time, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
@@ -241,6 +274,7 @@ manifest <- list(
   samples = context$samples,
   config_file = cfg$config_file,
   output_root = cfg$output$base_dir,
+  command = commandArgs(trailingOnly = FALSE),
   cli = cfg$cli,
   inputs = input_meta,
   modules = module_results,
@@ -248,9 +282,15 @@ manifest <- list(
   taxonomy = list(
     network_mode = cfg$taxonomy$network_mode,
     unresolved_policy = cfg$taxonomy$unresolved_policy,
-    unresolved_count = unresolved_count
+    unresolved_count = unresolved_count,
+    conflicts_count = taxonomy_provenance$conflicts_count %||% NA_integer_,
+    resolution_source_counts = taxonomy_provenance$resolution_source_counts %||% NULL
   ),
-  interpreter = list(r = R.version.string, platform = R.version$platform),
+  interpreter = list(
+    r = R.version.string,
+    platform = R.version$platform,
+    python = python_version
+  ),
   package_versions = deps
 )
 

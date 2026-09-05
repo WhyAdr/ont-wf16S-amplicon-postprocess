@@ -256,7 +256,7 @@ shared_taxa:
 
 taxonomy:
   cache: "output_AAy/taxonomy_cache.json"
-  network_mode: "cache_only"  # cache_only or refresh
+  network_mode: "cache_only"  # online refresh requires --refresh-taxonomy
   unresolved_policy: "warn"  # warn or error
   email_env: "NCBI_EMAIL"
   api_key_env: "NCBI_API_KEY"

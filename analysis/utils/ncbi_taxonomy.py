@@ -119,6 +119,19 @@ def find_unresolved(abundance_paths, cache):
     return [unresolved[path] for path in sorted(unresolved)]
 
 
+def iter_taxon_nodes(abundance_paths):
+    """Return every classified lineage node in deterministic path order."""
+    nodes = {}
+    for path in abundance_paths:
+        if path.startswith("Unclassified;"):
+            continue
+        parts = path.split(";")
+        for depth in range(1, len(parts) + 1):
+            subpath = ";".join(parts[:depth])
+            nodes[subpath] = {"path": subpath, "depth": depth, "name": parts[depth - 1]}
+    return [nodes[path] for path in sorted(nodes)]
+
+
 def query_exact_scientific_name(name, email, api_key, attempts=3):
     params = {
         "db": "taxonomy",
@@ -136,13 +149,15 @@ def query_exact_scientific_name(name, email, api_key, attempts=3):
             request = urllib.request.Request(url, headers={"User-Agent": f"{TOOL_NAME}/1.0"})
             with urllib.request.urlopen(request, timeout=15) as response:
                 result = json.loads(response.read().decode("utf-8"))
-            ids = result.get("esearchresult", {}).get("idlist", [])
-            return (min(map(int, ids)) if ids else 0), None
+            ids = sorted({int(taxid) for taxid in result.get("esearchresult", {}).get("idlist", [])})
+            if len(ids) > 1:
+                return 0, None, ids
+            return (ids[0] if ids else 0), None, []
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt + 1 < attempts:
                 time.sleep(2 ** attempt)
-    return 0, last_error
+    return 0, last_error, []
 
 
 def write_unresolved_tsv(path, unresolved):
@@ -163,6 +178,18 @@ def write_conflicts_tsv(path, conflicts):
             writer.writerow([item["lineage"], item["winner_taxid"], json.dumps(item["counts"], sort_keys=True)])
 
 
+def write_resolution_sources_tsv(path, nodes, cache, resolution_sources):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["TaxonPath", "TaxID", "ResolutionSource"])
+        for item in nodes:
+            taxon_path = item["path"]
+            taxid = cache.get(taxon_path, 0)
+            source = resolution_sources.get(taxon_path, "unresolved") if taxid > 0 else "unresolved"
+            writer.writerow([taxon_path, taxid, source])
+
+
 def main():
     parser = argparse.ArgumentParser(description="Resolve NCBI TaxIDs from wf-16s data")
     parser.add_argument("--abundance", required=True)
@@ -176,6 +203,7 @@ def main():
     parser.add_argument("--unresolved-policy", choices=["warn", "error"], default="warn")
     parser.add_argument("--unresolved-tsv", required=True)
     parser.add_argument("--conflicts-tsv", required=True)
+    parser.add_argument("--resolution-sources-tsv", required=True)
     parser.add_argument("--provenance", required=True)
     args = parser.parse_args()
 
@@ -185,6 +213,9 @@ def main():
         abundance_paths = read_abundance_paths(args.abundance, args.tax_column)
         cache_sha_before = compute_sha256(args.cache)
         cache = load_cache(args.cache)
+        resolution_sources = {
+            taxon_path: "source_cache" for taxon_path, taxid in cache.items() if taxid > 0
+        }
         assignment_map, conflicts = read_assignment_taxids(args.assignments)
 
         for path in abundance_paths:
@@ -193,9 +224,11 @@ def main():
                 assignment_taxid = assignment_map.get(normalize_abundance_path_to_7(path), 0)
                 if assignment_taxid > 0:
                     cache[path] = assignment_taxid
+                    resolution_sources[path] = "assignment"
 
         unresolved = find_unresolved(abundance_paths, cache)
         query_failures = []
+        ambiguous_queries = []
         cache_updated = False
 
         if args.mode == "refresh" and unresolved:
@@ -210,11 +243,16 @@ def main():
                 if name not in name_results:
                     name_results[name] = query_exact_scientific_name(name, email, api_key)
                     time.sleep(delay)
-                taxid, error = name_results[name]
+                taxid, error, ambiguous_taxids = name_results[name]
                 if error:
                     query_failures.append({"path": item["path"], "name": name, "error": error})
+                elif ambiguous_taxids:
+                    ambiguous_queries.append({
+                        "path": item["path"], "name": name, "taxids": ambiguous_taxids
+                    })
                 elif taxid > 0:
                     cache[item["path"]] = taxid
+                    resolution_sources[item["path"]] = "ncbi_refresh"
 
             unresolved = find_unresolved(abundance_paths, cache)
             if not query_failures:
@@ -224,6 +262,19 @@ def main():
         atomic_write_json(args.resolved_cache, cache)
         write_unresolved_tsv(args.unresolved_tsv, unresolved)
         write_conflicts_tsv(args.conflicts_tsv, conflicts)
+        taxon_nodes = iter_taxon_nodes(abundance_paths)
+        write_resolution_sources_tsv(
+            args.resolution_sources_tsv, taxon_nodes, cache, resolution_sources
+        )
+        source_counts = Counter(
+            resolution_sources.get(item["path"], "unresolved")
+            if cache.get(item["path"], 0) > 0 else "unresolved"
+            for item in taxon_nodes
+        )
+        source_counts = {
+            label: source_counts.get(label, 0)
+            for label in ("source_cache", "assignment", "ncbi_refresh", "unresolved")
+        }
 
         provenance = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -240,6 +291,8 @@ def main():
             "conflicts_count": len(conflicts),
             "conflicts": conflicts,
             "query_failures": query_failures,
+            "ambiguous_queries": ambiguous_queries,
+            "resolution_source_counts": source_counts,
         }
         atomic_write_json(args.provenance, provenance)
 

@@ -2,6 +2,7 @@
 # Unit Tests: Kraken Report (.kreport) & Taxonomy Resolution
 # =============================================================================
 
+source(file.path("..", "..", "analysis", "utils", "dependencies.R"))
 source(file.path("..", "..", "analysis", "utils", "config.R"))
 source(file.path("..", "..", "analysis", "utils", "io.R"))
 source(file.path("..", "..", "analysis", "utils", "kreport.R"))
@@ -83,4 +84,63 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   # Check kingdom row uses K
   expect_true(any(grepl("\tK\t", lines)))
   expect_false(any(grepl("\tD1\t", lines)))
+
+  unresolved <- read.delim(file.path(cfg$output$dirs$kreport,
+                                     "unresolved_taxids.tsv"),
+                           check.names = FALSE)
+  conflicts <- read.delim(file.path(cfg$output$dirs$kreport,
+                                    "taxonomy_conflicts.tsv"),
+                          check.names = FALSE)
+  expect_equal(nrow(unresolved), 46L)
+  expect_equal(nrow(conflicts), 26L)
+
+  resolution <- read.delim(file.path(cfg$output$dirs$kreport,
+                                     "taxonomy_resolution.tsv"),
+                           check.names = FALSE)
+  expect_true("ResolutionSource" %in% names(resolution))
+  expect_true(all(resolution$ResolutionSource %in%
+                    c("source_cache", "assignment", "ncbi_refresh", "unresolved")))
+})
+
+test_that("kreport resolver handles input and output paths containing spaces", {
+  root <- tempfile("wf16s path with spaces ")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+
+  lineage <- paste(c("Bacteria", "Bacillati", "Bacillota", "Bacilli",
+                     "Bacillales", "Bacillaceae", "Bacillus",
+                     "Bacillus subtilis"), collapse = ";")
+  abundance <- file.path(root, "abundance table.tsv")
+  writeLines(c(
+    "tax\tS1\ttotal",
+    "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown\t1\t1",
+    paste(lineage, "2", "2", sep = "\t")
+  ), abundance)
+
+  assignments <- file.path(root, "read assignments.tsv")
+  writeLines(c(
+    "C\tread1\t1423\t0|1500\tBacteria|Bacillota|Bacilli|Bacillales|Bacillaceae|Bacillus|Bacillus subtilis",
+    "C\tread2\t1423\t1501\tBacteria|Bacillota|Bacilli|Bacillales|Bacillaceae|Bacillus|Bacillus subtilis",
+    "U\tread3\t0\t1490\tUnclassified"
+  ), assignments)
+
+  parts <- strsplit(lineage, ";", fixed = TRUE)[[1]]
+  cache <- setNames(as.list(seq_len(7L)),
+                    vapply(seq_len(7L), function(i) paste(parts[seq_len(i)], collapse = ";"),
+                           character(1)))
+  cache[[lineage]] <- 0L
+  cache_file <- file.path(root, "taxonomy cache.json")
+  jsonlite::write_json(cache, cache_file, auto_unbox = TRUE)
+
+  cfg <- get_default_config()
+  cfg$pipeline_root <- normalizePath(file.path("..", ".."), winslash = "/")
+  cfg$input$abundance_table <- abundance
+  cfg$input$assignments <- list(S1 = assignments)
+  cfg$taxonomy$cache <- cache_file
+  cfg$output$base_dir <- file.path(root, "output directory")
+  cfg$output$dirs <- list(kreport = file.path(cfg$output$base_dir, "07_Kreport"))
+  cfg$cli <- list(modules = "kreport", validate_only = FALSE)
+
+  context <- build_context(cfg)
+  expect_equal(run_kreport(context)$status, "completed")
+  expect_true(file.exists(file.path(cfg$output$dirs$kreport, "S1.kreport")))
 })

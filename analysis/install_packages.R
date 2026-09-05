@@ -10,23 +10,15 @@
 args <- commandArgs(trailingOnly = TRUE)
 do_install <- "--install" %in% args
 
-REQUIRED_PACKAGES <- c(
-  "yaml",
-  "optparse",
-  "dplyr",
-  "tidyr",
-  "stringr",
-  "ggplot2",
-  "scales",
-  "vegan",
-  "RColorBrewer",
-  "jsonlite",
-  "pheatmap",
-  "UpSetR",
-  "ggrepel",
-  "digest",
-  "testthat"
-)
+all_args <- commandArgs(trailingOnly = FALSE)
+file_arg <- grep("^--file=", all_args, value = TRUE)
+script_dir <- if (length(file_arg)) {
+  dirname(normalizePath(sub("^--file=", "", file_arg[1]), winslash = "/"))
+} else {
+  normalizePath("analysis", winslash = "/", mustWork = TRUE)
+}
+source(file.path(script_dir, "utils", "dependencies.R"))
+REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE)
 
 installed <- rownames(installed.packages())
 missing_pkgs <- setdiff(REQUIRED_PACKAGES, installed)
