@@ -8,24 +8,36 @@ import subprocess
 import sys
 
 
-def changed_paths() -> list[pathlib.Path]:
-    git = ["git", "-c", f"safe.directory={pathlib.Path.cwd().resolve().as_posix()}"]
+GIT = ["git", "-c", f"safe.directory={pathlib.Path.cwd().resolve().as_posix()}"]
+
+
+def changed_paths() -> list[pathlib.PurePosixPath]:
     parent = subprocess.run(
-        [*git, "rev-parse", "--verify", "HEAD^"],
+        [*GIT, "rev-parse", "--verify", "HEAD^"],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    command = [*git, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r"]
+    command = [
+        *GIT,
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "--diff-filter=AM",
+        "-z",
+        "-r",
+    ]
     command.extend(["HEAD^", "HEAD"] if parent.returncode == 0 else ["--root", "HEAD"])
     result = subprocess.run(command, check=True, stdout=subprocess.PIPE)
-    return [pathlib.Path(name.decode("utf-8")) for name in result.stdout.split(b"\0") if name]
+    return [pathlib.PurePosixPath(name.decode("utf-8")) for name in result.stdout.split(b"\0") if name]
 
 
-def check_file(path: pathlib.Path) -> list[str]:
-    if not path.is_file():
-        return []
-    data = path.read_bytes()
+def check_file(path: pathlib.PurePosixPath) -> list[str]:
+    data = subprocess.run(
+        [*GIT, "show", f"HEAD:{path.as_posix()}"],
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
     if b"\0" in data:
         return []
 
