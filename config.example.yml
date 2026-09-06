@@ -63,6 +63,10 @@ composition:
   heatmap_rank: "genus"
   heatmap_transform: "log10_relative"
 
+faprotax:
+  # Plot selection only; all non-zero functions remain in the TSV output.
+  top_n_functions: 20
+
 beta:
   distances: ["bray", "jaccard"]
   permutations: 999

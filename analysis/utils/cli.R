@@ -25,7 +25,7 @@ get_cli_parser <- function() {
       type = "character",
       default = NULL,
       dest = "modules",
-      help = "Comma-separated list of modules to run (e.g. qc,alpha,composition,kreport)"
+      help = "Comma-separated list of modules to run (e.g. qc,alpha,composition,kreport,faprotax)"
     ),
     optparse::make_option(
       c("--validate-only"),

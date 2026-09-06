@@ -20,11 +20,38 @@ RUNTIME_PACKAGES <- c(
   "processx"
 )
 
+MODULE_PACKAGES <- list(
+  faprotax = "microeco"
+)
+MICROECO_MIN_VERSION <- "2.3.0"
+
 TEST_PACKAGES <- c("testthat")
 REQUIRED_PACKAGES <- unique(c(RUNTIME_PACKAGES, TEST_PACKAGES))
 
-get_required_packages <- function(include_tests = FALSE) {
-  if (isTRUE(include_tests)) REQUIRED_PACKAGES else RUNTIME_PACKAGES
+get_module_packages <- function(modules) {
+  requested <- intersect(unique(modules), names(MODULE_PACKAGES))
+  unique(unlist(MODULE_PACKAGES[requested], use.names = FALSE))
+}
+
+check_module_dependencies <- function(modules) {
+  pkgs <- get_module_packages(modules)
+  check_dependencies(pkgs)
+
+  if ("faprotax" %in% modules &&
+      utils::compareVersion(as.character(utils::packageVersion("microeco")),
+                            MICROECO_MIN_VERSION) < 0) {
+    stop(sprintf("Module 'faprotax' requires microeco >= %s.", MICROECO_MIN_VERSION),
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+get_required_packages <- function(include_tests = FALSE, include_modules = FALSE) {
+  ans <- if (isTRUE(include_tests)) REQUIRED_PACKAGES else RUNTIME_PACKAGES
+  if (isTRUE(include_modules)) {
+    ans <- unique(c(ans, unlist(MODULE_PACKAGES, use.names = FALSE)))
+  }
+  ans
 }
 
 check_dependencies <- function(pkgs = RUNTIME_PACKAGES) {

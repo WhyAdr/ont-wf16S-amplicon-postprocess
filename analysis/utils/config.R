@@ -92,6 +92,8 @@ validate_config <- function(cfg) {
   if (!cfg$composition$heatmap_transform %in% c("log10_relative", "none")) {
     stop("'composition.heatmap_transform' must be 'log10_relative' or 'none'.", call. = FALSE)
   }
+  assert_scalar_number(cfg$faprotax$top_n_functions, "faprotax.top_n_functions",
+                       lower = 1, integer = TRUE)
   if (!is.character(cfg$beta$distances) || length(cfg$beta$distances) == 0L ||
       any(!cfg$beta$distances %in% c("bray", "jaccard")) || anyDuplicated(cfg$beta$distances)) {
     stop("'beta.distances' must contain unique values drawn from: bray, jaccard.", call. = FALSE)
@@ -182,6 +184,9 @@ get_default_config <- function() {
       top_n_taxa = 15L,
       heatmap_rank = "genus",
       heatmap_transform = "log10_relative"
+    ),
+    faprotax = list(
+      top_n_functions = 20L
     ),
     beta = list(
       distances = c("bray", "jaccard"),
@@ -298,7 +303,8 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     composition = file.path(base_out, "04_Taxa_Composition"),
     ordination = file.path(base_out, "05_Ordination"),
     shared_taxa = file.path(base_out, "06_Shared_Taxa"),
-    kreport = file.path(base_out, "07_Kreport")
+    kreport = file.path(base_out, "07_Kreport"),
+    faprotax = file.path(base_out, "08_FAPROTAX")
   )
 
   cfg$output$manifest_file <- file.path(base_out, "run_manifest.json")

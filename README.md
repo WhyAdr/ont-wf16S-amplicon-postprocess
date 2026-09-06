@@ -20,6 +20,7 @@ analysis/
 ├── 05_ordination.R          # Hellinger PCA & Bray-Curtis NMDS (cohort mode)
 ├── 06_shared_taxa.R         # Core/unique taxa by group prevalence, UpSet plot
 ├── 07_kreport_pavian.R      # Standard Kraken report (.kreport), taxonomy provenance
+├── 08_faprotax.R            # Opt-in FAPROTAX 1.2.12 taxon-based inference
 ├── install_packages.R       # Dependency checker & installer (--install)
 └── utils/                   # Shared data layer, config resolution, metrics, plotting
 ```
@@ -116,6 +117,61 @@ implied.
 | Shared taxa | Excluded |
 | Kraken/Pavian | Included as the first `U` line and in total-read arithmetic |
 
+### FAPROTAX Functional Inference (opt-in)
+
+Request the module explicitly with `--modules faprotax`, or include `faprotax`
+in a comma-separated module list. The default module list is unchanged. The
+module checks the optional `microeco` dependency only when it is requested and
+requires `microeco >= 2.3.0` with its embedded FAPROTAX version exactly
+`1.2.12`. This is FAPROTAX 1.2.12 via microeco, not FAPROTAX2-db, PICRUSt2, or
+a gene/pathway abundance predictor.
+
+Only positive-count Bacteria and Archaea rows enter the mapping. The canonical
+unclassified row and classified non-prokaryotic rows are excluded from mapping
+but retained in the explicit read accounting. Pipeline `superkingdom` is
+passed to microeco as `Kingdom`; the NCBI `kingdom` rank is intentionally
+omitted. Function read counts are the sums of classified taxon counts carrying
+each function, with no rarefaction, copy-number correction, or cross-function
+renormalization. Functions overlap, so their percentages are independent
+fractions and must not be stacked or expected to sum to 100%.
+
+The module writes `08_FAPROTAX/` with the following artifacts:
+
+- `faprotax_function_abundance.tsv`: long `SampleID`, `Function`,
+  `FunctionReadCount`, `PctEligibleProkaryoticReads`, `PctClassifiedReads`,
+  and `PctTotalReads` table. Each percentage uses the denominator named in its
+  column; a zero eligible denominator yields zero percent.
+- `faprotax_mapping_coverage.tsv`: per-sample `TotalReads`,
+  `UnclassifiedReads`, `ClassifiedReads`, `EligibleProkaryoticReads`,
+  `ExcludedNonProkaryoticClassifiedReads`, `FunctionMappedReads`,
+  `FunctionUnmappedEligibleReads`, `EligibleProkaryoticTaxa`, and
+  `FunctionMappedTaxa`. The equations are
+  `ClassifiedReads + UnclassifiedReads = TotalReads`,
+  `EligibleProkaryoticReads + ExcludedNonProkaryoticClassifiedReads = ClassifiedReads`,
+  and `FunctionMappedReads + FunctionUnmappedEligibleReads = EligibleProkaryoticReads`.
+  `FunctionMappedReads` counts each eligible read once when its taxon has at
+  least one function; it is not the sum across overlapping functions.
+  Every function count is bounded by `0 <= FunctionReadCount <=
+  EligibleProkaryoticReads` for its sample.
+- `faprotax_taxon_function_assignments.tsv`: positive mappings with stable
+  `FeatureID` values and the original `TaxonPath`.
+- `faprotax_top_functions.png`: independent bars faceted by sample for the
+  configured top functions; it is not a compositional stack.
+- `faprotax_provenance.json`: package/database versions, method, source,
+  denominator definitions, input filtering, and the overlap warning.
+
+If no positive-count Bacteria or Archaea rows exist, the module writes only
+`faprotax_skipped.tsv` and records a structured `skipped` module result. A
+missing/incompatible microeco installation or embedded database version is a
+failure, not a skip.
+
+These are taxon-based functional assignments/inference. They do not establish
+gene presence, pathway completeness, expression, or activity. Cite the
+original database/software paper: [Louca et al. (2016)](https://doi.org/10.1126/science.aaf4507).
+The tracked-fixture comparison with the official `collapse_table.py` workflow
+is recorded in [faprotax1.2.12-concordance-review.md](faprotax1.2.12-concordance-review.md);
+the two engines must not be treated as byte-for-byte equivalent.
+
 ---
 
 ## Kraken Report & Pavian Interoperability
@@ -211,7 +267,7 @@ project-specific lock until then.
 |---|---|
 | `-c, --config PATH` | Path to YAML config (default: `config.yml`) |
 | `-o, --output-dir PATH` | Override output directory |
-| `-m, --modules LIST` | Comma-separated modules: `qc,alpha,beta,composition,ordination,shared,kreport` |
+| `-m, --modules LIST` | Comma-separated modules: `qc,alpha,beta,composition,ordination,shared,kreport,faprotax` |
 | `--validate-only` | Check config, dependencies, inputs without writing to disk |
 | `--keep-going` | Continue executing remaining modules if one fails |
 | `--refresh-taxonomy` | Enable online NCBI queries to resolve missing TaxIDs |
@@ -227,9 +283,11 @@ Original standalone root scripts (`analyze_16s_improved.R`, `analyze_16s.R`, `co
 
 Version 0.2.0 covers validated NCBI/minimap2/species parsing, exact read accounting, single-sample summaries, synthetically
 tested cohort modules, offline-by-default taxonomy resolution, and Pavian-ready
-Kraken reports. It does not include differential abundance, phylogenetic
-UniFrac, functional prediction, automatic Pavian HTML export, or biological
-validation of cohort statistics or species-level calls.
+Kraken reports. The opt-in FAPROTAX module is an Unreleased feature targeted
+for 0.3.0; it provides taxon-based ecological inference only. The project does
+not include differential abundance, phylogenetic UniFrac, FAPROTAX2-db,
+PICRUSt2, automatic Pavian HTML export, or biological validation of cohort
+statistics or species-level calls.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [CITATION.cff](CITATION.cff)
 for citation metadata. The code is available under the [MIT License](LICENSE).

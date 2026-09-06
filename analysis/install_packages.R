@@ -18,7 +18,7 @@ script_dir <- if (length(file_arg)) {
   normalizePath("analysis", winslash = "/", mustWork = TRUE)
 }
 source(file.path(script_dir, "utils", "dependencies.R"))
-REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE)
+REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE, include_modules = TRUE)
 
 installed <- rownames(installed.packages())
 missing_pkgs <- setdiff(REQUIRED_PACKAGES, installed)

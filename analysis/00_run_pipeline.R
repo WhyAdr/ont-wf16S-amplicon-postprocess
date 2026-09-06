@@ -42,6 +42,7 @@ source(file.path(script_dir, "04_taxa_composition.R"))
 source(file.path(script_dir, "05_ordination.R"))
 source(file.path(script_dir, "06_shared_taxa.R"))
 source(file.path(script_dir, "07_kreport_pavian.R"))
+source(file.path(script_dir, "08_faprotax.R"))
 
 start_time <- Sys.time()
 
@@ -73,7 +74,8 @@ module_registry <- list(
   composition = run_taxa_composition,
   ordination  = run_ordination,
   shared      = run_shared_taxa,
-  kreport     = run_kreport
+  kreport     = run_kreport,
+  faprotax    = run_faprotax
 )
 
 requested_modules <- cfg$cli$modules
@@ -84,6 +86,11 @@ if (length(invalid_modules) > 0) {
               paste(names(module_registry), collapse = ", ")), file = stderr())
   quit(status = 1)
 }
+
+# Optional module dependencies and embedded database checks are performed only
+# for explicitly requested modules, before validate-only and output mutation.
+check_module_dependencies(requested_modules)
+if ("faprotax" %in% requested_modules) invisible(validate_faprotax_runtime())
 
 # 4. Handle --validate-only
 if (cfg$cli$validate_only) {
@@ -181,7 +188,10 @@ for (mod_name in requested_modules) {
 end_time <- Sys.time()
 overall_status <- if (any_failed) "failed" else "completed"
 
-deps <- get_dependency_versions()
+deps <- get_dependency_versions(unique(c(
+  RUNTIME_PACKAGES,
+  get_module_packages(requested_modules)
+)))
 session_lines <- c(
   "=== System & Interpreter ===",
   sprintf("R version: %s", R.version.string),

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Opt-in FAPROTAX 1.2.12 taxon-based functional inference through microeco,
+  with explicit non-exclusive function counts, read-accounting coverage, and
+  provenance outputs. This is targeted for 0.3.0 after the current 0.2.0
+  release is cut.
+
 ## [0.2.0] - Unreleased
 
 ### Added

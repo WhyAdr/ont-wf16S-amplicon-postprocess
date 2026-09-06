@@ -18,7 +18,7 @@ test_that("load_config loads default config.yml and resolves relative paths to c
   expect_true(is.character(cfg$output$base_dir))
   expect_true(nzchar(cfg$output$base_dir))
 
-  # All 7 module directories must be present and derived from base_dir
+  # All module directories must be present and derived from base_dir
   expect_true("qc" %in% names(cfg$output$dirs))
   expect_true("alpha" %in% names(cfg$output$dirs))
   expect_true("beta" %in% names(cfg$output$dirs))
@@ -26,6 +26,7 @@ test_that("load_config loads default config.yml and resolves relative paths to c
   expect_true("ordination" %in% names(cfg$output$dirs))
   expect_true("shared_taxa" %in% names(cfg$output$dirs))
   expect_true("kreport" %in% names(cfg$output$dirs))
+  expect_true("faprotax" %in% names(cfg$output$dirs))
 
   expect_equal(cfg$output$dirs$qc, file.path(cfg$output$base_dir, "01_QC"))
   expect_equal(cfg$output$dirs$alpha, file.path(cfg$output$base_dir, "02_Alpha_Diversity"))
@@ -34,6 +35,9 @@ test_that("load_config loads default config.yml and resolves relative paths to c
   expect_equal(cfg$output$dirs$ordination, file.path(cfg$output$base_dir, "05_Ordination"))
   expect_equal(cfg$output$dirs$shared_taxa, file.path(cfg$output$base_dir, "06_Shared_Taxa"))
   expect_equal(cfg$output$dirs$kreport, file.path(cfg$output$base_dir, "07_Kreport"))
+  expect_equal(cfg$output$dirs$faprotax, file.path(cfg$output$base_dir, "08_FAPROTAX"))
+  expect_equal(cfg$faprotax$top_n_functions, 20L)
+  expect_false("faprotax" %in% cfg$cli$modules)
 })
 
 test_that("CLI --output-dir overrides base_dir and all derived paths", {
