@@ -53,6 +53,30 @@ test_that("bamstats partition rejects missing or non-finite values for status-C 
                "must be finite numbers")
 })
 
+test_that("bamstats partition rejects NA, empty, or mismatched sample_name", {
+  root <- tempfile("bamstats_contract_sample_na_")
+  dir.create(root)
+  reads <- data.frame(status = c("C"), read_id = c("r1"), taxid = c(123), stringsAsFactors = FALSE)
+  con <- gzfile(file.path(root, "bamstats.readstats.tsv.gz"), open = "wt")
+  writeLines(c("name\tsample_name\tiden\tref_coverage", "r1\t\t95\t95"), con)
+  close(con)
+  params <- read_upstream_params(create_temp_params(root))
+  expect_error(
+    partition_minimap2_failures(reads, file.path(root, "bamstats.readstats.tsv.gz"), params, "S1"),
+    "consistently equal"
+  )
+})
+
+test_that("discover_bamstats_files rejects missing or inconsistent sample_names", {
+  root <- tempfile("bamstats_discover_bad_")
+  sub_dir <- file.path(root, "sample.bamstats_results")
+  dir.create(sub_dir, recursive = TRUE)
+  con <- gzfile(file.path(sub_dir, "bamstats.readstats.tsv.gz"), open = "wt")
+  writeLines(c("name\tsample_name\tiden\tref_coverage", "r1\tS1\t95\t95", "r2\tS2\t95\t95"), con)
+  close(con)
+  expect_error(discover_bamstats(root, c("S1", "S2")), "inconsistent sample names")
+})
+
 test_that("Synthetic abundance table parses and validates correctly", {
   tmp <- tempdir()
   ab_file <- create_temp_abundance(tmp, n_species = 5, sample_names = c("S1", "S2"))

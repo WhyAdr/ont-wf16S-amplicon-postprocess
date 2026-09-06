@@ -18,7 +18,8 @@ script_dir <- if (length(file_arg)) {
   normalizePath("analysis", winslash = "/", mustWork = TRUE)
 }
 source(file.path(script_dir, "utils", "dependencies.R"))
-REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE, include_modules = TRUE)
+include_modules <- any(c("--all", "--modules", "--faprotax") %in% args)
+REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE, include_modules = include_modules)
 
 installed <- rownames(installed.packages())
 missing_pkgs <- setdiff(REQUIRED_PACKAGES, installed)

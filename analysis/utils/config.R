@@ -253,10 +253,13 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   }
 
   # CLI overrides
+  cli_output_dir_provided <- FALSE
   if (!is.null(cli_opts$output_dir) && nzchar(cli_opts$output_dir)) {
     cfg$output$base_dir <- cli_opts$output_dir
+    cli_output_dir_provided <- TRUE
   } else if (!is.null(cli_opts[["output-dir"]]) && nzchar(cli_opts[["output-dir"]])) {
     cfg$output$base_dir <- cli_opts[["output-dir"]]
+    cli_output_dir_provided <- TRUE
   }
 
   if (cli_refresh) {
@@ -292,7 +295,8 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   cfg$taxonomy$cache <- resolve_path(cfg$taxonomy$cache, config_dir)
 
   # Resolve base output directory
-  cfg$output$base_dir <- resolve_path(cfg$output$base_dir, config_dir)
+  base_dir_context <- if (cli_output_dir_provided) getwd() else config_dir
+  cfg$output$base_dir <- resolve_path(cfg$output$base_dir, base_dir_context)
 
   # Derive all module output directories
   base_out <- cfg$output$base_dir

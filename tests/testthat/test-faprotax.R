@@ -60,6 +60,7 @@ make_faprotax_context <- function(output_dir, include_prokaryotes = TRUE) {
 }
 
 test_that("embedded FAPROTAX database is exactly 1.2.12", {
+  skip_if_not_installed("microeco")
   runtime <- validate_faprotax_runtime()
   expect_identical(runtime$faprotax_version, "1.2.12")
   expect_true(utils::compareVersion(as.character(utils::packageVersion("microeco")),
@@ -78,6 +79,7 @@ test_that("FAPROTAX input maps superkingdom to Kingdom and excludes non-prokaryo
 })
 
 test_that("FAPROTAX outputs conserve explicit read denominators", {
+  skip_if_not_installed("microeco")
   output_dir <- file.path(tempdir(), "faprotax_contract")
   context <- make_faprotax_context(output_dir)
   result <- run_faprotax(context)
@@ -131,6 +133,7 @@ test_that("FAPROTAX outputs conserve explicit read denominators", {
 })
 
 test_that("FAPROTAX skips cleanly when no positive-count prokaryotes exist", {
+  skip_if_not_installed("microeco")
   output_dir <- file.path(tempdir(), "faprotax_skip")
   result <- run_faprotax(make_faprotax_context(output_dir, include_prokaryotes = FALSE))
 

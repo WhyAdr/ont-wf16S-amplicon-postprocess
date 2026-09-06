@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import gzip
 import hashlib
 import json
 import os
@@ -75,7 +76,8 @@ def read_abundance_paths(path, tax_column):
 def read_assignment_taxids(paths):
     lineage_to_taxids = {}
     for path in paths:
-        with open(path, "r", encoding="utf-8") as handle:
+        opener = gzip.open if str(path).endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if not line.rstrip("\r\n"):
                     continue

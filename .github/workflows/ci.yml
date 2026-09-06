@@ -78,6 +78,8 @@ jobs:
         run: |
           Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci integration output"
           Rscript tests/verify_release_run.R "ci integration output"
+          Rscript analysis/00_run_pipeline.R --config tests/fixtures/synthetic_minimap2/config.yml --output-dir "ci bamstats output"
+          Rscript tests/verify_release_run.R "ci bamstats output"
 
       - name: Check committed whitespace
         if: runner.os == 'Linux'

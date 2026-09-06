@@ -282,9 +282,9 @@ Original standalone root scripts (`analyze_16s_improved.R`, `analyze_16s.R`, `co
 ## Release Scope
 
 Version 0.2.0 covers validated NCBI/minimap2/species parsing, exact read accounting, single-sample summaries, synthetically
-tested cohort modules, offline-by-default taxonomy resolution, and Pavian-ready
-Kraken reports. The opt-in FAPROTAX module is an Unreleased feature targeted
-for 0.3.0; it provides taxon-based ecological inference only. The project does
+tested cohort modules, offline-by-default taxonomy resolution, Pavian-ready
+Kraken reports, and an opt-in FAPROTAX 1.2.12 functional inference module
+(via optional `microeco >= 2.3.0`). The project does
 not include differential abundance, phylogenetic UniFrac, FAPROTAX2-db,
 PICRUSt2, automatic Pavian HTML export, or biological validation of cohort
 statistics or species-level calls.

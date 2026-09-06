@@ -50,6 +50,11 @@ test_that("CLI --output-dir overrides base_dir and all derived paths", {
                normalizePath(override_dir, winslash = "/", mustWork = FALSE))
   expect_equal(cfg$output$dirs$qc, file.path(cfg$output$base_dir, "01_QC"))
   expect_equal(cfg$output$dirs$alpha, file.path(cfg$output$base_dir, "02_Alpha_Diversity"))
+
+  # Relative CLI output_dir must resolve against getwd(), not config directory
+  cfg_rel <- load_config(config_path, cli_opts = list(output_dir = "relative_test_out"))
+  expect_equal(normalizePath(cfg_rel$output$base_dir, winslash = "/", mustWork = FALSE),
+               normalizePath(file.path(getwd(), "relative_test_out"), winslash = "/", mustWork = FALSE))
 })
 
 test_that("load_config errors on missing config file", {

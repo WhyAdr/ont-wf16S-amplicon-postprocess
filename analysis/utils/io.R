@@ -137,12 +137,23 @@ discover_bamstats <- function(root, sample_ids) {
     if (!all(required %in% names(probe)) || nrow(probe) != 1L) {
       stop(sprintf("Invalid bamstats schema or empty file: '%s'", path), call. = FALSE)
     }
-    sample_id <- as.character(probe$sample_name[[1]])
-    if (!sample_id %in% sample_ids) next
-    if (!is.na(mapped[[sample_id]])) {
-      stop(sprintf("Multiple bamstats files discovered for sample '%s'.", sample_id), call. = FALSE)
+    col_classes <- rep("NULL", length(names(probe)))
+    col_classes[which(names(probe) == "sample_name")] <- "character"
+    samples_in_file <- unique(read.delim(gzfile(path), colClasses = col_classes, check.names = FALSE,
+                                         stringsAsFactors = FALSE)[[1]])
+    if (length(samples_in_file) == 0L || anyNA(samples_in_file) || any(!nzchar(trimws(samples_in_file)))) {
+      stop(sprintf("Bamstats file '%s' contains missing or empty sample_name values.", path), call. = FALSE)
     }
-    mapped[[sample_id]] <- normalizePath(path, winslash = "/", mustWork = TRUE)
+    if (length(samples_in_file) > 1L) {
+      stop(sprintf("Bamstats file '%s' contains inconsistent sample names: %s",
+                   path, paste(samples_in_file, collapse = ", ")), call. = FALSE)
+    }
+    file_sample <- samples_in_file[[1]]
+    if (!file_sample %in% sample_ids) next
+    if (!is.na(mapped[[file_sample]])) {
+      stop(sprintf("Multiple bamstats files discovered for sample '%s'.", file_sample), call. = FALSE)
+    }
+    mapped[[file_sample]] <- normalizePath(path, winslash = "/", mustWork = TRUE)
   }
   missing <- names(mapped)[is.na(mapped)]
   if (length(missing)) {
@@ -164,7 +175,8 @@ partition_minimap2_failures <- function(reads, bamstats_path, params, sample_id)
     stop(sprintf("Bamstats read names for '%s' must be non-empty and unique.", sample_id),
          call. = FALSE)
   }
-  if (any(as.character(stats$sample_name) != sample_id)) {
+  sample_col <- as.character(stats$sample_name)
+  if (anyNA(sample_col) || any(!nzchar(trimws(sample_col))) || any(sample_col != sample_id)) {
     stop(sprintf("Bamstats sample_name does not consistently equal '%s'.", sample_id),
          call. = FALSE)
   }
