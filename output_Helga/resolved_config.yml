@@ -1,0 +1,65 @@
+schema_version: 1
+project_name: Helga_16SrRNA_NCBI
+mode: single
+seed: 42
+input:
+  abundance_table: D:/W/AAy_Amplicon/wf-16s_Helga16SrRNA/output/abundance_table_species.tsv
+  params_json: D:/W/AAy_Amplicon/wf-16s_Helga16SrRNA/output/params.json
+  tax_column: tax
+  aggregate_columns: total
+  assignments:
+    Helga-16SrRNA-NCBI: D:/W/AAy_Amplicon/wf-16s_Helga16SrRNA/output/reads_assignments/Helga-16SrRNA-NCBI_lineages.minimap2.assignments.tsv
+output:
+  base_dir: D:/W/AAy_Amplicon/output_Helga
+  dirs:
+    qc: D:/W/AAy_Amplicon/output_Helga/01_QC
+    alpha: D:/W/AAy_Amplicon/output_Helga/02_Alpha_Diversity
+    beta: D:/W/AAy_Amplicon/output_Helga/03_Beta_Diversity
+    composition: D:/W/AAy_Amplicon/output_Helga/04_Taxa_Composition
+    ordination: D:/W/AAy_Amplicon/output_Helga/05_Ordination
+    shared_taxa: D:/W/AAy_Amplicon/output_Helga/06_Shared_Taxa
+    kreport: D:/W/AAy_Amplicon/output_Helga/07_Kreport
+  manifest_file: D:/W/AAy_Amplicon/output_Helga/run_manifest.json
+  resolved_config_file: D:/W/AAy_Amplicon/output_Helga/resolved_config.yml
+  session_info_file: D:/W/AAy_Amplicon/output_Helga/session_info.txt
+qc:
+  display_min_length: 1200
+  display_max_length: 1800
+alpha:
+  rarefaction_points: 25
+  resample_depth: 50000
+  resample_fraction_cap: 0.9
+  resample_iterations: 100
+composition:
+  top_n_taxa: 15
+  heatmap_rank: genus
+  heatmap_transform: log10_relative
+beta:
+  distances:
+  - bray
+  - jaccard
+  permutations: 999
+  minimum_count: 1
+  resampling:
+    enabled: no
+    iterations: 100
+    depth_fraction_of_minimum: 0.75
+shared_taxa:
+  rank: species
+  minimum_count: 1
+  group_prevalence: 0.5
+taxonomy:
+  cache: D:/W/AAy_Amplicon/output_AAy/taxonomy_cache.json
+  network_mode: cache_only
+  unresolved_policy: warn
+  email_env: NCBI_EMAIL
+  api_key_env: NCBI_API_KEY
+cli:
+  validate_only: no
+  keep_going: no
+  overwrite: yes
+  refresh_taxonomy: no
+  modules: kreport
+config_file: D:/W/AAy_Amplicon/config_helga.yml
+config_dir: D:/W/AAy_Amplicon
+pipeline_root: D:/W/AAy_Amplicon
