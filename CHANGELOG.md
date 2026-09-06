@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.0] - Unreleased
+
+### Added
+
+- Exact per-sample read accounting with a three-way diagnostic donut.
+- Optional one-to-one bamstats joins for identity-only, reference-coverage-only,
+  and dual-threshold minimap2 failures.
+- Classified-only richness summaries for singleton and low-count tails.
+- Structured upstream producer-contract and bamstats provenance.
+
+### Fixed
+
+- Preserve the single-sample unclassified count in composition outputs instead
+  of producing `NA` and a misleading 100%-classified plot.
+- Reject unsupported Kraken2, SILVA, non-species, and custom-reference contracts
+  before classifier-specific assignment parsing.
+
+### Documentation
+
+- State each module's treatment of unclassified reads and the evidentiary limit
+  of low-count richness summaries.
+
 ## [0.1.0] - 2026-09-05
 
 ### Added

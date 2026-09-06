@@ -93,6 +93,10 @@ if (cfg$cli$validate_only) {
   cat(sprintf("Samples (%d):      %s\n", length(context$samples), paste(context$samples, collapse = ", ")))
   cat(sprintf("Total reads:      %s\n", format(sum(context$sample_stats$TotalReads), big.mark = ",")))
   cat(sprintf("Classified reads: %s\n", format(sum(context$sample_stats$ClassifiedReads), big.mark = ",")))
+  cat(sprintf("Upstream:         %s / %s / rank %s\n",
+              context$upstream_contract$classifier,
+              context$upstream_contract$database_set,
+              context$upstream_contract$taxonomic_rank))
   cat(sprintf("Abundance SHA256: %s\n", context$file_hashes$abundance_table))
   cat("Validation check PASSED. Zero filesystem mutations performed.\n")
   quit(status = 0)
@@ -133,9 +137,17 @@ for (mod_name in requested_modules) {
   cat(sprintf("\n>>> Executing module [%s]...\n", mod_name))
   mod_fn <- module_registry[[mod_name]]
   mod_start <- Sys.time()
+  module_warnings <- character(0)
 
   mod_res <- tryCatch({
-    mod_fn(context)
+    withCallingHandlers(
+      mod_fn(context),
+      warning = function(w) {
+        module_warnings <<- c(module_warnings, conditionMessage(w))
+        cat(sprintf("WARNING in module [%s]: %s\n", mod_name, conditionMessage(w)), file = stderr())
+        invokeRestart("muffleWarning")
+      }
+    )
   }, error = function(e) {
     cat(sprintf("ERROR in module [%s]: %s\n", mod_name, e$message), file = stderr())
     list(
@@ -149,6 +161,7 @@ for (mod_name in requested_modules) {
   mod_res$start_time <- format(mod_start, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
   mod_res$end_time <- format(mod_end, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
   mod_res$duration_seconds <- as.numeric(difftime(mod_end, mod_start, units = "secs"))
+  mod_res$warnings <- unique(module_warnings)
   module_results[[mod_name]] <- mod_res
 
   if (mod_res$status == "failed") {
@@ -223,6 +236,18 @@ input_meta <- list(
         sha256 = context$file_hashes[[paste0("assignment_", sample_id)]]
       )
     })
+  } else NULL,
+  bamstats = if (any(!is.na(context$bamstats))) {
+    lapply(names(context$bamstats)[!is.na(context$bamstats)], function(sample_id) {
+      path <- context$bamstats[[sample_id]]
+      list(
+        sample_id = sample_id,
+        path = path,
+        size_bytes = file.info(path)$size,
+        mtime = as.character(file.info(path)$mtime),
+        sha256 = context$file_hashes[[paste0("bamstats_", sample_id)]]
+      )
+    })
   } else NULL
 )
 
@@ -277,8 +302,12 @@ manifest <- list(
   command = commandArgs(trailingOnly = FALSE),
   cli = cfg$cli,
   inputs = input_meta,
+  upstream_contract = context$upstream_contract,
   modules = module_results,
-  warnings = context$warnings,
+  warnings = unique(c(
+    context$warnings,
+    unlist(lapply(module_results, function(x) x$warnings %||% character(0)), use.names = FALSE)
+  )),
   taxonomy = list(
     network_mode = cfg$taxonomy$network_mode,
     unresolved_policy = cfg$taxonomy$unresolved_policy,
