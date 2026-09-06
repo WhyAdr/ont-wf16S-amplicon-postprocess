@@ -13,19 +13,14 @@ run_qc <- function(context) {
   qc_dir <- cfg$output$dirs$qc
   assignments_map <- context$assignments
 
-  if (is.null(assignments_map) || length(assignments_map) == 0) {
-    return(list(
-      status = "skipped",
-      reason = "No assignments mapping configured in input.assignments",
-      outputs = character(0)
-    ))
-  }
-
   dir.create(qc_dir, recursive = TRUE, showWarnings = FALSE)
 
   all_outputs <- character(0)
   reconciliation_rows <- list()
   length_summary_rows <- list()
+  accounting_rows <- list()
+  investigation_rows <- list()
+  median_or_na <- function(x) if (length(x)) stats::median(x) else NA_real_
 
   # Target lengths from params.json or config fallbacks
   min_len_target <- if (!is.null(context$params$min_len)) {
@@ -44,18 +39,34 @@ run_qc <- function(context) {
 
   for (sample_id in context$samples) {
     asgn_path <- assignments_map[[sample_id]]
-    if (is.null(asgn_path) || !file.exists(asgn_path)) {
-      next
-    }
-
-    sample_out_dir <- file.path(qc_dir, sanitize_filename(sample_id))
-    dir.create(sample_out_dir, recursive = TRUE, showWarnings = FALSE)
-
     # Expected counts from abundance context
     stat_row <- context$sample_stats[context$sample_stats$SampleID == sample_id, ]
     exp_total <- stat_row$TotalReads[1]
     exp_class <- stat_row$ClassifiedReads[1]
     exp_unclass <- stat_row$UnclassifiedReads[1]
+    assignment_available <- !is.null(asgn_path) && file.exists(asgn_path)
+    accounting_rows[[sample_id]] <- data.frame(
+      SampleID = sample_id, AssignmentAvailable = assignment_available,
+      AbundanceTotal = exp_total, AbundanceClassified = exp_class,
+      AbundanceUnclassified = exp_unclass, RawC = NA_integer_, RawU = NA_integer_,
+      C_TaxID0 = NA_integer_, TaxID_GT0 = NA_integer_,
+      EffectiveClassifiedPct = 100 * exp_class / exp_total,
+      C0ShareOfEffectiveUnclassifiedPct = NA_real_, stringsAsFactors = FALSE
+    )
+    investigation_rows[[sample_id]] <- data.frame(
+      SampleID = sample_id, AssignmentAvailable = assignment_available,
+      BamstatsAvailable = FALSE, MedianClassifiedLength = NA_real_,
+      MedianC0Length = NA_real_, MedianRawULength = NA_real_,
+      MinPercentIdentity = context$params$min_percent_identity,
+      MinRefCoverage = context$params$min_ref_coverage,
+      BamstatsC0Matched = NA_integer_, IdentityOnlyFailed = NA_integer_,
+      RefCoverageOnlyFailed = NA_integer_, BothFailed = NA_integer_,
+      stringsAsFactors = FALSE
+    )
+    if (!assignment_available) next
+
+    sample_out_dir <- file.path(qc_dir, sanitize_filename(sample_id))
+    dir.create(sample_out_dir, recursive = TRUE, showWarnings = FALSE)
 
     reads <- context$assignment_data[[sample_id]]
     if (is.null(reads)) {
@@ -73,6 +84,28 @@ run_qc <- function(context) {
     n_qc_reclass <- sum(reads$status == "C" & reads$taxid == 0)
     n_eff_class <- sum(reads$effective_classified)
     n_eff_unclass <- sum(!reads$effective_classified)
+    accounting_rows[[sample_id]][c("RawC", "RawU", "C_TaxID0", "TaxID_GT0")] <-
+      list(n_status_C, n_status_U, n_qc_reclass, n_eff_class)
+    accounting_rows[[sample_id]]$C0ShareOfEffectiveUnclassifiedPct <- if (exp_unclass > 0) {
+      100 * n_qc_reclass / exp_unclass
+    } else {
+      NA_real_
+    }
+    investigation_rows[[sample_id]]$MedianClassifiedLength <-
+      median_or_na(reads$read_length[reads$effective_classified])
+    investigation_rows[[sample_id]]$MedianC0Length <-
+      median_or_na(reads$read_length[reads$status == "C" & reads$taxid == 0])
+    investigation_rows[[sample_id]]$MedianRawULength <-
+      median_or_na(reads$read_length[reads$status == "U"])
+
+    bamstats_path <- context$bamstats[[sample_id]]
+    if (!is.na(bamstats_path)) {
+      partition <- partition_minimap2_failures(reads, bamstats_path, context$params, sample_id)
+      investigation_rows[[sample_id]]$BamstatsAvailable <- TRUE
+      investigation_rows[[sample_id]][c(
+        "BamstatsC0Matched", "IdentityOnlyFailed", "RefCoverageOnlyFailed", "BothFailed"
+      )] <- list(partition$matched, partition$identity_only, partition$coverage_only, partition$both)
+    }
 
     # 1. Reconciliation Table Row
     reconciliation_rows[[sample_id]] <- data.frame(
@@ -96,6 +129,39 @@ run_qc <- function(context) {
       ifelse(reads$status == "C" & reads$taxid == 0, "QC-filtered", "Never aligned")
     )
     reads$effective_status <- ifelse(reads$effective_classified, "Classified", "Unclassified")
+
+    accounting_plot <- data.frame(
+      Category = factor(c("Raw U", "C + TaxID 0", "TaxID > 0"),
+                        levels = c("Raw U", "C + TaxID 0", "TaxID > 0")),
+      Count = c(n_status_U, n_qc_reclass, n_eff_class)
+    ) %>%
+      mutate(Fraction = Count / sum(Count),
+             Label = sprintf("%s\n%s (%.1f%%)", Category, scales::comma(Count), 100 * Fraction))
+    p0a <- ggplot(accounting_plot, aes(x = 3, y = Count, fill = Category)) +
+      geom_col(width = 1, color = "white", linewidth = 1.2) +
+      coord_polar(theta = "y") +
+      xlim(c(1, 4)) +
+      geom_text(data = accounting_plot[accounting_plot$Count > 0, , drop = FALSE],
+                aes(x = 3.5, label = Label),
+                position = position_stack(vjust = 0.5), size = 3.1) +
+      annotate("text", x = 1, y = 0,
+               label = sprintf("%s\nreads", scales::comma(exp_total)),
+               size = 4.2, fontface = "bold") +
+      scale_fill_manual(
+        values = c("Raw U" = "#bdbdbd", "C + TaxID 0" = "#e6ab02", "TaxID > 0" = "#1b9e77"),
+        labels = c(
+          "Raw U" = "Never aligned/classified against the reference",
+          "C + TaxID 0" = "Aligned, then failed identity and/or reference-coverage QC",
+          "TaxID > 0" = "Effectively classified; included in classified denominators"
+        )
+      ) +
+      theme_void() +
+      labs(title = sprintf("Exact Read Accounting: %s", sample_id), fill = NULL) +
+      theme(legend.position = "bottom",
+            plot.title = element_text(face = "bold", hjust = 0.5, size = 13))
+    p0a_path <- file.path(sample_out_dir, "00a_read_accounting_donut.png")
+    save_plot(p0a_path, p0a, width = 7.5, height = 6)
+    all_outputs <- c(all_outputs, p0a_path)
 
     for (cat_name in c("All", "Classified", "Unclassified", "QC-filtered")) {
       sub_lens <- if (cat_name == "All") {
@@ -238,6 +304,32 @@ run_qc <- function(context) {
   }
 
   # Export summary TSVs
+  accounting_df <- do.call(rbind, accounting_rows)
+  stopifnot(all(accounting_df$AbundanceClassified + accounting_df$AbundanceUnclassified ==
+                  accounting_df$AbundanceTotal))
+  available <- accounting_df$AssignmentAvailable
+  stopifnot(all(accounting_df$RawC[available] + accounting_df$RawU[available] ==
+                  accounting_df$AbundanceTotal[available]))
+  stopifnot(all(accounting_df$RawU[available] + accounting_df$C_TaxID0[available] ==
+                  accounting_df$AbundanceUnclassified[available]))
+  stopifnot(all(accounting_df$TaxID_GT0[available] == accounting_df$AbundanceClassified[available]))
+  accounting_file <- file.path(qc_dir, "00_read_accounting.tsv")
+  write.table(accounting_df, accounting_file, sep = "\t", row.names = FALSE, quote = FALSE)
+  all_outputs <- c(all_outputs, accounting_file)
+
+  investigation_df <- do.call(rbind, investigation_rows)
+  with_bamstats <- investigation_df$BamstatsAvailable
+  stopifnot(all(
+    investigation_df$BamstatsC0Matched[with_bamstats] ==
+      investigation_df$IdentityOnlyFailed[with_bamstats] +
+      investigation_df$RefCoverageOnlyFailed[with_bamstats] +
+      investigation_df$BothFailed[with_bamstats]
+  ))
+  investigation_file <- file.path(qc_dir, "00_read_investigation.tsv")
+  write.table(investigation_df, investigation_file, sep = "\t", row.names = FALSE, quote = FALSE,
+              na = "NA")
+  all_outputs <- c(all_outputs, investigation_file)
+
   reconciliation_file <- file.path(qc_dir, "classification_reconciliation.tsv")
   if (length(reconciliation_rows) > 0) {
     write.table(do.call(rbind, reconciliation_rows), reconciliation_file,

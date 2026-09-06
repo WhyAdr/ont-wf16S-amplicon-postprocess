@@ -65,6 +65,20 @@ test_that("Detected classified taxa count by rank matches Section 2.3 targets", 
   expect_equal(length(unique(tax_df$species)), 1836)
 })
 
+test_that("Ambar richness overview exposes the exact low-count tail", {
+  ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
+  skip_if_not(file.exists(ab_path), "Real abundance table not found")
+  parsed <- read_abundance_table(ab_path)
+  class_matrix <- parsed$count_matrix[-parsed$unclass_index, , drop = FALSE]
+  observed <- build_richness_overview(class_matrix, parsed$samples)
+  expect_equal(observed$ClassifiedReads, 80556)
+  expect_equal(observed$PositiveTaxa, 1836)
+  expect_equal(observed$SingletonTaxa, 735)
+  expect_equal(observed$TaxaLeq10, 1399)
+  expect_equal(observed$ReadsInTaxaLeq10, 3456)
+  expect_equal(observed$ReadsInTaxaLeq10Pct, 4.2901832265753, tolerance = 1e-10)
+})
+
 test_that("Seeded rarefaction resample output is byte-stable", {
   root <- tempfile("alpha_determinism_")
   dir.create(root)

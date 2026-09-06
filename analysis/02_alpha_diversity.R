@@ -10,6 +10,26 @@ suppressMessages({
   library(vegan)
 })
 
+build_richness_overview <- function(class_matrix, samples) {
+  do.call(rbind, lapply(samples, function(sample_id) {
+    positive <- class_matrix[, sample_id][class_matrix[, sample_id] > 0]
+    classified_reads <- sum(positive)
+    singleton_taxa <- sum(positive == 1)
+    low_count <- positive[positive <= 10]
+    data.frame(
+      SampleID = sample_id,
+      ClassifiedReads = classified_reads,
+      PositiveTaxa = length(positive),
+      SingletonTaxa = singleton_taxa,
+      SingletonPct = 100 * singleton_taxa / length(positive),
+      TaxaLeq10 = length(low_count),
+      ReadsInTaxaLeq10 = sum(low_count),
+      ReadsInTaxaLeq10Pct = 100 * sum(low_count) / classified_reads,
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
 run_alpha <- function(context) {
   cfg <- context$config
   alpha_dir <- cfg$output$dirs$alpha
@@ -54,6 +74,11 @@ run_alpha <- function(context) {
   alpha_tsv <- file.path(alpha_dir, "alpha_diversity.tsv")
   write.table(alpha_wide, alpha_tsv, sep = "\t", row.names = FALSE, quote = FALSE)
   all_outputs <- c(all_outputs, alpha_tsv)
+
+  richness_overview <- build_richness_overview(class_matrix, samples)
+  richness_tsv <- file.path(alpha_dir, "02_richness_overview.tsv")
+  write.table(richness_overview, richness_tsv, sep = "\t", row.names = FALSE, quote = FALSE)
+  all_outputs <- c(all_outputs, richness_tsv)
 
   # 2. Analytical Rarefaction Curves
   rare_curve_records <- list()
