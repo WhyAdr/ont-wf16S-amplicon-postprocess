@@ -83,7 +83,7 @@ stopifnot(identical(accounting$SampleID, "AmbarAyunda_minimap2_16S"))
 stopifnot(accounting$AbundanceTotal == 114056L)
 stopifnot(accounting$RawC == 89809L, accounting$RawU == 24247L)
 stopifnot(accounting$C_TaxID0 == 9253L, accounting$TaxID_GT0 == 80556L)
-stopifnot(abs(accounting$EffectiveClassifiedPct - 70.62756540647) < 1e-10)
+stopifnot(abs(accounting$EffectiveClassifiedPct - 70.6284632110542) < 1e-10)
 stopifnot(abs(accounting$C0ShareOfEffectiveUnclassifiedPct - 27.62089552239) < 1e-10)
 
 investigation <- read.delim(file.path(root, "01_QC/00_read_investigation.tsv"), check.names = FALSE)

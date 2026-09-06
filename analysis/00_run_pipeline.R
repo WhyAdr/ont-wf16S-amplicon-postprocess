@@ -323,7 +323,7 @@ manifest <- list(
   package_versions = deps
 )
 
-jsonlite::write_json(manifest, cfg$output$manifest_file, pretty = TRUE, auto_unbox = TRUE)
+jsonlite::write_json(manifest, cfg$output$manifest_file, pretty = TRUE, auto_unbox = TRUE, null = "null")
 
 cat("\n=============================================================================\n")
 cat(sprintf("Pipeline finished with status: [%s]\n", toupper(overall_status)))
