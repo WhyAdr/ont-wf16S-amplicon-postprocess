@@ -72,3 +72,30 @@ create_temp_metadata <- function(dir, sample_names = c("Sample1", "Sample2"), gr
   write.table(df, file_path, sep = "\t", row.names = FALSE, quote = FALSE)
   file_path
 }
+
+create_temp_params <- function(dir, classifier = "minimap2",
+                               database_set = "ncbi_16s_18s", taxonomic_rank = "S") {
+  path <- file.path(dir, "params.json")
+  database_sets <- list()
+  database_sets[[database_set]] <- list(taxonomy = "new_taxdump_2025-01-01.zip")
+  jsonlite::write_json(list(
+    classifier = classifier, database_set = database_set,
+    taxonomic_rank = taxonomic_rank, min_len = 1300, max_len = 1700,
+    min_read_qual = 10, min_percent_identity = 90, min_ref_coverage = 90,
+    abundance_threshold = 1, taxonomy = NULL, reference = NULL,
+    ref2taxid = NULL, database = NULL, database_sets = database_sets,
+    output_unclassified = TRUE, include_read_assignments = TRUE,
+    wf = list(agent = "epi2melabs/test")
+  ), path, auto_unbox = TRUE, pretty = TRUE, null = "null")
+  path
+}
+
+create_temp_bamstats <- function(dir, sample_id, data) {
+  path <- file.path(dir, "bamstats.readstats.tsv.gz")
+  data$sample_name <- sample_id
+  con <- gzfile(path, open = "wt")
+  on.exit(close(con), add = TRUE)
+  write.table(data[, c("name", "sample_name", "iden", "ref_coverage")], con,
+              sep = "\t", row.names = FALSE, quote = FALSE)
+  path
+}

@@ -31,7 +31,10 @@ run_taxa_composition <- function(context) {
 
   # Total and classified read denominators per sample
   sample_totals <- colSums(count_matrix)
-  unclass_counts <- count_matrix[unclass_idx, ]
+  unclass_counts <- stats::setNames(
+    context$sample_stats$UnclassifiedReads,
+    context$sample_stats$SampleID
+  )
   class_totals <- sample_totals - unclass_counts
 
   # Classified rows

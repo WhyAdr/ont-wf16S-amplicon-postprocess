@@ -10,7 +10,7 @@ rscript <- Sys.which("Rscript")
 
 write_process_config <- function(root, sample_names = "S1", mode = "auto",
                                  metadata = NULL, assignments = NULL,
-                                 unresolved_policy = "warn") {
+                                 unresolved_policy = "warn", classifier = "minimap2") {
   abundance <- create_temp_abundance(root, n_species = 3, sample_names = sample_names)
   cache <- file.path(root, "taxonomy cache.json")
   jsonlite::write_json(list(), cache, auto_unbox = TRUE)
@@ -18,7 +18,9 @@ write_process_config <- function(root, sample_names = "S1", mode = "auto",
   cfg$mode <- mode
   cfg$input$abundance_table <- normalizePath(abundance, winslash = "/")
   cfg$input$metadata <- metadata
-  cfg$input$params_json <- NULL
+  cfg$input$params_json <- normalizePath(
+    create_temp_params(root, classifier = classifier), winslash = "/"
+  )
   cfg$input$assignments <- assignments
   cfg$taxonomy$cache <- normalizePath(cache, winslash = "/")
   cfg$taxonomy$unresolved_policy <- unresolved_policy
@@ -90,6 +92,21 @@ test_that("invalid modules, assignments, and metadata return non-zero", {
   expect_gt(invalid_metadata$status, 0L)
   expect_match(invalid_metadata$stderr, "Metadata SampleID mismatch")
 })
+test_that("Kraken2 is rejected from params before assignment schema parsing", {
+  root <- tempfile("kraken_contract_")
+  dir.create(root)
+  bad_assignment <- file.path(root, "six_field.tsv")
+  writeLines("C\tread1\t123\t1500\tA:1\tBacteria", bad_assignment)
+  config <- write_process_config(
+    root, assignments = list(S1 = normalizePath(bad_assignment, winslash = "/")),
+    classifier = "kraken2"
+  )
+  result <- run_pipeline_process(c("--config", config, "--validate-only"), tempdir())
+  expect_gt(result$status, 0L)
+  expect_match(result$stderr, "supports minimap2 only")
+  expect_false(grepl("expected exactly 5", result$stderr))
+})
+
 
 test_that("keep-going records failure, executes later modules, and exits non-zero", {
   root <- tempfile("keep_going_")

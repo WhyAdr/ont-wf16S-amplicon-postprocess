@@ -73,6 +73,7 @@ test_that("Seeded rarefaction resample output is byte-stable", {
   run_once <- function(output_name) {
     cfg <- get_default_config()
     cfg$input$abundance_table <- abundance
+    cfg$input$params_json <- create_temp_params(root)
     cfg$alpha$resample_depth <- 100L
     cfg$alpha$resample_iterations <- 10L
     cfg$output$base_dir <- file.path(root, output_name)

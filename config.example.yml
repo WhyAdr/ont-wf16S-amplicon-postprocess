@@ -21,8 +21,11 @@ input:
   # provide metadata whose SampleID set exactly matches the abundance columns.
   metadata: null
 
-  # Upstream wf-16s params.json for reading min_len, max_len, abundance_threshold
+  # Required producer contract and threshold provenance
   params_json: "output_AAy/params.json"
+
+  # Optional root for per-sample bamstats.readstats.tsv.gz discovery (null in CI)
+  wf16s_output_root: null
 
   # Column name containing 8-rank lineage strings
   tax_column: "tax"

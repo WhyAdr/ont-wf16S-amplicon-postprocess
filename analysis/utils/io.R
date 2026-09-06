@@ -20,6 +20,187 @@ sanitize_filename <- function(s) {
   gsub("[^A-Za-z0-9_.-]", "_", s)
 }
 
+SUPPORTED_NCBI_DATABASE_SETS <- c("ncbi_16s_18s", "ncbi_16s_18s_28s_ITS")
+
+read_upstream_params <- function(path) {
+  if (is.null(path) || !nzchar(path) || !file.exists(path)) {
+    stop("input.params_json is required and must identify an existing wf-16s params.json.",
+         call. = FALSE)
+  }
+  params <- tryCatch(
+    jsonlite::fromJSON(path, simplifyVector = FALSE),
+    error = function(e) stop(sprintf("Could not parse params.json '%s': %s", path, e$message),
+                             call. = FALSE)
+  )
+  required <- c("classifier", "database_set", "taxonomic_rank", "min_len", "max_len",
+                "min_read_qual", "min_percent_identity", "min_ref_coverage",
+                "abundance_threshold")
+  missing <- required[vapply(required, function(x) is.null(params[[x]]), logical(1))]
+  if (length(missing)) {
+    stop(sprintf("params.json is missing required contract field(s): %s",
+                 paste(missing, collapse = ", ")), call. = FALSE)
+  }
+  scalar_string <- function(field) {
+    value <- params[[field]]
+    if (!is.character(value) || length(value) != 1L || is.na(value) || !nzchar(value)) {
+      stop(sprintf("params.json field '%s' must be one non-empty string.", field), call. = FALSE)
+    }
+    value
+  }
+  classifier <- scalar_string("classifier")
+  database_set <- scalar_string("database_set")
+  taxonomic_rank <- scalar_string("taxonomic_rank")
+  if (!identical(classifier, "minimap2")) {
+    stop(sprintf(
+      "Unsupported wf-16s classifier '%s'. v0.2.0 supports minimap2 only; Kraken2/Bracken requires a classifier-specific denominator model.",
+      classifier
+    ), call. = FALSE)
+  }
+  if (!database_set %in% SUPPORTED_NCBI_DATABASE_SETS) {
+    stop(sprintf(
+      "Unsupported wf-16s database_set '%s'. v0.2.0 supports the bundled NCBI database sets only.",
+      database_set
+    ), call. = FALSE)
+  }
+  if (!identical(taxonomic_rank, "S")) {
+    stop(sprintf("Unsupported wf-16s taxonomic_rank '%s'; expected species rank 'S'.",
+                 taxonomic_rank), call. = FALSE)
+  }
+  override_fields <- c("taxonomy", "reference", "ref2taxid", "database")
+  active_overrides <- override_fields[vapply(override_fields, function(field) {
+    value <- params[[field]]
+    !is.null(value) && length(value) > 0L && !all(is.na(value)) && any(nzchar(as.character(value)))
+  }, logical(1))]
+  if (length(active_overrides)) {
+    stop(sprintf("Custom wf-16s reference/taxonomy overrides are unsupported: %s",
+                 paste(active_overrides, collapse = ", ")), call. = FALSE)
+  }
+  numeric_fields <- c("min_len", "max_len", "min_read_qual", "min_percent_identity",
+                      "min_ref_coverage", "abundance_threshold")
+  for (field in numeric_fields) {
+    value <- params[[field]]
+    if (!is.numeric(value) || length(value) != 1L || is.na(value) || !is.finite(value)) {
+      stop(sprintf("params.json field '%s' must be one finite number.", field), call. = FALSE)
+    }
+  }
+  if (params$min_len <= 0 || params$max_len <= params$min_len || params$min_read_qual < 0 ||
+      params$min_percent_identity < 0 || params$min_percent_identity > 100 ||
+      params$min_ref_coverage < 0 || params$min_ref_coverage > 100 ||
+      params$abundance_threshold < 0) {
+    stop("params.json contains an invalid length, quality, identity, coverage, or abundance threshold.",
+         call. = FALSE)
+  }
+  params
+}
+
+extract_upstream_contract <- function(params) {
+  database_meta <- params$database_sets[[params$database_set]]
+  list(
+    workflow_name = "epi2me-labs/wf-16s",
+    workflow_version = NULL,
+    workflow_revision = NULL,
+    wf_agent = params$wf$agent %||% NULL,
+    classifier = params$classifier,
+    database_set = params$database_set,
+    taxonomy_namespace = "NCBI",
+    database_taxonomy_source = database_meta$taxonomy %||% NULL,
+    taxonomic_rank = params$taxonomic_rank,
+    min_len = params$min_len,
+    max_len = params$max_len,
+    min_read_qual = params$min_read_qual,
+    min_percent_identity = params$min_percent_identity,
+    min_ref_coverage = params$min_ref_coverage,
+    abundance_threshold = params$abundance_threshold,
+    output_unclassified = params$output_unclassified %||% NULL,
+    include_read_assignments = params$include_read_assignments %||% NULL
+  )
+}
+
+discover_bamstats <- function(root, sample_ids) {
+  mapped <- stats::setNames(rep(NA_character_, length(sample_ids)), sample_ids)
+  if (is.null(root)) return(mapped)
+  if (!dir.exists(root)) {
+    stop(sprintf("Configured input.wf16s_output_root does not exist: '%s'", root), call. = FALSE)
+  }
+  candidates <- sort(list.files(
+    root, pattern = "^bamstats[.]readstats[.]tsv[.]gz$",
+    recursive = TRUE, full.names = TRUE
+  ))
+  if (!length(candidates)) {
+    message(sprintf("[INFO] No bamstats.readstats.tsv.gz found under '%s'.", root))
+    return(mapped)
+  }
+  for (path in candidates) {
+    probe <- read.delim(gzfile(path), nrows = 1L, check.names = FALSE,
+                        stringsAsFactors = FALSE)
+    required <- c("name", "sample_name", "iden", "ref_coverage")
+    if (!all(required %in% names(probe)) || nrow(probe) != 1L) {
+      stop(sprintf("Invalid bamstats schema or empty file: '%s'", path), call. = FALSE)
+    }
+    sample_id <- as.character(probe$sample_name[[1]])
+    if (!sample_id %in% sample_ids) next
+    if (!is.na(mapped[[sample_id]])) {
+      stop(sprintf("Multiple bamstats files discovered for sample '%s'.", sample_id), call. = FALSE)
+    }
+    mapped[[sample_id]] <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  }
+  missing <- names(mapped)[is.na(mapped)]
+  if (length(missing)) {
+    message(sprintf("[INFO] No bamstats file mapped for sample(s): %s",
+                    paste(missing, collapse = ", ")))
+  }
+  mapped
+}
+
+partition_minimap2_failures <- function(reads, bamstats_path, params, sample_id) {
+  stats <- read.delim(gzfile(bamstats_path), check.names = FALSE,
+                      stringsAsFactors = FALSE)
+  required <- c("name", "sample_name", "iden", "ref_coverage")
+  if (!all(required %in% names(stats))) {
+    stop(sprintf("Bamstats for '%s' lacks required columns: %s", sample_id,
+                 paste(setdiff(required, names(stats)), collapse = ", ")), call. = FALSE)
+  }
+  if (anyNA(stats$name) || any(!nzchar(stats$name)) || anyDuplicated(stats$name)) {
+    stop(sprintf("Bamstats read names for '%s' must be non-empty and unique.", sample_id),
+         call. = FALSE)
+  }
+  if (any(as.character(stats$sample_name) != sample_id)) {
+    stop(sprintf("Bamstats sample_name does not consistently equal '%s'.", sample_id),
+         call. = FALSE)
+  }
+  stats$iden <- suppressWarnings(as.numeric(stats$iden))
+  stats$ref_coverage <- suppressWarnings(as.numeric(stats$ref_coverage))
+  if (any(!is.finite(stats$iden)) || any(!is.finite(stats$ref_coverage))) {
+    stop(sprintf("Bamstats identity/coverage values for '%s' must be finite numbers.", sample_id),
+         call. = FALSE)
+  }
+  c_reads <- reads[reads$status == "C", , drop = FALSE]
+  matched <- match(c_reads$read_id, stats$name)
+  if (anyNA(matched)) {
+    stop(sprintf("Bamstats is missing %d status-C read(s) for '%s'.",
+                 sum(is.na(matched)), sample_id), call. = FALSE)
+  }
+  aligned <- stats[matched, , drop = FALSE]
+  identity_failed <- aligned$iden < params$min_percent_identity
+  coverage_failed <- aligned$ref_coverage < params$min_ref_coverage
+  positive <- c_reads$taxid > 0
+  c0 <- !positive
+  if (any(identity_failed[positive] | coverage_failed[positive])) {
+    stop(sprintf("At least one TaxID>0 read for '%s' fails the recorded thresholds.", sample_id),
+         call. = FALSE)
+  }
+  if (any(!identity_failed[c0] & !coverage_failed[c0])) {
+    stop(sprintf("At least one C+TaxID0 read for '%s' passes both recorded thresholds.", sample_id),
+         call. = FALSE)
+  }
+  list(
+    matched = sum(c0),
+    identity_only = sum(c0 & identity_failed & !coverage_failed),
+    coverage_only = sum(c0 & !identity_failed & coverage_failed),
+    both = sum(c0 & identity_failed & coverage_failed)
+  )
+}
+
 validate_sample_ids <- function(sample_ids) {
   if (length(sample_ids) == 0) {
     stop("Abundance table validation error: No sample columns detected.", call. = FALSE)
@@ -378,7 +559,11 @@ read_metadata_table <- function(path, selected_samples) {
 }
 
 build_context <- function(cfg) {
-  # 1. Read abundance table
+  # 1. Fail closed on the producer contract before parsing classifier-specific files.
+  params <- read_upstream_params(cfg$input$params_json)
+  upstream_contract <- extract_upstream_contract(params)
+
+  # 2. Read abundance table
   ab_res <- read_abundance_table(
     path = cfg$input$abundance_table,
     tax_col = cfg$input$tax_column,
@@ -400,7 +585,7 @@ build_context <- function(cfg) {
     stringsAsFactors = FALSE
   )
 
-  # 2. Mode resolution
+  # 3. Mode resolution
   configured_mode <- cfg$mode
   resolved_mode <- if (configured_mode == "auto") {
     if (length(selected_samples) == 1) "single" else "cohort"
@@ -418,14 +603,14 @@ build_context <- function(cfg) {
                  length(selected_samples)), call. = FALSE)
   }
 
-  # 3. Read metadata
+  # 4. Read metadata
   metadata <- read_metadata_table(cfg$input$metadata, selected_samples)
 
   if (resolved_mode == "cohort" && is.null(metadata)) {
     stop("Cohort mode requires a metadata table mapping SampleID to Group.", call. = FALSE)
   }
 
-  # 4. Assignments mapping
+  # 5. Assignments mapping
   assignments_map <- cfg$input$assignments
   if (!is.null(assignments_map) && !is.list(assignments_map)) {
     stop("Config 'input.assignments' must be a mapping of SampleID -> path or null.", call. = FALSE)
@@ -465,13 +650,10 @@ build_context <- function(cfg) {
     }
   }
 
-  # 5. Read params.json if available
-  params <- NULL
-  if (!is.null(cfg$input$params_json) && file.exists(cfg$input$params_json)) {
-    params <- suppressWarnings(tryCatch(jsonlite::fromJSON(cfg$input$params_json), error = function(e) NULL))
-  }
+  # 6. Optional per-sample bamstats discovery
+  bamstats <- discover_bamstats(cfg$input$wf16s_output_root, selected_samples)
 
-  # 6. File hashes
+  # 7. File hashes
   file_hashes <- list(
     abundance_table = compute_file_hash(cfg$input$abundance_table),
     metadata = compute_file_hash(cfg$input$metadata),
@@ -482,6 +664,9 @@ build_context <- function(cfg) {
     for (s in names(assignments_map)) {
       file_hashes[[paste0("assignment_", s)]] <- compute_file_hash(assignments_map[[s]])
     }
+  }
+  for (s in names(bamstats)[!is.na(bamstats)]) {
+    file_hashes[[paste0("bamstats_", s)]] <- compute_file_hash(bamstats[[s]])
   }
 
   list(
@@ -495,7 +680,9 @@ build_context <- function(cfg) {
     metadata = metadata,
     assignments = assignments_map,
     assignment_data = assignment_data,
+    bamstats = bamstats,
     params = params,
+    upstream_contract = upstream_contract,
     file_hashes = file_hashes,
     warnings = character(0)
   )

@@ -60,6 +60,7 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   cfg$config_dir <- normalizePath(file.path("..", ".."), winslash = "/")
   cfg$pipeline_root <- cfg$config_dir
   cfg$input$abundance_table <- ab_path
+  cfg$input$params_json <- file.path("..", "..", "output_AAy", "params.json")
   cfg$taxonomy$cache <- cache_path
   cfg$input$assignments <- list(AmbarAyunda_minimap2_16S = asgn_path)
   cfg$output$base_dir <- out_dir
@@ -134,6 +135,7 @@ test_that("kreport resolver handles input and output paths containing spaces", {
   cfg <- get_default_config()
   cfg$pipeline_root <- normalizePath(file.path("..", ".."), winslash = "/")
   cfg$input$abundance_table <- abundance
+  cfg$input$params_json <- create_temp_params(root)
   cfg$input$assignments <- list(S1 = assignments)
   cfg$taxonomy$cache <- cache_file
   cfg$output$base_dir <- file.path(root, "output directory")

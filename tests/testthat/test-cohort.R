@@ -17,6 +17,7 @@ test_that("Single-sample context skips beta, ordination, and shared_taxa gracefu
 
   cfg <- get_default_config()
   cfg$input$abundance_table <- ab_file
+  cfg$input$params_json <- create_temp_params(tmp)
   cfg$output$base_dir <- file.path(tmp, "out_single")
   cfg$output$dirs <- list(
     beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"),
@@ -55,6 +56,7 @@ test_that("Synthetic cohort (2 groups x 3 replicates) passes cohort gates and pa
   cfg$mode <- "cohort"
   cfg$input$abundance_table <- ab_file
   cfg$input$metadata <- meta_file
+  cfg$input$params_json <- create_temp_params(tmp)
   cfg$output$base_dir <- file.path(tmp, "out_cohort")
   cfg$output$dirs <- list(
     alpha = file.path(cfg$output$base_dir, "02_Alpha_Diversity"),
@@ -105,6 +107,7 @@ test_that("Forced cohort mode rejects a one-sample table", {
   cfg$mode <- "cohort"
   cfg$input$abundance_table <- ab_file
   cfg$input$metadata <- meta_file
+  cfg$input$params_json <- create_temp_params(tmp)
   expect_error(build_context(cfg), "at least 2")
 })
 
@@ -119,6 +122,7 @@ test_that("Under-replicated cohort skips PERMANOVA with explicit reason", {
   cfg$mode <- "cohort"
   cfg$input$abundance_table <- ab_file
   cfg$input$metadata <- meta_file
+  cfg$input$params_json <- create_temp_params(tmp)
   cfg$output$base_dir <- file.path(tmp, "out_underrep")
   cfg$output$dirs <- list(beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"))
 
@@ -158,6 +162,7 @@ test_that("Cohort distance results are invariant to sample and metadata order", 
     cfg$mode <- "cohort"
     cfg$input$abundance_table <- abundance
     cfg$input$metadata <- metadata
+    cfg$input$params_json <- create_temp_params(root)
     cfg$beta$permutations <- 19L
     cfg$output$base_dir <- file.path(root, output_name)
     cfg$output$dirs <- list(beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"))

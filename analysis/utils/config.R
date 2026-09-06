@@ -37,8 +37,12 @@ validate_config <- function(cfg) {
   assert_scalar_number(cfg$seed, "seed", lower = 0, integer = TRUE)
 
   assert_nonempty_string(cfg$input$abundance_table, "input.abundance_table")
+  assert_nonempty_string(cfg$input$params_json, "input.params_json")
   assert_nonempty_string(cfg$input$tax_column, "input.tax_column")
   assert_nonempty_string(cfg$output$base_dir, "output.base_dir")
+  if (!is.null(cfg$input$wf16s_output_root)) {
+    assert_nonempty_string(cfg$input$wf16s_output_root, "input.wf16s_output_root")
+  }
   if (!is.null(cfg$input$aggregate_columns) &&
       (!is.character(cfg$input$aggregate_columns) || anyNA(cfg$input$aggregate_columns) ||
        any(!nzchar(cfg$input$aggregate_columns)) || anyDuplicated(cfg$input$aggregate_columns))) {
@@ -153,6 +157,7 @@ get_default_config <- function() {
       abundance_table = "output_AAy/abundance_table_species.tsv",
       metadata = NULL,
       params_json = "output_AAy/params.json",
+      wf16s_output_root = NULL,
       tax_column = "tax",
       aggregate_columns = c("total"),
       include_samples = NULL,
@@ -271,6 +276,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   cfg$input$abundance_table <- resolve_path(cfg$input$abundance_table, config_dir)
   cfg$input$metadata <- resolve_path(cfg$input$metadata, config_dir)
   cfg$input$params_json <- resolve_path(cfg$input$params_json, config_dir)
+  cfg$input$wf16s_output_root <- resolve_path(cfg$input$wf16s_output_root, config_dir)
 
   if (!is.null(cfg$input$assignments) && is.list(cfg$input$assignments)) {
     for (s in names(cfg$input$assignments)) {

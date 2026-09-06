@@ -2,7 +2,39 @@
 # Unit Tests: Shared Data Layer & I/O Validation
 # =============================================================================
 
+source(file.path("..", "..", "analysis", "utils", "config.R"))
 source(file.path("..", "..", "analysis", "utils", "io.R"))
+
+test_that("producer contract accepts supported minimap2 and rejects unsafe alternatives", {
+  root <- tempfile("params_contract_")
+  dir.create(root)
+  supported <- read_upstream_params(create_temp_params(root))
+  expect_equal(supported$classifier, "minimap2")
+  expect_error(read_upstream_params(create_temp_params(root, classifier = "kraken2")),
+               "supports minimap2 only")
+  expect_error(read_upstream_params(create_temp_params(root, database_set = "SILVA_138_1")),
+               "bundled NCBI database sets only")
+  expect_error(read_upstream_params(create_temp_params(root, taxonomic_rank = "G")),
+               "expected species rank")
+})
+
+test_that("bamstats partition is one-to-one and conserves all C0 reads", {
+  root <- tempfile("bamstats_contract_")
+  dir.create(root)
+  reads <- data.frame(
+    status = c("C", "C", "C", "C"),
+    read_id = c("positive", "identity", "coverage", "both"),
+    taxid = c(123, 0, 0, 0), stringsAsFactors = FALSE
+  )
+  bamstats <- create_temp_bamstats(root, "S1", data.frame(
+    name = reads$read_id, iden = c(95, 89, 95, 89),
+    ref_coverage = c(95, 95, 89, 89)
+  ))
+  params <- read_upstream_params(create_temp_params(root))
+  observed <- partition_minimap2_failures(reads, bamstats, params, "S1")
+  expect_equal(unlist(observed), c(matched = 3, identity_only = 1,
+                                   coverage_only = 1, both = 1))
+})
 
 test_that("Synthetic abundance table parses and validates correctly", {
   tmp <- tempdir()
