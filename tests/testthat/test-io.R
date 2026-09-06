@@ -22,18 +22,35 @@ test_that("bamstats partition is one-to-one and conserves all C0 reads", {
   root <- tempfile("bamstats_contract_")
   dir.create(root)
   reads <- data.frame(
-    status = c("C", "C", "C", "C"),
-    read_id = c("positive", "identity", "coverage", "both"),
-    taxid = c(123, 0, 0, 0), stringsAsFactors = FALSE
+    status = c("C", "C", "C", "C", "U"),
+    read_id = c("positive", "identity", "coverage", "both", "raw_u"),
+    taxid = c(123, 0, 0, 0, 0), stringsAsFactors = FALSE
   )
   bamstats <- create_temp_bamstats(root, "S1", data.frame(
-    name = reads$read_id, iden = c(95, 89, 95, 89),
-    ref_coverage = c(95, 95, 89, 89)
+    name = reads$read_id, iden = c(95, 89, 95, 89, NaN),
+    ref_coverage = c(95, 95, 89, 89, NaN)
   ))
   params <- read_upstream_params(create_temp_params(root))
   observed <- partition_minimap2_failures(reads, bamstats, params, "S1")
   expect_equal(unlist(observed), c(matched = 3, identity_only = 1,
                                    coverage_only = 1, both = 1))
+})
+
+test_that("bamstats partition rejects missing or non-finite values for status-C reads", {
+  root <- tempfile("bamstats_contract_c_nan_")
+  dir.create(root)
+  reads <- data.frame(
+    status = c("C"),
+    read_id = c("corrupt"),
+    taxid = c(0), stringsAsFactors = FALSE
+  )
+  bamstats <- create_temp_bamstats(root, "S1", data.frame(
+    name = reads$read_id, iden = c(NaN),
+    ref_coverage = c(95)
+  ))
+  params <- read_upstream_params(create_temp_params(root))
+  expect_error(partition_minimap2_failures(reads, bamstats, params, "S1"),
+               "must be finite numbers")
 })
 
 test_that("Synthetic abundance table parses and validates correctly", {

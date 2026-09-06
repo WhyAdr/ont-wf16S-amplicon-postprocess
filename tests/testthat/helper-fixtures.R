@@ -96,6 +96,6 @@ create_temp_bamstats <- function(dir, sample_id, data) {
   con <- gzfile(path, open = "wt")
   on.exit(close(con), add = TRUE)
   write.table(data[, c("name", "sample_name", "iden", "ref_coverage")], con,
-              sep = "\t", row.names = FALSE, quote = FALSE)
+              sep = "\t", row.names = FALSE, quote = FALSE, na = "nan")
   path
 }

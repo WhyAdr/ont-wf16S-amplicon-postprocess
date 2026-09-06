@@ -168,12 +168,6 @@ partition_minimap2_failures <- function(reads, bamstats_path, params, sample_id)
     stop(sprintf("Bamstats sample_name does not consistently equal '%s'.", sample_id),
          call. = FALSE)
   }
-  stats$iden <- suppressWarnings(as.numeric(stats$iden))
-  stats$ref_coverage <- suppressWarnings(as.numeric(stats$ref_coverage))
-  if (any(!is.finite(stats$iden)) || any(!is.finite(stats$ref_coverage))) {
-    stop(sprintf("Bamstats identity/coverage values for '%s' must be finite numbers.", sample_id),
-         call. = FALSE)
-  }
   c_reads <- reads[reads$status == "C", , drop = FALSE]
   matched <- match(c_reads$read_id, stats$name)
   if (anyNA(matched)) {
@@ -181,6 +175,12 @@ partition_minimap2_failures <- function(reads, bamstats_path, params, sample_id)
                  sum(is.na(matched)), sample_id), call. = FALSE)
   }
   aligned <- stats[matched, , drop = FALSE]
+  aligned$iden <- suppressWarnings(as.numeric(aligned$iden))
+  aligned$ref_coverage <- suppressWarnings(as.numeric(aligned$ref_coverage))
+  if (any(!is.finite(aligned$iden)) || any(!is.finite(aligned$ref_coverage))) {
+    stop(sprintf("Bamstats identity/coverage values for '%s' must be finite numbers.", sample_id),
+         call. = FALSE)
+  }
   identity_failed <- aligned$iden < params$min_percent_identity
   coverage_failed <- aligned$ref_coverage < params$min_ref_coverage
   positive <- c_reads$taxid > 0
