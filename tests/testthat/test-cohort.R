@@ -90,6 +90,10 @@ test_that("Synthetic cohort (2 groups x 3 replicates) passes cohort gates and pa
   expect_equal(res_ord$status, "completed")
   expect_true(file.exists(file.path(cfg$output$dirs$ordination, "pca_scores.tsv")))
   expect_true(file.exists(file.path(cfg$output$dirs$ordination, "pca_variance.tsv")))
+  nmds_diag <- file.path(cfg$output$dirs$ordination, "nmds_diagnostics.tsv")
+  expect_true(file.exists(nmds_diag))
+  nmds <- read.delim(nmds_diag, check.names = FALSE)
+  expect_equal(nmds$Converged[1], nmds$BestSolutionRepetitions[1] > 0)
 
   # Run shared taxa
   res_shared <- run_shared_taxa(context)
@@ -226,4 +230,13 @@ test_that("One-row composition heatmaps do not attempt row clustering", {
   heatmap <- file.path(cfg$output$dirs$composition, "04_heatmap_genus.png")
   expect_true(file.exists(heatmap))
   expect_gt(file.info(heatmap)$size, 0)
+})
+
+test_that("NMDS repetition helper follows vegan metaMDS semantics", {
+  expect_false(nmds_solution_repeated(0L))
+  expect_true(nmds_solution_repeated(1L))
+  expect_true(nmds_solution_repeated(2L))
+  expect_false(nmds_solution_repeated(NULL))
+  expect_false(nmds_solution_repeated(NA))
+  expect_false(nmds_solution_repeated("not-a-number"))
 })

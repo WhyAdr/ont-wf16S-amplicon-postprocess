@@ -180,19 +180,21 @@ run_beta <- function(context) {
       failed_iterations <- integer(0)
       reference_points <- as.matrix(reference_fit$points)[, 1:2, drop = FALSE]
       for (iteration in seq_len(cfg$beta$resampling$iterations)) {
-        rare_counts <- vegan::rrarefy(otu_table, sample = stability_depth)
-        rare_rel <- sweep(rare_counts, 1, rowSums(rare_counts), "/")
-        rare_dist <- vegan::vegdist(rare_rel, method = "bray")
-        rare_fit <- tryCatch(
-          stats::cmdscale(rare_dist, k = 2L, eig = TRUE, add = TRUE),
-          error = function(e) NULL
-        )
-        if (is.null(rare_fit) || ncol(as.matrix(rare_fit$points)) < 2L) {
+        aligned <- tryCatch({
+          rare_counts <- vegan::rrarefy(otu_table, sample = stability_depth)
+          rare_rel <- sweep(rare_counts, 1, rowSums(rare_counts), "/")
+          rare_dist <- vegan::vegdist(rare_rel, method = "bray")
+          rare_fit <- stats::cmdscale(rare_dist, k = 2L, eig = TRUE, add = TRUE)
+          rare_points <- as.matrix(rare_fit$points)
+          if (ncol(rare_points) < 2L) {
+            stop("Rarefied PCoA returned fewer than two axes.", call. = FALSE)
+          }
+          vegan::procrustes(reference_points, rare_points[, 1:2, drop = FALSE])$Yrot
+        }, error = function(e) NULL)
+        if (is.null(aligned)) {
           failed_iterations <- c(failed_iterations, iteration)
           next
         }
-        aligned <- vegan::procrustes(reference_points,
-                                     as.matrix(rare_fit$points)[, 1:2, drop = FALSE])$Yrot
         stability_rows[[length(stability_rows) + 1L]] <- data.frame(
           Iteration = iteration,
           SampleID = rownames(aligned),

@@ -8,6 +8,11 @@ suppressMessages({
   library(ggplot2)
 })
 
+nmds_solution_repeated <- function(value) {
+  value <- suppressWarnings(as.numeric(value))
+  length(value) == 1L && !is.na(value) && is.finite(value) && value > 0
+}
+
 run_ordination <- function(context) {
   cfg <- context$config
   ord_dir <- cfg$output$dirs$ordination
@@ -126,12 +131,14 @@ run_ordination <- function(context) {
     }, error = function(e) NULL))
 
     if (!is.null(nmds_res) && !is.null(nmds_res$points)) {
+      nmds_repetitions <- as.integer(nmds_res$converged %||% 0L)
+      nmds_converged <- nmds_solution_repeated(nmds_repetitions)
       nmds_df <- data.frame(
         SampleID = rownames(nmds_res$points),
         NMDS1 = nmds_res$points[, 1],
         NMDS2 = nmds_res$points[, 2],
         Stress = nmds_res$stress,
-        Converged = isTRUE(nmds_res$converged),
+        Converged = nmds_converged,
         stringsAsFactors = FALSE
       )
       if (!is.null(meta)) {
@@ -161,7 +168,8 @@ run_ordination <- function(context) {
       write.table(data.frame(
         Status = "Completed",
         Stress = nmds_res$stress,
-        Converged = isTRUE(nmds_res$converged),
+        Converged = nmds_converged,
+        BestSolutionRepetitions = nmds_repetitions,
         Tries = nmds_res$tries %||% NA_integer_,
         Trymax = 50L,
         Warning = if (nmds_res$stress > 0.2) "High stress (>0.2); interpret cautiously" else "None"
