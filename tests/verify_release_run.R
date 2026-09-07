@@ -2,6 +2,13 @@
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 1L) stop("Usage: verify_release_run.R OUTPUT_DIR")
+script_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
+if (length(script_arg) != 1L) stop("Could not locate verify_release_run.R.")
+script_path <- normalizePath(sub("^--file=", "", script_arg), winslash = "/", mustWork = TRUE)
+repo_root <- normalizePath(file.path(dirname(script_path), ".."), winslash = "/", mustWork = TRUE)
+expected_pipeline_version <- trimws(readLines(
+  file.path(repo_root, "VERSION"), n = 1L, warn = FALSE
+))
 root <- normalizePath(args[1], winslash = "/", mustWork = TRUE)
 manifest <- jsonlite::fromJSON(
   file.path(root, "run_manifest.json"),
@@ -10,7 +17,7 @@ manifest <- jsonlite::fromJSON(
 
 stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(identical(manifest$mode, "single"))
-stopifnot(identical(manifest$pipeline_version, "0.3.0"))
+stopifnot(identical(manifest$pipeline_version, expected_pipeline_version))
 stopifnot(grepl("^[0-9a-f]{40}$", manifest$git_commit))
 stopifnot(grepl("^R version 4[.]", manifest$interpreter$r))
 stopifnot(grepl("Python 3[.]12", manifest$interpreter$python))

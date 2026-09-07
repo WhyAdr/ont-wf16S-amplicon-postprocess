@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] - 2026-09-07
+
+### Fixed
+
+- Enforce whole-number upstream length and abundance thresholds and reject empty
+  or whitespace-padded lineage rank fields before analysis.
+- Preserve numeric-looking metadata identifiers as strings and make shared-taxa
+  group handling safe for arbitrary validated labels.
+- Prevent sample-seed integer overflow and reject non-portable SampleIDs.
+- Close PNG devices on plotting errors and disable undefined one-object heatmap
+  clustering.
+- Report vegan `metaMDS` best-solution repetition correctly and isolate failed
+  beta-diversity stability iterations.
+- Reject duplicate/unknown modules before expensive input parsing and make release
+  verification derive its expected version from `VERSION`.
+
 ## [0.3.0] - 2026-09-07
 
 ### Added
