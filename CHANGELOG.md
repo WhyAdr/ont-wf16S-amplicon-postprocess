@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] - 2026-09-07
+
+### Added
+
+- Manifest schema v2 with stable JSON arrays for cardinality-dependent fields,
+  explicit `not_run` records after fail-fast module errors, and locked-environment
+  SHA-256 provenance.
+- A committed R 4.5.3 `renv.lock`, restore workflow, and CI restoration checks
+  for the full transitive analysis/test/FAPROTAX package graph.
+- A manual streamed-assignment benchmark harness. On the release Windows host,
+  250,000 synthetic rows completed in 13.33 seconds with a 30.53 MiB final data
+  frame and 343.27 MiB peak working set.
+
+### Changed
+
+- Replace whole-file assignment text buffering with bounded two-pass plain or
+  gzip parsing while retaining typed output, duplicate-ID checks, reconciliation,
+  and physical-line schema diagnostics.
+- Remove the unused `ggrepel` runtime dependency from the locked environment.
+
 ## [0.3.1] - 2026-09-07
 
 ### Fixed

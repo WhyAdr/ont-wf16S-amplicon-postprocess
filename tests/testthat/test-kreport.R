@@ -5,6 +5,7 @@
 source(file.path("..", "..", "analysis", "utils", "dependencies.R"))
 source(file.path("..", "..", "analysis", "utils", "config.R"))
 source(file.path("..", "..", "analysis", "utils", "io.R"))
+source(file.path("..", "..", "analysis", "utils", "manifest.R"))
 source(file.path("..", "..", "analysis", "utils", "kreport.R"))
 source(file.path("..", "..", "analysis", "07_kreport_pavian.R"))
 
