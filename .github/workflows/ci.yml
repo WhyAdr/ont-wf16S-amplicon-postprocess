@@ -85,3 +85,53 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: python tests/check_committed_whitespace.py
+
+  faprotax:
+    name: ubuntu-latest / R 4.5 / Python 3.12 (FAPROTAX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.5'
+          use-public-rspm: true
+
+      - name: Install R dependencies including microeco
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::yaml
+            any::optparse
+            any::dplyr
+            any::tidyr
+            any::stringr
+            any::ggplot2
+            any::scales
+            any::vegan
+            any::RColorBrewer
+            any::jsonlite
+            any::pheatmap
+            any::UpSetR
+            any::ggrepel
+            any::digest
+            any::processx
+            any::testthat
+            any::microeco
+          cache-version: 1
+
+      - name: Run testthat with microeco installed
+        shell: bash
+        run: Rscript tests/testthat.R
+
+      - name: Run pipeline and verify with FAPROTAX module
+        shell: bash
+        run: |
+          Rscript analysis/00_run_pipeline.R --config config.yml --modules qc,alpha,beta,composition,ordination,shared,kreport,faprotax --output-dir "ci faprotax output"
+          Rscript tests/verify_release_run.R "ci faprotax output"

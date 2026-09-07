@@ -77,6 +77,112 @@ test_that("discover_bamstats_files rejects missing or inconsistent sample_names"
   expect_error(discover_bamstats(root, c("S1", "S2")), "inconsistent sample names")
 })
 
+test_that("discover_bamstats rejects multiple bamstats files mapping to the same sample", {
+  root <- tempfile("bamstats_duplicate_")
+  dir.create(root)
+  dir1 <- file.path(root, "run1.bamstats_results")
+  dir2 <- file.path(root, "run2.bamstats_results")
+  dir.create(dir1)
+  dir.create(dir2)
+  create_temp_bamstats(dir1, "S1", data.frame(name = "r1", iden = 95, ref_coverage = 95))
+  create_temp_bamstats(dir2, "S1", data.frame(name = "r2", iden = 95, ref_coverage = 95))
+  expect_error(discover_bamstats(root, "S1"), "Multiple bamstats files discovered for sample 'S1'")
+})
+
+test_that("partition_minimap2_failures rejects bamstats missing status-C reads", {
+  root <- tempfile("bamstats_missing_c_")
+  dir.create(root)
+  reads <- data.frame(
+    status = c("C", "C"),
+    read_id = c("read_present", "read_absent"),
+    taxid = c(123, 0), stringsAsFactors = FALSE
+  )
+  bamstats <- create_temp_bamstats(root, "S1", data.frame(
+    name = c("read_present"), iden = c(95), ref_coverage = c(95)
+  ))
+  params <- read_upstream_params(create_temp_params(root))
+  expect_error(partition_minimap2_failures(reads, bamstats, params, "S1"),
+               "Bamstats is missing 1 status-C read[(]s[)] for 'S1'")
+})
+
+test_that("partition_minimap2_failures rejects non-numeric or malformed metrics for status-C reads", {
+  root <- tempfile("bamstats_malformed_num_")
+  dir.create(root)
+  reads <- data.frame(
+    status = c("C"),
+    read_id = c("r1"),
+    taxid = c(0), stringsAsFactors = FALSE
+  )
+  con <- gzfile(file.path(root, "bamstats.readstats.tsv.gz"), open = "wt")
+  writeLines(c("name\tsample_name\tiden\tref_coverage", "r1\tS1\tinvalid_string\t95"), con)
+  close(con)
+  params <- read_upstream_params(create_temp_params(root))
+  expect_error(partition_minimap2_failures(reads, file.path(root, "bamstats.readstats.tsv.gz"), params, "S1"),
+               "must be finite numbers")
+})
+
+test_that("partition_minimap2_failures rejects C+TaxID0 reads passing both thresholds", {
+  root <- tempfile("bamstats_c0_passes_")
+  dir.create(root)
+  reads <- data.frame(
+    status = c("C"),
+    read_id = c("r1"),
+    taxid = c(0), stringsAsFactors = FALSE
+  )
+  bamstats <- create_temp_bamstats(root, "S1", data.frame(
+    name = c("r1"), iden = c(95), ref_coverage = c(95)
+  ))
+  params <- read_upstream_params(create_temp_params(root))
+  expect_error(partition_minimap2_failures(reads, bamstats, params, "S1"),
+               "At least one C[+]TaxID0 read for 'S1' passes both recorded thresholds")
+})
+
+test_that("partition_minimap2_failures rejects TaxID>0 reads failing recorded thresholds", {
+  root <- tempfile("bamstats_positive_fails_")
+  dir.create(root)
+  reads <- data.frame(
+    status = c("C"),
+    read_id = c("r1"),
+    taxid = c(123), stringsAsFactors = FALSE
+  )
+  bamstats <- create_temp_bamstats(root, "S1", data.frame(
+    name = c("r1"), iden = c(85), ref_coverage = c(95)
+  ))
+  params <- read_upstream_params(create_temp_params(root))
+  expect_error(partition_minimap2_failures(reads, bamstats, params, "S1"),
+               "At least one TaxID>0 read for 'S1' fails the recorded thresholds")
+})
+
+test_that("QC module reports BamstatsAvailable TRUE when bamstats is mapped without assignments", {
+  source(file.path("..", "..", "analysis", "01_qc_diagnostics.R"))
+  root <- tempfile("qc_bamstats_no_asgn_")
+  dir.create(root)
+  bams_dir <- file.path(root, "sample.bamstats_results")
+  dir.create(bams_dir)
+  create_temp_bamstats(bams_dir, "S1", data.frame(name = "r1", iden = 95, ref_coverage = 95))
+
+  cfg <- get_default_config()
+  cfg$input$abundance_table <- create_temp_abundance(root, n_species = 3, sample_names = "S1")
+  cfg$input$params_json <- create_temp_params(root)
+  cfg$input$wf16s_output_root <- root
+  cfg$input$assignments <- NULL
+  cfg$output$base_dir <- file.path(root, "out")
+  cfg$output$dirs <- list(qc = file.path(cfg$output$base_dir, "01_QC"))
+
+  context <- build_context(cfg)
+  expect_true(file.exists(context$bamstats[["S1"]]))
+
+  res_qc <- run_qc(context)
+  expect_equal(res_qc$status, "completed")
+
+  inv <- read.delim(file.path(cfg$output$dirs$qc, "00_read_investigation.tsv"), check.names = FALSE)
+  expect_equal(nrow(inv), 1L)
+  expect_false(inv$AssignmentAvailable)
+  expect_true(inv$BamstatsAvailable)
+  expect_true(is.na(inv$BamstatsC0Matched))
+  expect_true(is.na(inv$IdentityOnlyFailed))
+})
+
 test_that("Synthetic abundance table parses and validates correctly", {
   tmp <- tempdir()
   ab_file <- create_temp_abundance(tmp, n_species = 5, sample_names = c("S1", "S2"))

@@ -44,6 +44,8 @@ run_qc <- function(context) {
     exp_total <- stat_row$TotalReads[1]
     exp_class <- stat_row$ClassifiedReads[1]
     exp_unclass <- stat_row$UnclassifiedReads[1]
+    bamstats_path <- context$bamstats[[sample_id]]
+    bamstats_available <- !is.null(bamstats_path) && !is.na(bamstats_path) && file.exists(bamstats_path)
     assignment_available <- !is.null(asgn_path) && file.exists(asgn_path)
     accounting_rows[[sample_id]] <- data.frame(
       SampleID = sample_id, AssignmentAvailable = assignment_available,
@@ -55,7 +57,7 @@ run_qc <- function(context) {
     )
     investigation_rows[[sample_id]] <- data.frame(
       SampleID = sample_id, AssignmentAvailable = assignment_available,
-      BamstatsAvailable = FALSE, MedianClassifiedLength = NA_real_,
+      BamstatsAvailable = bamstats_available, MedianClassifiedLength = NA_real_,
       MedianC0Length = NA_real_, MedianRawULength = NA_real_,
       MinPercentIdentity = context$params$min_percent_identity,
       MinRefCoverage = context$params$min_ref_coverage,
@@ -98,10 +100,8 @@ run_qc <- function(context) {
     investigation_rows[[sample_id]]$MedianRawULength <-
       median_or_na(reads$read_length[reads$status == "U"])
 
-    bamstats_path <- context$bamstats[[sample_id]]
-    if (!is.na(bamstats_path)) {
+    if (bamstats_available) {
       partition <- partition_minimap2_failures(reads, bamstats_path, context$params, sample_id)
-      investigation_rows[[sample_id]]$BamstatsAvailable <- TRUE
       investigation_rows[[sample_id]][c(
         "BamstatsC0Matched", "IdentityOnlyFailed", "RefCoverageOnlyFailed", "BothFailed"
       )] <- list(partition$matched, partition$identity_only, partition$coverage_only, partition$both)
@@ -318,13 +318,15 @@ run_qc <- function(context) {
   all_outputs <- c(all_outputs, accounting_file)
 
   investigation_df <- do.call(rbind, investigation_rows)
-  with_bamstats <- investigation_df$BamstatsAvailable
-  stopifnot(all(
-    investigation_df$BamstatsC0Matched[with_bamstats] ==
-      investigation_df$IdentityOnlyFailed[with_bamstats] +
-      investigation_df$RefCoverageOnlyFailed[with_bamstats] +
-      investigation_df$BothFailed[with_bamstats]
-  ))
+  with_partition <- investigation_df$BamstatsAvailable & investigation_df$AssignmentAvailable
+  if (any(with_partition)) {
+    stopifnot(all(
+      investigation_df$BamstatsC0Matched[with_partition] ==
+        investigation_df$IdentityOnlyFailed[with_partition] +
+        investigation_df$RefCoverageOnlyFailed[with_partition] +
+        investigation_df$BothFailed[with_partition]
+    ))
+  }
   investigation_file <- file.path(qc_dir, "00_read_investigation.tsv")
   write.table(investigation_df, investigation_file, sep = "\t", row.names = FALSE, quote = FALSE,
               na = "NA")

@@ -21,6 +21,14 @@ stopifnot(identical(manifest$upstream_contract$taxonomic_rank, "S"))
 stopifnot(is.null(manifest$upstream_contract$workflow_version))
 stopifnot(is.null(manifest$upstream_contract$workflow_revision))
 
+# Expected module set completeness and status verification
+expected_modules <- if (!is.null(manifest$cli$modules) && length(manifest$cli$modules) > 0L) {
+  unlist(manifest$cli$modules)
+} else {
+  c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
+}
+stopifnot(identical(sort(names(manifest$modules)), sort(expected_modules)))
+
 # Module statuses, output file existence, and per-module warnings check
 for (mod in names(manifest$modules)) {
   mod_rec <- manifest$modules[[mod]]
@@ -28,6 +36,31 @@ for (mod in names(manifest$modules)) {
   if (length(mod_rec$outputs) > 0L) {
     out_paths <- unlist(mod_rec$outputs, use.names = FALSE)
     stopifnot(all(file.exists(out_paths)))
+  }
+}
+
+# Single-sample mode status assertions
+if (identical(manifest$mode, "single")) {
+  for (m in intersect(c("qc", "alpha", "composition", "kreport"), expected_modules)) {
+    stopifnot(identical(manifest$modules[[m]]$status, "completed"))
+  }
+  for (m in intersect(c("beta", "ordination", "shared"), expected_modules)) {
+    stopifnot(identical(manifest$modules[[m]]$status, "skipped"))
+  }
+}
+
+if ("faprotax" %in% expected_modules) {
+  stopifnot(identical(manifest$modules$faprotax$status, "completed"))
+  faprotax_required <- c(
+    "08_FAPROTAX/faprotax_function_abundance.tsv",
+    "08_FAPROTAX/faprotax_mapping_coverage.tsv",
+    "08_FAPROTAX/faprotax_taxon_function_assignments.tsv",
+    "08_FAPROTAX/faprotax_top_functions.png",
+    "08_FAPROTAX/faprotax_provenance.json"
+  )
+  faprotax_missing <- faprotax_required[!file.exists(file.path(root, faprotax_required))]
+  if (length(faprotax_missing)) {
+    stop("Missing FAPROTAX outputs: ", paste(faprotax_missing, collapse = ", "))
   }
 }
 
@@ -46,7 +79,7 @@ stopifnot(nrow(accounting) == 1L)
 investigation <- read.delim(file.path(root, "01_QC/00_read_investigation.tsv"), check.names = FALSE)
 stopifnot(nrow(investigation) == 1L)
 
-if (isTRUE(investigation$BamstatsAvailable[1])) {
+if (isTRUE(investigation$BamstatsAvailable[1]) && isTRUE(investigation$AssignmentAvailable[1])) {
   stopifnot(investigation$BamstatsC0Matched == accounting$C_TaxID0)
   stopifnot(investigation$IdentityOnlyFailed + investigation$RefCoverageOnlyFailed +
             investigation$BothFailed == investigation$BamstatsC0Matched)
@@ -94,6 +127,9 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
     "07_Kreport/taxonomy_resolution_sources.tsv", "07_Kreport/unresolved_taxids.tsv",
     "07_Kreport/taxonomy_conflicts.tsv", "07_Kreport/taxonomy_provenance.json"
   )
+  if ("faprotax" %in% expected_modules) {
+    required <- c(required, faprotax_required)
+  }
   missing <- required[!file.exists(file.path(root, required))]
   if (length(missing)) stop("Missing release outputs: ", paste(missing, collapse = ", "))
 

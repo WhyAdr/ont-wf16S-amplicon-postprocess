@@ -203,11 +203,20 @@ metadata, assignment mapping, and a fresh output directory.
 
 ### 1. Audit Dependencies
 ```bash
-# Check installed packages (exits non-zero if missing)
+# Check core installed packages (exits non-zero if missing)
 Rscript analysis/install_packages.R
 
-# Install missing packages from CRAN
+# Install missing core packages from CRAN
 Rscript analysis/install_packages.R --install
+
+# Check optional module dependencies (e.g. FAPROTAX / microeco)
+Rscript analysis/install_packages.R --modules faprotax
+
+# Install optional module dependencies from CRAN
+Rscript analysis/install_packages.R --install --modules faprotax
+
+# Audit all dependencies including optional modules
+Rscript analysis/install_packages.R --all
 ```
 
 ### 2. Zero-Mutation Validation Run
