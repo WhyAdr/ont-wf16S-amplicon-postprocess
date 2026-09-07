@@ -26,3 +26,5 @@ Thumbs.db
 
 # Modular pipeline outputs
 /output/
+/output_Helga/
+*.staging-*/

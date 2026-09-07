@@ -35,8 +35,7 @@ jobs:
       - name: Restore locked R environment
         shell: bash
         run: |
-          Rscript -e "renv::restore(prompt = FALSE)"
-          Rscript -e "stopifnot(isTRUE(renv::status()\$synchronized))"
+          Rscript analysis/install_packages.R --restore
 
       - name: Parse R and Python sources
         shell: bash
@@ -70,6 +69,11 @@ jobs:
         shell: bash
         run: python tests/check_committed_whitespace.py
 
+      - name: Check complete commit-range whitespace
+        if: runner.os == 'Linux'
+        shell: bash
+        run: git diff --check "$(git merge-base HEAD origin/${GITHUB_BASE_REF:-main})...HEAD"
+
   faprotax:
     name: ${{ matrix.os }} / R 4.5.3 / Python 3.12 (FAPROTAX)
     runs-on: ${{ matrix.os }}
@@ -94,8 +98,7 @@ jobs:
       - name: Restore locked R environment
         shell: bash
         run: |
-          Rscript -e "renv::restore(prompt = FALSE)"
-          Rscript -e "stopifnot(isTRUE(renv::status()\$synchronized))"
+          Rscript analysis/install_packages.R --restore
 
       - name: Run testthat with microeco installed
         shell: bash

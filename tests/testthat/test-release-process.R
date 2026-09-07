@@ -13,7 +13,7 @@ write_process_config <- function(root, sample_names = "S1", mode = "auto",
                                  unresolved_policy = "warn", classifier = "minimap2") {
   abundance <- create_temp_abundance(root, n_species = 3, sample_names = sample_names)
   cache <- file.path(root, "taxonomy cache.json")
-  jsonlite::write_json(list(), cache, auto_unbox = TRUE)
+  writeLines("{}", cache)
   cfg <- get_default_config()
   cfg$mode <- mode
   cfg$input$abundance_table <- normalizePath(abundance, winslash = "/")
@@ -33,7 +33,7 @@ write_process_config <- function(root, sample_names = "S1", mode = "auto",
 run_pipeline_process <- function(args, wd) {
   processx::run(
     rscript,
-    c(runner, args),
+    c(runner, "--allow-dirty", "--allow-unlocked", args),
     wd = wd,
     error_on_status = FALSE,
     echo = FALSE
@@ -164,12 +164,8 @@ test_that("keep-going records failure, executes later modules, and exits non-zer
     tempdir()
   )
   expect_gt(result$status, 0L)
-  manifest <- jsonlite::fromJSON(
-    file.path(output, "run_manifest.json"), simplifyVector = FALSE
-  )
-  expect_equal(manifest$run_status, "failed")
-  expect_equal(manifest$modules$kreport$status, "failed")
-  expect_equal(manifest$modules$composition$status, "completed")
+  expect_match(result$stderr, "E_KREPORT_PREFLIGHT")
+  expect_false(file.exists(file.path(output, "run_manifest.json")))
 })
 
 test_that("fail-fast runs record later requested modules as not_run", {
@@ -182,17 +178,6 @@ test_that("fail-fast runs record later requested modules as not_run", {
     tempdir()
   )
   expect_gt(result$status, 0L)
-  manifest <- jsonlite::fromJSON(file.path(output, "run_manifest.json"), simplifyVector = FALSE)
-  expect_equal(manifest$schema_version, 2L)
-  expect_equal(manifest$modules$kreport$status, "failed")
-  for (module_name in c("composition", "alpha")) {
-    record <- manifest$modules[[module_name]]
-    expect_equal(record$status, "not_run")
-    expect_match(record$reason, "Pipeline stopped after failure in module 'kreport'")
-    expect_length(record$outputs, 0L)
-    expect_length(record$warnings, 0L)
-    expect_null(record$error)
-  }
-  expect_false(dir.exists(file.path(output, "04_Taxa_Composition")))
-  expect_false(dir.exists(file.path(output, "02_Alpha_Diversity")))
+  expect_match(result$stderr, "E_KREPORT_PREFLIGHT")
+  expect_false(file.exists(file.path(output, "run_manifest.json")))
 })

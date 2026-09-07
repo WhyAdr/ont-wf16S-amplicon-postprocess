@@ -12,6 +12,16 @@ GIT = ["git", "-c", f"safe.directory={pathlib.Path.cwd().resolve().as_posix()}"]
 
 
 def changed_paths() -> list[pathlib.PurePosixPath]:
+    base_candidates = [
+        [*GIT, "merge-base", "HEAD", "origin/main"],
+        [*GIT, "rev-parse", "--verify", "HEAD^"],
+    ]
+    base = None
+    for candidate in base_candidates:
+        probe = subprocess.run(candidate, check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if probe.returncode == 0:
+            base = probe.stdout.strip().decode("ascii")
+            break
     parent = subprocess.run(
         [*GIT, "rev-parse", "--verify", "HEAD^"],
         check=False,
@@ -29,16 +39,8 @@ def changed_paths() -> list[pathlib.PurePosixPath]:
             "configure checkout fetch-depth >= 2."
         )
 
-    command = [
-        *GIT,
-        "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "--diff-filter=AM",
-        "-z",
-        "-r",
-    ]
-    command.extend(["HEAD^", "HEAD"] if parent.returncode == 0 else ["--root", "HEAD"])
+    command = [*GIT, "diff", "--name-only", "-z", "--diff-filter=AM"]
+    command.extend([base, "HEAD"] if base else (["HEAD^", "HEAD"] if parent.returncode == 0 else ["--root", "HEAD"]))
     result = subprocess.run(command, check=True, stdout=subprocess.PIPE)
     return [pathlib.PurePosixPath(name.decode("utf-8")) for name in result.stdout.split(b"\0") if name]
 

@@ -4,19 +4,32 @@
 
 test_that("Current release metadata agrees with VERSION", {
   repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
-  version <- trimws(readLines(file.path(repo_root, "VERSION"), n = 1L, warn = FALSE))
+  version_path <- file.path(repo_root, "VERSION")
+  version_lines <- readLines(version_path, warn = FALSE)
+  version <- if (length(version_lines) == 1L) trimws(version_lines[[1]]) else ""
+  version_bytes <- readBin(version_path, what = "raw", n = file.info(version_path)$size)
+  expect_length(version_lines, 1L)
+  expect_match(version, "^[0-9]+[.][0-9]+[.][0-9]+$")
+  expect_true(length(version_bytes) > 0L && identical(tail(version_bytes, 1L), as.raw(0x0a)))
   citation <- readLines(file.path(repo_root, "CITATION.cff"), warn = FALSE)
   readme <- readLines(file.path(repo_root, "README.md"), warn = FALSE)
   changelog <- readLines(file.path(repo_root, "CHANGELOG.md"), warn = FALSE)
 
   citation_version <- sub("^version:[[:space:]]*", "", grep("^version:", citation, value = TRUE)[1])
-  readme_version <- sub("^Current pipeline version: \\*\\*([^*]+)\\*\\*[.]$", "\\1",
-                        grep("^Current pipeline version:", readme, value = TRUE)[1])
+  current_line <- grep("^Current pipeline version:", readme, value = TRUE)
+  readme_header_version <- sub("^Current pipeline version: \\*\\*([^*]+)\\*\\*[.]$", "\\1",
+                               current_line)
+  readme_mentions <- unlist(regmatches(
+    readme, gregexpr("Version [0-9]+[.][0-9]+[.][0-9]+", readme, perl = TRUE)
+  ))
+  readme_versions <- sub("^Version ", "", readme_mentions)
   changelog_version <- sub("^## \\[([^]]+)\\].*$", "\\1",
                            grep("^## \\[", changelog, value = TRUE)[1])
 
   expect_identical(citation_version, version)
-  expect_identical(readme_version, version)
+  expect_identical(readme_header_version, version)
+  expect_length(readme_versions, 4L)
+  expect_true(all(readme_versions == version))
   expect_identical(changelog_version, version)
 })
 

@@ -19,18 +19,30 @@ make_manifest_fixture <- function(samples, modules = c("qc"), warnings = charact
     )
   }), modules)
   list(
+    pipeline = "ont-wf16s-postprocess",
+    pipeline_version = "0.4.1",
     schema_version = 2L,
+    schema_revision = 1L,
     config_schema_version = 1L,
+    run_status = "completed",
+    start_time = "2026-09-07T00:00:00Z",
+    end_time = "2026-09-07T00:00:01Z",
+    duration_seconds = 1,
+    output_root = ".",
     samples = json_array(samples),
     command = json_array(c("Rscript", "analysis/00_run_pipeline.R")),
     cli = list(modules = json_array(modules)),
-    inputs = list(assignments = json_array(list()), bamstats = NULL),
+    inputs = list(assignments = json_array(list()), bamstats = json_array(list())),
+    owned_outputs = json_array(character(0)),
     modules = records,
     warnings = json_array(warnings),
     environment = list(
       locked = TRUE,
+      lock_status = "synchronized",
       lockfile = "renv.lock",
-      lockfile_sha256 = paste(rep("a", 64L), collapse = "")
+      lockfile_sha256 = paste(rep("a", 64L), collapse = ""),
+      r_discrepancies = json_array(character(0)),
+      package_discrepancies = json_array(character(0))
     ),
     package_versions = json_array(list(list(package = "yaml", version = "2.3.10")))
   )

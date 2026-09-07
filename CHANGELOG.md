@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.1] - 2026-09-07
+
+### Fixed
+
+- Make lock, source, and input provenance truthful; reject dirty or unsynchronized
+  publication runs unless an explicit development escape hatch is supplied.
+- Add side-effect-free module preflight, immutable-input checks, strict output-root
+  ownership, and transactional staged publication for overwrite and failure paths.
+- Enforce manifest v2 array/state invariants, exact integer/resource bounds,
+  identifier and assignment contracts, pinned upstream database resources, and
+  canonical string TaxIDs.
+- Record one primary beta-diversity distance and shared constrained permutations;
+  skip degenerate rarefaction stability with diagnostics.
+- Make taxonomy refresh candidate-based and preserve the source cache on rejected
+  or failed resolutions; accept uppercase gzip assignment paths consistently.
+
+### Changed
+
+- Add `--allow-unlocked`, `--allow-dirty`, and `--online-preflight` development
+  controls; normal publication runs require synchronized provenance.
+- Remove stale tracked runtime output from version control and strengthen CI and
+  whitespace checks across the complete commit range.
+
 ## [0.4.0] - 2026-09-07
 
 ### Added
