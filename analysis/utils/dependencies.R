@@ -15,7 +15,6 @@ RUNTIME_PACKAGES <- c(
   "jsonlite",
   "pheatmap",
   "UpSetR",
-  "ggrepel",
   "digest",
   "processx"
 )

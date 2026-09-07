@@ -27,6 +27,11 @@ make_manifest_fixture <- function(samples, modules = c("qc"), warnings = charact
     inputs = list(assignments = json_array(list()), bamstats = NULL),
     modules = records,
     warnings = json_array(warnings),
+    environment = list(
+      locked = TRUE,
+      lockfile = "renv.lock",
+      lockfile_sha256 = paste(rep("a", 64L), collapse = "")
+    ),
     package_versions = json_array(list(list(package = "yaml", version = "2.3.10")))
   )
 }

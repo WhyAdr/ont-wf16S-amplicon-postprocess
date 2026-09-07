@@ -315,6 +315,9 @@ git_commit <- tryCatch({
   if (identical(result$status, 0L)) trimws(result$stdout) else NULL
 }, error = function(e) NULL)
 
+lockfile_path <- file.path(repo_root, "renv.lock")
+lockfile_sha256 <- if (file.exists(lockfile_path)) compute_file_hash(lockfile_path) else NULL
+
 manifest <- list(
   pipeline = "ont-wf16s-postprocess",
   pipeline_version = pipeline_version,
@@ -351,6 +354,11 @@ manifest <- list(
     r = R.version.string,
     platform = R.version$platform,
     python = python_version
+  ),
+  environment = list(
+    locked = !is.null(lockfile_sha256),
+    lockfile = if (!is.null(lockfile_sha256)) "renv.lock" else NULL,
+    lockfile_sha256 = lockfile_sha256
   ),
   package_versions = json_array(lapply(names(deps), function(package_name) {
     list(package = package_name, version = deps[[package_name]])

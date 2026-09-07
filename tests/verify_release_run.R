@@ -9,6 +9,9 @@ repo_root <- normalizePath(file.path(dirname(script_path), ".."), winslash = "/"
 expected_pipeline_version <- trimws(readLines(
   file.path(repo_root, "VERSION"), n = 1L, warn = FALSE
 ))
+lockfile_path <- file.path(repo_root, "renv.lock")
+if (!file.exists(lockfile_path)) stop("Expected committed renv.lock.")
+expected_lockfile_sha256 <- digest::digest(file = lockfile_path, algo = "sha256")
 root <- normalizePath(args[1], winslash = "/", mustWork = TRUE)
 manifest <- jsonlite::fromJSON(
   file.path(root, "run_manifest.json"),
@@ -38,6 +41,9 @@ stopifnot(identical(manifest$mode, "single"))
 stopifnot(identical(manifest$schema_version, 2L))
 stopifnot(identical(manifest$config_schema_version, 1L))
 stopifnot(identical(manifest$pipeline_version, expected_pipeline_version))
+stopifnot(isTRUE(manifest$environment$locked))
+stopifnot(identical(manifest$environment$lockfile, "renv.lock"))
+stopifnot(identical(manifest$environment$lockfile_sha256, expected_lockfile_sha256))
 stopifnot(grepl("^[0-9a-f]{40}$", manifest$git_commit))
 stopifnot(grepl("^R version 4[.]", manifest$interpreter$r))
 stopifnot(grepl("Python 3[.]12", manifest$interpreter$python))
@@ -52,10 +58,10 @@ stopifnot(is.null(manifest$upstream_contract$workflow_revision))
 DEFAULT_CORE_MODULES <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
 expected_modules <- array_strings(manifest$cli$modules, "cli.modules")
 if (length(expected_modules) == 0L) expected_modules <- DEFAULT_CORE_MODULES
-require_json_array(manifest$samples, "samples")
-require_json_array(manifest$command, "command")
-require_json_array(manifest$warnings, "warnings")
-require_json_array(manifest$package_versions, "package_versions")
+invisible(require_json_array(manifest$samples, "samples"))
+invisible(require_json_array(manifest$command, "command"))
+invisible(require_json_array(manifest$warnings, "warnings"))
+invisible(require_json_array(manifest$package_versions, "package_versions"))
 
 # Non-self-referential check: release manifests must include the core module baseline
 stopifnot(all(DEFAULT_CORE_MODULES %in% names(manifest$modules)))
@@ -66,7 +72,7 @@ for (mod in names(manifest$modules)) {
   mod_rec <- manifest$modules[[mod]]
   stopifnot(mod_rec$status %in% c("completed", "skipped"))
   out_paths <- array_strings(mod_rec$outputs, paste0("modules.", mod, ".outputs"))
-  require_json_array(mod_rec$warnings, paste0("modules.", mod, ".warnings"))
+  invisible(require_json_array(mod_rec$warnings, paste0("modules.", mod, ".warnings")))
   if (length(out_paths) > 0L) {
     stopifnot(all(file.exists(out_paths)))
   }
@@ -179,7 +185,7 @@ if (isTRUE(manifest$cli$krona)) {
     ))
   }
   stopifnot(html_status %in% c("not_requested", "renderer_missing", "rendered"))
-  require_json_array(krona_provenance$samples, "krona_provenance.samples")
+  invisible(require_json_array(krona_provenance$samples, "krona_provenance.samples"))
   stopifnot(length(krona_provenance$samples) == length(krona_samples))
 
   krona_records <- krona_provenance$samples

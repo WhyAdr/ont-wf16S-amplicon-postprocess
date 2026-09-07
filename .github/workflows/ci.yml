@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        r: ['4.5']
+        r: ['4.5.3']
         python: ['3.12']
 
     steps:
@@ -32,27 +32,11 @@ jobs:
           r-version: ${{ matrix.r }}
           use-public-rspm: true
 
-      - name: Install R dependencies with pak
-        uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          packages: |
-            any::yaml
-            any::optparse
-            any::dplyr
-            any::tidyr
-            any::stringr
-            any::ggplot2
-            any::scales
-            any::vegan
-            any::RColorBrewer
-            any::jsonlite
-            any::pheatmap
-            any::UpSetR
-            any::ggrepel
-            any::digest
-            any::processx
-            any::testthat
-          cache-version: 1
+      - name: Restore locked R environment
+        shell: bash
+        run: |
+          Rscript -e "renv::restore(prompt = FALSE)"
+          Rscript -e "stopifnot(isTRUE(renv::status()\$synchronized))"
 
       - name: Parse R and Python sources
         shell: bash
@@ -87,7 +71,7 @@ jobs:
         run: python tests/check_committed_whitespace.py
 
   faprotax:
-    name: ${{ matrix.os }} / R 4.5 / Python 3.12 (FAPROTAX)
+    name: ${{ matrix.os }} / R 4.5.3 / Python 3.12 (FAPROTAX)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -104,31 +88,14 @@ jobs:
 
       - uses: r-lib/actions/setup-r@v2
         with:
-          r-version: '4.5'
+          r-version: '4.5.3'
           use-public-rspm: true
 
-      - name: Install R dependencies including microeco
-        uses: r-lib/actions/setup-r-dependencies@v2
-        with:
-          packages: |
-            any::yaml
-            any::optparse
-            any::dplyr
-            any::tidyr
-            any::stringr
-            any::ggplot2
-            any::scales
-            any::vegan
-            any::RColorBrewer
-            any::jsonlite
-            any::pheatmap
-            any::UpSetR
-            any::ggrepel
-            any::digest
-            any::processx
-            any::testthat
-            any::microeco
-          cache-version: 1
+      - name: Restore locked R environment
+        shell: bash
+        run: |
+          Rscript -e "renv::restore(prompt = FALSE)"
+          Rscript -e "stopifnot(isTRUE(renv::status()\$synchronized))"
 
       - name: Run testthat with microeco installed
         shell: bash

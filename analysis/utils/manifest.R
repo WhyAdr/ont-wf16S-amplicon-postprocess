@@ -61,7 +61,7 @@ validate_manifest_v2 <- function(manifest) {
   }
   required <- c(
     "schema_version", "config_schema_version", "samples", "command", "cli",
-    "inputs", "modules", "warnings", "package_versions"
+    "inputs", "modules", "warnings", "package_versions", "environment"
   )
   missing <- setdiff(required, names(manifest))
   if (length(missing) > 0L) {
@@ -93,6 +93,28 @@ validate_manifest_v2 <- function(manifest) {
   }
   if (!is.list(manifest$modules) || is.null(names(manifest$modules))) {
     stop("Manifest schema v2 violation at 'modules': expected an object.", call. = FALSE)
+  }
+  if (!is.list(manifest$environment) || is.null(names(manifest$environment))) {
+    stop("Manifest schema v2 violation at 'environment': expected an object.", call. = FALSE)
+  }
+  if (!is.logical(manifest$environment$locked) || length(manifest$environment$locked) != 1L ||
+      is.na(manifest$environment$locked)) {
+    stop("Manifest schema v2 violation at 'environment.locked': expected boolean.", call. = FALSE)
+  }
+  for (field in c("lockfile", "lockfile_sha256")) {
+    assert_manifest_scalar_or_null(manifest$environment[[field]],
+                                   paste0("environment.", field))
+  }
+  if (isTRUE(manifest$environment$locked) &&
+      (is.null(manifest$environment$lockfile) || is.null(manifest$environment$lockfile_sha256))) {
+    stop("Manifest schema v2 violation at 'environment': locked runs require lockfile metadata.",
+         call. = FALSE)
+  }
+  if (!is.null(manifest$environment$lockfile_sha256) &&
+      (!is.character(manifest$environment$lockfile_sha256) ||
+       !grepl("^[0-9a-f]{64}$", manifest$environment$lockfile_sha256))) {
+    stop("Manifest schema v2 violation at 'environment.lockfile_sha256': expected SHA-256.",
+         call. = FALSE)
   }
   valid_statuses <- c("completed", "skipped", "failed", "not_run")
   for (module_name in names(manifest$modules)) {

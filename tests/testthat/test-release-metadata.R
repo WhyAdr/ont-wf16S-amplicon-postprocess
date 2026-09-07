@@ -19,3 +19,13 @@ test_that("Current release metadata agrees with VERSION", {
   expect_identical(readme_version, version)
   expect_identical(changelog_version, version)
 })
+
+test_that("renv lock records the complete declared R environment", {
+  repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
+  lock_path <- file.path(repo_root, "renv.lock")
+  expect_true(file.exists(lock_path))
+  lock <- jsonlite::fromJSON(lock_path, simplifyVector = FALSE)
+  expect_identical(lock$R$Version, "4.5.3")
+  expect_true(all(c("renv", "testthat", "microeco") %in% names(lock$Packages)))
+  expect_identical(lock$Packages$microeco$Version, "2.3.0")
+})

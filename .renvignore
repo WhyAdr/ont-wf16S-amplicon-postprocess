@@ -1,0 +1,9 @@
+# User-provided data exports, historical artifacts, and archived one-off
+# scripts are not source dependencies of the executable post-processing
+# pipeline. Keep dependency discovery intentionally scoped to maintained code.
+*
+!/.Rprofile
+!/analysis/
+!/analysis/**
+!/tests/
+!/tests/**

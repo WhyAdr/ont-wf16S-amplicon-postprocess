@@ -5,10 +5,12 @@
 # Usage:
 #   Rscript analysis/install_packages.R            # Check only (exits non-zero if missing)
 #   Rscript analysis/install_packages.R --install  # Install missing packages from CRAN
+#   Rscript analysis/install_packages.R --restore  # Restore the committed renv lock
 # =============================================================================
 
 args <- commandArgs(trailingOnly = TRUE)
 do_install <- "--install" %in% args
+do_restore <- "--restore" %in% args
 
 all_args <- commandArgs(trailingOnly = FALSE)
 file_arg <- grep("^--file=", all_args, value = TRUE)
@@ -20,6 +22,23 @@ script_dir <- if (length(file_arg)) {
 source(file.path(script_dir, "utils", "dependencies.R"))
 include_modules <- any(c("--all", "--modules", "--faprotax") %in% args)
 REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE, include_modules = include_modules)
+
+if (do_restore) {
+  lockfile <- file.path(dirname(script_dir), "renv.lock")
+  if (!file.exists(lockfile)) {
+    stop(sprintf("Cannot restore locked environment: '%s' does not exist.", lockfile), call. = FALSE)
+  }
+  if (!requireNamespace("renv", quietly = TRUE)) {
+    stop("Cannot restore locked environment: package 'renv' is unavailable.", call. = FALSE)
+  }
+  renv::restore(prompt = FALSE)
+  status <- renv::status()
+  if (!isTRUE(status$synchronized)) {
+    stop("renv restore completed but the project remains out of sync.", call. = FALSE)
+  }
+  cat("Locked renv environment restored and synchronized.\n")
+  quit(status = 0)
+}
 
 installed <- rownames(installed.packages())
 missing_pkgs <- setdiff(REQUIRED_PACKAGES, installed)
