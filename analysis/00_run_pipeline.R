@@ -3,378 +3,246 @@
 # ONT wf-16s Amplicon Post-Processing Pipeline Runner
 # =============================================================================
 
-# Determine script directory
 get_script_dir <- function() {
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- grep("^--file=", args, value = TRUE)
-  if (length(file_arg) > 0) {
-    normalizePath(dirname(sub("^--file=", "", file_arg[1])), winslash = "/", mustWork = FALSE)
-  } else {
-    normalizePath(file.path(getwd(), "analysis"), winslash = "/", mustWork = FALSE)
+  if (length(file_arg)) normalizePath(dirname(sub("^--file=", "", file_arg[1])), winslash = "/") else
+    normalizePath(file.path(getwd(), "analysis"), winslash = "/")
+}
+
+read_pipeline_version <- function(path) {
+  if (!file.exists(path)) stop("VERSION is missing.", call. = FALSE)
+  bytes <- readBin(path, "raw", n = file.info(path)$size)
+  text <- rawToChar(bytes)
+  if (!grepl("^[0-9]+\\.[0-9]+\\.[0-9]+\\n$", text)) {
+    stop("VERSION must contain exactly one newline-terminated SemVer value.", call. = FALSE)
   }
+  sub("\\n$", "", text)
 }
 
 script_dir <- get_script_dir()
-repo_root <- normalizePath(dirname(script_dir), winslash = "/", mustWork = FALSE)
-version_file <- file.path(repo_root, "VERSION")
-pipeline_version <- trimws(readLines(version_file, n = 1L, warn = FALSE))
-if (!grepl("^[0-9]+\\.[0-9]+\\.[0-9]+$", pipeline_version)) {
-  stop("VERSION must contain a semantic version such as 0.1.0", call. = FALSE)
-}
+repo_root <- normalizePath(dirname(script_dir), winslash = "/")
+options(wf16s.pipeline_root = repo_root)
+pipeline_version <- read_pipeline_version(file.path(repo_root, "VERSION"))
 
-# Bootstrap dependency checking before sourcing files that attach packages.
 source(file.path(script_dir, "utils", "dependencies.R"))
 check_dependencies()
+for (file in c("cli.R", "config.R", "io.R", "metrics.R", "plotting.R", "manifest.R",
+               "kreport.R", "atomic_io.R", "module_result.R", "preflight.R")) {
+  source(file.path(script_dir, "utils", file))
+}
+for (file in sprintf("%02d_%s.R", 1:8, c("qc_diagnostics", "alpha_diversity",
+    "beta_diversity", "taxa_composition", "ordination", "shared_taxa",
+    "kreport_pavian", "faprotax"))) source(file.path(script_dir, file))
 
-# Source all remaining utilities
-source(file.path(script_dir, "utils", "cli.R"))
-source(file.path(script_dir, "utils", "config.R"))
-source(file.path(script_dir, "utils", "io.R"))
-source(file.path(script_dir, "utils", "metrics.R"))
-source(file.path(script_dir, "utils", "plotting.R"))
-source(file.path(script_dir, "utils", "manifest.R"))
-source(file.path(script_dir, "utils", "kreport.R"))
+fatal <- function(label, error) {
+  cat(sprintf("[FATAL] %s: %s\n", label, conditionMessage(error)), file = stderr())
+  quit(status = 1L)
+}
 
-# Source all analysis modules
-source(file.path(script_dir, "01_qc_diagnostics.R"))
-source(file.path(script_dir, "02_alpha_diversity.R"))
-source(file.path(script_dir, "03_beta_diversity.R"))
-source(file.path(script_dir, "04_taxa_composition.R"))
-source(file.path(script_dir, "05_ordination.R"))
-source(file.path(script_dir, "06_shared_taxa.R"))
-source(file.path(script_dir, "07_kreport_pavian.R"))
-source(file.path(script_dir, "08_faprotax.R"))
-
-start_time <- Sys.time()
-
-# 1. Parse CLI options
 cli_opts <- parse_cli_args()
-
-# 2. Load and resolve configuration
-cfg <- tryCatch({
-  load_config(cli_opts$config, cli_opts = cli_opts)
-}, error = function(e) {
-  cat(sprintf("[FATAL] Configuration error: %s\n", e$message), file = stderr())
-  quit(status = 1)
-})
+cfg <- tryCatch(load_config(cli_opts$config, cli_opts = cli_opts),
+                error = function(e) fatal("Configuration error", e))
 cfg$pipeline_root <- repo_root
 
-# Module registry and request validation must happen before any output mutation.
 module_registry <- list(
-  qc          = run_qc,
-  alpha       = run_alpha,
-  beta        = run_beta,
-  composition = run_taxa_composition,
-  ordination  = run_ordination,
-  shared      = run_shared_taxa,
-  kreport     = run_kreport,
-  faprotax    = run_faprotax
+  qc = run_qc, alpha = run_alpha, beta = run_beta,
+  composition = run_taxa_composition, ordination = run_ordination,
+  shared = run_shared_taxa, kreport = run_kreport, faprotax = run_faprotax
 )
-
 requested_modules <- cfg$cli$modules
 invalid_modules <- setdiff(requested_modules, names(module_registry))
-if (length(invalid_modules) > 0) {
-  cat(sprintf("[FATAL] Unknown module(s) requested: %s\nAvailable: %s\n",
-              paste(invalid_modules, collapse = ", "),
-              paste(names(module_registry), collapse = ", ")), file = stderr())
-  quit(status = 1)
-}
-
+if (length(invalid_modules)) fatal("Configuration error", simpleError(sprintf(
+  "Unknown module(s) requested: %s", paste(invalid_modules, collapse = ", "))))
 if (isTRUE(cfg$krona$enabled) && !("kreport" %in% requested_modules)) {
-  cat("[FATAL] Krona export requires the 'kreport' module; include kreport in --modules.\n",
+  fatal("Configuration error", simpleError("Krona export requires the 'kreport' module."))
+}
+
+# All release gates run before output mutation or large input parsing.
+tryCatch(validate_output_root(cfg, repo_root), error = function(e) fatal("Preflight error", e))
+source_info <- source_provenance(repo_root)
+if (isTRUE(source_info$git_dirty) && !isTRUE(cfg$cli$allow_dirty)) {
+  fatal("Preflight error", simpleError(
+    "E_SOURCE_DIRTY: maintained tracked source files differ from HEAD; use --allow-dirty for development only"))
+}
+packages <- unique(c(RUNTIME_PACKAGES, get_module_packages(requested_modules)))
+lock_info <- read_lock_status(repo_root, packages)
+if (!identical(lock_info$lock_status, "synchronized") && !isTRUE(cfg$cli$allow_unlocked)) {
+  discrepancies <- c(unlist(lock_info$r_discrepancies), unlist(lock_info$package_discrepancies))
+  fatal("Preflight error", simpleError(sprintf("E_LOCK_MISMATCH: %s",
+    paste(discrepancies, collapse = "; "))))
+}
+if (!identical(lock_info$lock_status, "synchronized")) {
+  cat(sprintf("[WARNING] UNLOCKED DEVELOPMENT RUN: lock status is %s.\n", lock_info$lock_status),
       file = stderr())
-  quit(status = 1)
 }
-
-# 3. Build and validate shared context only after validating requested modules.
-context <- tryCatch({
-  build_context(cfg)
-}, error = function(e) {
-  cat(sprintf("[FATAL] Input validation error: %s\n", e$message), file = stderr())
-  quit(status = 1)
-})
-
-# Optional module dependencies and embedded database checks are performed only
-# for explicitly requested modules, before validate-only and output mutation.
 check_module_dependencies(requested_modules)
-if ("faprotax" %in% requested_modules) invisible(validate_faprotax_runtime())
 
-# 4. Handle --validate-only
-if (cfg$cli$validate_only) {
-  cat("=== ONT wf-16s Pipeline Validation Check ===\n")
-  cat(sprintf("Config file:      %s\n", cfg$config_file))
-  cat(sprintf("Mode:             %s\n", context$mode))
-  cat(sprintf("Samples (%d):      %s\n", length(context$samples), paste(context$samples, collapse = ", ")))
-  cat(sprintf("Total reads:      %s\n", format(sum(context$sample_stats$TotalReads), big.mark = ",")))
-  cat(sprintf("Classified reads: %s\n", format(sum(context$sample_stats$ClassifiedReads), big.mark = ",")))
-  cat(sprintf("Upstream:         %s / %s / rank %s\n",
-              context$upstream_contract$classifier,
-              context$upstream_contract$database_set,
-              context$upstream_contract$taxonomic_rank))
-  cat(sprintf("Abundance SHA256: %s\n", context$file_hashes$abundance_table))
+initial_inventory <- tryCatch(inventory_inputs(cfg), error = function(e) fatal("Preflight error", e))
+context <- tryCatch(build_context(cfg), error = function(e) fatal("Input validation error", e))
+full_inventory <- tryCatch(inventory_inputs(cfg, context$bamstats),
+                           error = function(e) fatal("Preflight error", e))
+tryCatch(assert_inputs_unchanged(initial_inventory), error = function(e) fatal("Preflight error", e))
+context$input_inventory <- full_inventory
+tryCatch(run_module_preflight(context, requested_modules),
+         error = function(e) fatal("Module preflight error", e))
+tryCatch(assert_inputs_unchanged(full_inventory), error = function(e) fatal("Preflight error", e))
+
+if (isTRUE(cfg$cli$validate_only)) {
+  summary <- list(
+    status = "validated", pipeline_version = pipeline_version, mode = context$mode,
+    samples = unname(context$samples), requested_modules = unname(requested_modules),
+    total_reads = sum(context$sample_stats$TotalReads), lock_status = lock_info$lock_status,
+    git_dirty = source_info$git_dirty, input_fingerprints = full_inventory
+  )
+  cat(jsonlite::toJSON(summary, pretty = TRUE, auto_unbox = TRUE, null = "null"), "\n")
   cat("Validation check PASSED. Zero filesystem mutations performed.\n")
-  quit(status = 0)
+  quit(status = 0L)
 }
 
-# 5. Overwrite check: protect every known module output, including partial runs
-# that failed before a manifest could be written.
-known_existing <- c(
-  c(cfg$output$manifest_file, cfg$output$resolved_config_file, cfg$output$session_info_file)[
-    file.exists(c(cfg$output$manifest_file, cfg$output$resolved_config_file, cfg$output$session_info_file))
-  ],
-  unlist(lapply(cfg$output$dirs, function(path) {
-    if (dir.exists(path)) list.files(path, recursive = TRUE, full.names = TRUE, all.files = TRUE) else character(0)
-  }), use.names = FALSE)
-)
-if (!cfg$cli$overwrite && length(known_existing) > 0L) {
-  cat(sprintf(
-    "[FATAL] Refusing to overwrite %d existing pipeline output(s); first path: '%s'\nUse --overwrite to allow replacement.\n",
-    length(known_existing), known_existing[1]
-  ), file = stderr())
-  quit(status = 1)
+final_root <- normalizePath(cfg$output$base_dir, winslash = "/", mustWork = FALSE)
+prior_manifest <- tryCatch(validate_prior_output(final_root, cfg$cli$overwrite),
+                           error = function(e) fatal("Output validation error", e))
+stage <- prepare_run_staging(final_root)
+stage_active <- TRUE
+on.exit(if (stage_active && dir.exists(stage)) unlink(stage, recursive = TRUE, force = TRUE), add = TRUE)
+tryCatch(preserve_unowned_outputs(final_root, stage, prior_manifest),
+         error = function(e) fatal("Output staging error", e))
+
+rebase_output <- function(cfg, root) {
+  cfg$output$base_dir <- root
+  cfg$output$dirs <- list(
+    qc = file.path(root, "01_QC"), alpha = file.path(root, "02_Alpha_Diversity"),
+    beta = file.path(root, "03_Beta_Diversity"), composition = file.path(root, "04_Taxa_Composition"),
+    ordination = file.path(root, "05_Ordination"), shared_taxa = file.path(root, "06_Shared_Taxa"),
+    kreport = file.path(root, "07_Kreport"), faprotax = file.path(root, "08_FAPROTAX")
+  )
+  cfg$output$manifest_file <- file.path(root, "run_manifest.json")
+  cfg$output$resolved_config_file <- file.path(root, "resolved_config.yml")
+  cfg$output$session_info_file <- file.path(root, "session_info.txt")
+  cfg
 }
+cfg <- rebase_output(cfg, stage)
+context$config <- cfg
 
-# Create base output directory
-dir.create(cfg$output$base_dir, recursive = TRUE, showWarnings = FALSE)
-
-cat("=============================================================================\n")
-cat(sprintf("ONT wf-16s Amplicon Post-Processing Pipeline\n"))
-cat(sprintf("Project: %s | Mode: %s | Samples: %d\n",
-            cfg$project_name, context$mode, length(context$samples)))
-cat(sprintf("Output root: %s\n", cfg$output$base_dir))
-cat("=============================================================================\n")
-
-module_results <- stats::setNames(
-  lapply(requested_modules, function(module_name) new_not_run_module_record()),
-  requested_modules
-)
+cat(sprintf("ONT wf-16s post-processing %s | %s | %d sample(s)\n",
+            pipeline_version, context$mode, length(context$samples)))
+start_time <- Sys.time()
+module_results <- stats::setNames(lapply(names(module_registry), function(name) {
+  new_not_run_module_record(sprintf("Module '%s' was not requested.", name))
+}), names(module_registry))
 any_failed <- FALSE
 
-for (mod_name in requested_modules) {
-  cat(sprintf("\n>>> Executing module [%s]...\n", mod_name))
-  mod_fn <- module_registry[[mod_name]]
-  mod_start <- Sys.time()
-  module_warnings <- character(0)
-
-  mod_res <- tryCatch({
-    withCallingHandlers(
-      mod_fn(context),
-      warning = function(w) {
-        module_warnings <<- c(module_warnings, conditionMessage(w))
-        cat(sprintf("WARNING in module [%s]: %s\n", mod_name, conditionMessage(w)), file = stderr())
-        invokeRestart("muffleWarning")
-      }
-    )
-  }, error = function(e) {
-    cat(sprintf("ERROR in module [%s]: %s\n", mod_name, e$message), file = stderr())
-    list(
-      status = "failed",
-      error = e$message,
-      outputs = character(0)
-    )
+for (module_name in requested_modules) {
+  cat(sprintf(">>> Executing module [%s]...\n", module_name))
+  started <- Sys.time()
+  warnings <- character(0)
+  result <- tryCatch(withCallingHandlers(module_registry[[module_name]](context), warning = function(w) {
+    warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")
+  }), error = function(e) list(status = "failed", error = conditionMessage(e), outputs = character(0)))
+  result <- tryCatch(validate_module_result(result, module_name, stage), error = function(e) {
+    list(status = "failed", error = paste("Module result contract violation:", conditionMessage(e)),
+         outputs = character(0))
   })
-
-  mod_end <- Sys.time()
-  mod_res$start_time <- format(mod_start, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
-  mod_res$end_time <- format(mod_end, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
-  mod_res$duration_seconds <- as.numeric(difftime(mod_end, mod_start, units = "secs"))
-  mod_res$warnings <- unique(module_warnings)
-  module_results[[mod_name]] <- mod_res
-
-  if (mod_res$status == "failed") {
+  ended <- Sys.time()
+  result$start_time <- utc_timestamp(started)
+  result$end_time <- utc_timestamp(ended)
+  result$duration_seconds <- as.numeric(difftime(ended, started, units = "secs"))
+  result$warnings <- unique(warnings)
+  module_results[[module_name]] <- result
+  tryCatch(assert_inputs_unchanged(full_inventory,
+    allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh")),
+    error = function(e) {
+      result$status <<- "failed"; result$error <<- conditionMessage(e); result$outputs <<- character(0)
+      module_results[[module_name]] <<- result
+    })
+  if (identical(result$status, "failed")) {
     any_failed <- TRUE
-    if (!cfg$cli$keep_going) {
-      failure_index <- match(mod_name, requested_modules)
-      later_modules <- if (failure_index < length(requested_modules)) {
-        requested_modules[seq.int(failure_index + 1L, length(requested_modules))]
-      } else {
-        character(0)
-      }
-      for (later_module in later_modules) {
-        module_results[[later_module]] <- new_not_run_module_record(sprintf(
-          "Pipeline stopped after failure in module '%s'.", mod_name
-        ))
-      }
-      cat(sprintf("\n[FATAL] Pipeline stopped due to failure in module [%s]. (Use --keep-going to continue past errors)\n", mod_name), file = stderr())
+    cat(sprintf("ERROR in module [%s]: %s\n", module_name, result$error), file = stderr())
+    if (!isTRUE(cfg$cli$keep_going)) {
+      later <- requested_modules[match(module_name, requested_modules):length(requested_modules)]
+      later <- setdiff(later, module_name)
+      for (name in later) module_results[[name]] <- new_not_run_module_record(sprintf(
+        "Pipeline stopped after failure in module '%s'.", module_name))
       break
     }
-  } else if (mod_res$status == "skipped") {
-    cat(sprintf("Module [%s] SKIPPED: %s\n", mod_name, mod_res$reason %||% "prerequisites not met"))
-  } else {
-    cat(sprintf("Module [%s] COMPLETED (%d output artifacts produced)\n",
-                mod_name, length(mod_res$outputs)))
   }
 }
 
 end_time <- Sys.time()
-overall_status <- if (any_failed) "failed" else "completed"
-
-deps <- get_dependency_versions(unique(c(
-  RUNTIME_PACKAGES,
-  get_module_packages(requested_modules)
-)))
+deps <- get_dependency_versions(packages)
 session_lines <- c(
-  "=== System & Interpreter ===",
-  sprintf("R version: %s", R.version.string),
+  "=== System & Interpreter ===", sprintf("R version: %s", R.version.string),
   sprintf("Platform:  %s", R.version$platform),
-  sprintf("Run time:  %s to %s", start_time, end_time),
-  "",
-  "=== Package Versions ===",
-  sprintf("  %-15s: %s", names(deps), deps),
-  "",
-  "=== Full sessionInfo() ===",
-  capture.output(print(sessionInfo()))
+  sprintf("Run time:  %s to %s", utc_timestamp(start_time), utc_timestamp(end_time)), "",
+  "=== Package Versions ===", sprintf("  %-15s: %s", names(deps), deps), "",
+  "=== Full sessionInfo() ===", capture.output(print(sessionInfo()))
 )
-writeLines(session_lines, cfg$output$session_info_file)
+atomic_write_lines(session_lines, cfg$output$session_info_file)
+manifest_cfg <- cfg
+manifest_cfg$output <- rebase_output(cfg, final_root)$output
+atomic_write_yaml(manifest_cfg, cfg$output$resolved_config_file)
 
-# 8. Write resolved config
-yaml::write_yaml(cfg, cfg$output$resolved_config_file)
-
-# 9. Build and write run manifest
-input_meta <- list(
-  abundance_table = list(
-    path = cfg$input$abundance_table,
-    size_bytes = if (file.exists(cfg$input$abundance_table)) file.info(cfg$input$abundance_table)$size else 0,
-    mtime = if (file.exists(cfg$input$abundance_table)) as.character(file.info(cfg$input$abundance_table)$mtime) else NA,
-    sha256 = context$file_hashes$abundance_table
-  ),
-  metadata = if (!is.null(cfg$input$metadata) && file.exists(cfg$input$metadata)) list(
-    path = cfg$input$metadata,
-    size_bytes = file.info(cfg$input$metadata)$size,
-    mtime = as.character(file.info(cfg$input$metadata)$mtime),
-    sha256 = context$file_hashes$metadata
-  ) else NULL,
-  params_json = if (!is.null(cfg$input$params_json) && file.exists(cfg$input$params_json)) list(
-    path = cfg$input$params_json,
-    size_bytes = file.info(cfg$input$params_json)$size,
-    mtime = as.character(file.info(cfg$input$params_json)$mtime),
-    sha256 = context$file_hashes$params_json
-  ) else NULL,
-  taxonomy_cache = if (!is.null(cfg$taxonomy$cache) && file.exists(cfg$taxonomy$cache)) list(
-    path = cfg$taxonomy$cache,
-    size_bytes = file.info(cfg$taxonomy$cache)$size,
-    mtime = as.character(file.info(cfg$taxonomy$cache)$mtime),
-    sha256 = context$file_hashes$taxonomy_cache
-  ) else NULL,
-  assignments = if (length(context$assignments) > 0L) {
-    json_array(lapply(names(context$assignments), function(sample_id) {
-      path <- context$assignments[[sample_id]]
-      list(
-        sample_id = sample_id,
-        path = path,
-        size_bytes = file.info(path)$size,
-        mtime = as.character(file.info(path)$mtime),
-        sha256 = context$file_hashes[[paste0("assignment_", sample_id)]]
-      )
-    }))
-  } else NULL,
-  bamstats = if (any(!is.na(context$bamstats))) {
-    json_array(lapply(names(context$bamstats)[!is.na(context$bamstats)], function(sample_id) {
-      path <- context$bamstats[[sample_id]]
-      list(
-        sample_id = sample_id,
-        path = path,
-        size_bytes = file.info(path)$size,
-        mtime = as.character(file.info(path)$mtime),
-        sha256 = context$file_hashes[[paste0("bamstats_", sample_id)]]
-      )
-    }))
-  } else NULL
-)
-
-unresolved_file <- file.path(cfg$output$dirs$kreport, "unresolved_taxids.tsv")
-unresolved_count <- if (file.exists(unresolved_file)) {
-  max(0L, length(readLines(unresolved_file, warn = FALSE)) - 1L)
-} else {
-  NA_integer_
+to_final <- function(path) sub(paste0("^", gsub("([][{}()+*^$|\\?.])", "\\\\\\1", stage)),
+                               final_root, path)
+for (name in names(module_results)) {
+  module_results[[name]]$outputs <- to_final(module_results[[name]]$outputs %||% character(0))
 }
 
-taxonomy_provenance_file <- file.path(cfg$output$dirs$kreport, "taxonomy_provenance.json")
-taxonomy_provenance <- if (file.exists(taxonomy_provenance_file)) {
-  jsonlite::fromJSON(taxonomy_provenance_file, simplifyVector = FALSE)
-} else {
-  NULL
-}
+taxonomy_provenance_path <- file.path(stage, "07_Kreport", "taxonomy_provenance.json")
+taxonomy_provenance <- if (file.exists(taxonomy_provenance_path))
+  jsonlite::fromJSON(taxonomy_provenance_path, simplifyVector = FALSE) else list()
+unresolved_path <- file.path(stage, "07_Kreport", "unresolved_taxids.tsv")
+unresolved_count <- if (file.exists(unresolved_path)) max(0L, length(readLines(unresolved_path)) - 1L) else NA_integer_
+python <- tryCatch(find_python(), error = function(e) NA_character_)
+python_version <- if (!is.na(python)) trimws(paste(unlist(processx::run(python, "--version",
+  error_on_status = FALSE)[c("stdout", "stderr")]), collapse = " ")) else NA_character_
 
-python_cmd <- tryCatch(find_python(), error = function(e) NA_character_)
-python_version <- if (!is.na(python_cmd)) {
-  tryCatch({
-    probe <- processx::run(python_cmd, "--version", error_on_status = FALSE)
-    trimws(paste(c(probe$stdout, probe$stderr), collapse = " "))
-  }, error = function(e) NA_character_)
-} else {
-  NA_character_
-}
-
-git_commit <- tryCatch({
-  result <- processx::run(
-    "git", c("-c", paste0("safe.directory=", repo_root),
-             "-C", repo_root, "rev-parse", "HEAD"),
-    error_on_status = FALSE
-  )
-  if (identical(result$status, 0L)) trimws(result$stdout) else NULL
-}, error = function(e) NULL)
-
-lockfile_path <- file.path(repo_root, "renv.lock")
-lockfile_sha256 <- if (file.exists(lockfile_path)) compute_file_hash(lockfile_path) else NULL
-
+owned <- unique(c("resolved_config.yml", "session_info.txt", unlist(lapply(module_results, function(x) {
+  paths <- x$outputs %||% character(0)
+  ifelse(startsWith(tolower(paths), paste0(tolower(final_root), "/")),
+         substring(paths, nchar(final_root) + 2L), paths)
+}), use.names = FALSE)))
 manifest <- list(
-  pipeline = "ont-wf16s-postprocess",
-  pipeline_version = pipeline_version,
-  git_commit = git_commit,
-  schema_version = 2L,
-  config_schema_version = cfg$schema_version,
-  run_status = overall_status,
-  start_time = format(start_time, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
-  end_time = format(end_time, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+  pipeline = "ont-wf16s-postprocess", pipeline_version = pipeline_version,
+  git_commit = source_info$git_commit, git_dirty = source_info$git_dirty,
+  source_digest_sha256 = source_info$source_digest_sha256,
+  schema_version = 2L, schema_revision = 1L, config_schema_version = cfg$schema_version,
+  run_status = if (any_failed) "failed" else "completed",
+  start_time = utc_timestamp(start_time), end_time = utc_timestamp(end_time),
   duration_seconds = as.numeric(difftime(end_time, start_time, units = "secs")),
-  project_name = cfg$project_name,
-  mode = context$mode,
-  seed = cfg$seed,
-  samples = json_array(context$samples),
-  config_file = cfg$config_file,
-  output_root = cfg$output$base_dir,
-  command = json_array(commandArgs(trailingOnly = FALSE)),
-  cli = utils::modifyList(cfg$cli, list(modules = json_array(cfg$cli$modules))),
-  inputs = input_meta,
-  upstream_contract = context$upstream_contract,
+  project_name = cfg$project_name, mode = context$mode, seed = cfg$seed,
+  samples = json_array(context$samples), config_file = cfg$config_file,
+  output_root = final_root, command = json_array(commandArgs(trailingOnly = FALSE)),
+  cli = utils::modifyList(cfg$cli, list(modules = json_array(requested_modules))),
+  inputs = full_inventory, upstream_contract = context$upstream_contract,
   modules = lapply(module_results, manifest_module_record),
-  warnings = json_array(unique(c(
-    context$warnings,
-    unlist(lapply(module_results, function(x) x$warnings %||% character(0)), use.names = FALSE)
-  ))),
-  taxonomy = list(
-    network_mode = cfg$taxonomy$network_mode,
-    unresolved_policy = cfg$taxonomy$unresolved_policy,
-    unresolved_count = unresolved_count,
+  owned_outputs = json_array(sort(c(owned, "run_manifest.json"))),
+  warnings = json_array(unique(c(context$warnings, if (!lock_info$locked) "Unlocked development run" else character(0),
+    if (isTRUE(source_info$git_dirty)) "Dirty-source development run" else character(0),
+    unlist(lapply(module_results, function(x) x$warnings %||% character(0)), use.names = FALSE)))),
+  taxonomy = list(network_mode = cfg$taxonomy$network_mode,
+    unresolved_policy = cfg$taxonomy$unresolved_policy, unresolved_count = unresolved_count,
     conflicts_count = taxonomy_provenance$conflicts_count %||% NA_integer_,
-    resolution_source_counts = taxonomy_provenance$resolution_source_counts %||% NULL
-  ),
-  interpreter = list(
-    r = R.version.string,
-    platform = R.version$platform,
-    python = python_version
-  ),
-  environment = list(
-    locked = !is.null(lockfile_sha256),
-    lockfile = if (!is.null(lockfile_sha256)) "renv.lock" else NULL,
-    lockfile_sha256 = lockfile_sha256
-  ),
-  package_versions = json_array(lapply(names(deps), function(package_name) {
-    list(package = package_name, version = deps[[package_name]])
-  }))
+    resolution_source_counts = taxonomy_provenance$resolution_source_counts %||% NULL),
+  interpreter = list(r = R.version.string, platform = R.version$platform, python = python_version),
+  environment = lock_info,
+  package_versions = json_array(lapply(names(deps), function(package) list(package = package, version = deps[[package]])))
 )
-
-write_manifest_v2(manifest, cfg$output$manifest_file)
-
-cat("\n=============================================================================\n")
-cat(sprintf("Pipeline finished with status: [%s]\n", toupper(overall_status)))
-cat(sprintf("Manifest written to: %s\n", cfg$output$manifest_file))
-cat(sprintf("Resolved config to: %s\n", cfg$output$resolved_config_file))
-cat("=============================================================================\n")
-
-if (any_failed) {
-  quit(status = 1)
-} else {
-  quit(status = 0)
+write_manifest_v2(manifest, cfg$output$manifest_file, physical_root = stage)
+tryCatch(assert_inputs_unchanged(full_inventory,
+  allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh")),
+  error = function(e) fatal("Pre-publication input check failed", e))
+if (any_failed && !is.null(prior_manifest)) {
+  unlink(stage, recursive = TRUE, force = TRUE)
+  stage_active <- FALSE
+  cat("[FATAL] Transaction aborted; the previous completed output was preserved.\n", file = stderr())
+  quit(status = 1L)
 }
+publish_staged_run(stage, final_root)
+stage_active <- FALSE
+if (any_failed) {
+  cat(sprintf("[FATAL] Failed run manifest published: %s\n", file.path(final_root, "run_manifest.json")), file = stderr())
+  quit(status = 1L)
+}
+cat(sprintf("Pipeline completed transactionally. Manifest: %s\n", file.path(final_root, "run_manifest.json")))

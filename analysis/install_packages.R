@@ -24,15 +24,17 @@ include_modules <- any(c("--all", "--modules", "--faprotax") %in% args)
 REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE, include_modules = include_modules)
 
 if (do_restore) {
-  lockfile <- file.path(dirname(script_dir), "renv.lock")
+  project_root <- normalizePath(dirname(script_dir), winslash = "/", mustWork = TRUE)
+  lockfile <- file.path(project_root, "renv.lock")
   if (!file.exists(lockfile)) {
     stop(sprintf("Cannot restore locked environment: '%s' does not exist.", lockfile), call. = FALSE)
   }
   if (!requireNamespace("renv", quietly = TRUE)) {
     stop("Cannot restore locked environment: package 'renv' is unavailable.", call. = FALSE)
   }
-  renv::restore(prompt = FALSE)
-  status <- renv::status()
+  renv::activate(project = project_root)
+  renv::restore(project = project_root, lockfile = lockfile, prompt = FALSE)
+  status <- renv::status(project = project_root, lockfile = lockfile)
   if (!isTRUE(status$synchronized)) {
     stop("renv restore completed but the project remains out of sync.", call. = FALSE)
   }

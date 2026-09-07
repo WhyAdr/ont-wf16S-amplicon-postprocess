@@ -61,6 +61,27 @@ get_cli_parser <- function() {
       default = FALSE,
       dest = "overwrite",
       help = "Allow overwriting existing output files"
+    ),
+    optparse::make_option(
+      c("--allow-unlocked"),
+      action = "store_true",
+      default = FALSE,
+      dest = "allow_unlocked",
+      help = "Development only: continue when the active R environment differs from renv.lock"
+    ),
+    optparse::make_option(
+      c("--allow-dirty"),
+      action = "store_true",
+      default = FALSE,
+      dest = "allow_dirty",
+      help = "Development only: continue when maintained tracked source files are modified"
+    ),
+    optparse::make_option(
+      c("--online-preflight"),
+      action = "store_true",
+      default = FALSE,
+      dest = "online_preflight",
+      help = "Permit network credential/connectivity checks during taxonomy refresh preflight"
     )
   )
 

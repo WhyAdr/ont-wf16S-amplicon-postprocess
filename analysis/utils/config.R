@@ -11,7 +11,7 @@ suppressMessages(library(yaml))
 assert_scalar_number <- function(x, name, lower = -Inf, upper = Inf, integer = FALSE,
                                  lower_open = FALSE, upper_open = FALSE) {
   valid <- is.numeric(x) && length(x) == 1L && !is.na(x) && is.finite(x)
-  if (valid && integer) valid <- abs(x - round(x)) <= sqrt(.Machine$double.eps)
+  if (valid && integer) valid <- x == floor(x)
   if (valid) valid <- if (lower_open) x > lower else x >= lower
   if (valid) valid <- if (upper_open) x < upper else x <= upper
   if (!valid) stop(sprintf("Invalid configuration value '%s'.", name), call. = FALSE)
@@ -33,7 +33,14 @@ parse_requested_modules <- function(value) {
     stop("'--modules' must contain at least one module name.", call. = FALSE)
   }
 
-  modules <- strsplit(trimws(value), "[,[:space:]]+", perl = TRUE)[[1]]
+  if (!identical(value, trimws(value)) || grepl("(^,|,$|,,|,\\s|\\s,)", value, perl = TRUE)) {
+    stop("'--modules' must be a strict comma-separated list without whitespace or empty entries.",
+         call. = FALSE)
+  }
+  modules <- strsplit(value, ",", fixed = TRUE)[[1]]
+  if (any(!grepl("^[a-z][a-z0-9_]*$", modules))) {
+    stop("'--modules' contains an invalid module name.", call. = FALSE)
+  }
   duplicates <- unique(modules[duplicated(modules)])
   if (length(duplicates) > 0L) {
     stop(sprintf("Duplicate module name(s): %s", paste(duplicates, collapse = ", ")),
@@ -43,7 +50,8 @@ parse_requested_modules <- function(value) {
 }
 
 validate_config <- function(cfg) {
-  if (!identical(as.integer(cfg$schema_version), 1L)) {
+  if (!is.numeric(cfg$schema_version) || length(cfg$schema_version) != 1L ||
+      is.na(cfg$schema_version) || !is.finite(cfg$schema_version) || cfg$schema_version != 1) {
     stop("Unsupported schema_version; expected 1.", call. = FALSE)
   }
   assert_nonempty_string(cfg$project_name, "project_name")
@@ -108,12 +116,12 @@ validate_config <- function(cfg) {
   if (cfg$qc$display_min_length >= cfg$qc$display_max_length) {
     stop("'qc.display_min_length' must be smaller than 'qc.display_max_length'.", call. = FALSE)
   }
-  assert_scalar_number(cfg$alpha$rarefaction_points, "alpha.rarefaction_points", lower = 2, integer = TRUE)
-  assert_scalar_number(cfg$alpha$resample_depth, "alpha.resample_depth", lower = 1, integer = TRUE)
+  assert_scalar_number(cfg$alpha$rarefaction_points, "alpha.rarefaction_points", lower = 2, upper = 1000, integer = TRUE)
+  assert_scalar_number(cfg$alpha$resample_depth, "alpha.resample_depth", lower = 1, upper = 9007199254740991, integer = TRUE)
   assert_scalar_number(cfg$alpha$resample_fraction_cap, "alpha.resample_fraction_cap",
                        lower = 0, upper = 1, lower_open = TRUE)
-  assert_scalar_number(cfg$alpha$resample_iterations, "alpha.resample_iterations", lower = 1, integer = TRUE)
-  assert_scalar_number(cfg$composition$top_n_taxa, "composition.top_n_taxa", lower = 1, integer = TRUE)
+  assert_scalar_number(cfg$alpha$resample_iterations, "alpha.resample_iterations", lower = 1, upper = 10000, integer = TRUE)
+  assert_scalar_number(cfg$composition$top_n_taxa, "composition.top_n_taxa", lower = 1, upper = 10000, integer = TRUE)
   assert_nonempty_string(cfg$composition$heatmap_rank, "composition.heatmap_rank")
   assert_nonempty_string(cfg$composition$heatmap_transform, "composition.heatmap_transform")
   if (!cfg$composition$heatmap_rank %in% c("phylum", "class", "order", "family", "genus", "species")) {
@@ -123,18 +131,22 @@ validate_config <- function(cfg) {
     stop("'composition.heatmap_transform' must be 'log10_relative' or 'none'.", call. = FALSE)
   }
   assert_scalar_number(cfg$faprotax$top_n_functions, "faprotax.top_n_functions",
-                       lower = 1, integer = TRUE)
+                       lower = 1, upper = 10000, integer = TRUE)
   if (!is.character(cfg$beta$distances) || length(cfg$beta$distances) == 0L ||
       any(!cfg$beta$distances %in% c("bray", "jaccard")) || anyDuplicated(cfg$beta$distances)) {
     stop("'beta.distances' must contain unique values drawn from: bray, jaccard.", call. = FALSE)
   }
-  assert_scalar_number(cfg$beta$permutations, "beta.permutations", lower = 1, integer = TRUE)
+  assert_nonempty_string(cfg$beta$primary_distance, "beta.primary_distance")
+  if (sum(cfg$beta$distances == cfg$beta$primary_distance) != 1L) {
+    stop("'beta.primary_distance' must occur exactly once in 'beta.distances'.", call. = FALSE)
+  }
+  assert_scalar_number(cfg$beta$permutations, "beta.permutations", lower = 1, upper = 1000000, integer = TRUE)
   assert_scalar_number(cfg$beta$minimum_count, "beta.minimum_count", lower = 1, integer = TRUE)
   if (!is.logical(cfg$beta$resampling$enabled) || length(cfg$beta$resampling$enabled) != 1L ||
       is.na(cfg$beta$resampling$enabled)) {
     stop("'beta.resampling.enabled' must be true or false.", call. = FALSE)
   }
-  assert_scalar_number(cfg$beta$resampling$iterations, "beta.resampling.iterations", lower = 1, integer = TRUE)
+  assert_scalar_number(cfg$beta$resampling$iterations, "beta.resampling.iterations", lower = 1, upper = 10000, integer = TRUE)
   assert_scalar_number(cfg$beta$resampling$depth_fraction_of_minimum,
                        "beta.resampling.depth_fraction_of_minimum",
                        lower = 0, upper = 1, lower_open = TRUE)
@@ -225,6 +237,7 @@ get_default_config <- function() {
     ),
     beta = list(
       distances = c("bray", "jaccard"),
+      primary_distance = "bray",
       permutations = 999L,
       minimum_count = 1L,
       strata_column = NULL,
@@ -315,6 +328,9 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     validate_only = isTRUE(cli_opts$validate_only) || isTRUE(cli_opts[["validate-only"]]),
     keep_going = isTRUE(cli_opts$keep_going) || isTRUE(cli_opts[["keep-going"]]),
     overwrite = isTRUE(cli_opts$overwrite),
+    allow_unlocked = isTRUE(cli_opts$allow_unlocked) || isTRUE(cli_opts[["allow-unlocked"]]),
+    allow_dirty = isTRUE(cli_opts$allow_dirty) || isTRUE(cli_opts[["allow-dirty"]]),
+    online_preflight = isTRUE(cli_opts$online_preflight) || isTRUE(cli_opts[["online-preflight"]]),
     refresh_taxonomy = cli_refresh,
     krona = isTRUE(cfg$krona$enabled),
     modules = requested_modules

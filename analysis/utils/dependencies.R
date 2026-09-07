@@ -11,6 +11,7 @@ RUNTIME_PACKAGES <- c(
   "ggplot2",
   "scales",
   "vegan",
+  "permute",
   "RColorBrewer",
   "jsonlite",
   "pheatmap",
