@@ -52,13 +52,13 @@ read_upstream_params <- function(path) {
   taxonomic_rank <- scalar_string("taxonomic_rank")
   if (!identical(classifier, "minimap2")) {
     stop(sprintf(
-      "Unsupported wf-16s classifier '%s'. v0.3.0 supports minimap2 only; Kraken2/Bracken requires a classifier-specific denominator model.",
+      "Unsupported wf-16s classifier '%s'. This pipeline supports minimap2 only; Kraken2/Bracken requires a classifier-specific denominator model.",
       classifier
     ), call. = FALSE)
   }
   if (!database_set %in% SUPPORTED_NCBI_DATABASE_SETS) {
     stop(sprintf(
-      "Unsupported wf-16s database_set '%s'. v0.3.0 supports the bundled NCBI database sets only.",
+      "Unsupported wf-16s database_set '%s'. This pipeline supports the bundled NCBI database sets only.",
       database_set
     ), call. = FALSE)
   }
@@ -81,6 +81,17 @@ read_upstream_params <- function(path) {
     value <- params[[field]]
     if (!is.numeric(value) || length(value) != 1L || is.na(value) || !is.finite(value)) {
       stop(sprintf("params.json field '%s' must be one finite number.", field), call. = FALSE)
+    }
+  }
+  integer_fields <- c("min_len", "max_len", "abundance_threshold")
+  for (field in integer_fields) {
+    value <- params[[field]]
+    if (abs(value - round(value)) > sqrt(.Machine$double.eps) ||
+        value > .Machine$integer.max) {
+      stop(sprintf(
+        "params.json field '%s' must be a whole number no greater than %d.",
+        field, .Machine$integer.max
+      ), call. = FALSE)
     }
   }
   if (params$min_len <= 0 || params$max_len <= params$min_len || params$min_read_qual < 0 ||
@@ -143,6 +154,10 @@ discover_bamstats <- function(root, sample_ids) {
                                          stringsAsFactors = FALSE)[[1]])
     if (length(samples_in_file) == 0L || anyNA(samples_in_file) || any(!nzchar(trimws(samples_in_file)))) {
       stop(sprintf("Bamstats file '%s' contains missing or empty sample_name values.", path), call. = FALSE)
+    }
+    if (any(samples_in_file != trimws(samples_in_file))) {
+      stop(sprintf("Bamstats file '%s' contains sample_name values with leading/trailing whitespace.",
+                   path), call. = FALSE)
     }
     if (length(samples_in_file) > 1L) {
       stop(sprintf("Bamstats file '%s' contains inconsistent sample names: %s",
@@ -222,6 +237,11 @@ validate_sample_ids <- function(sample_ids) {
     stop("Sample ID validation error: Empty or NA sample ID detected.", call. = FALSE)
   }
 
+  if (any(sample_ids != trimws(sample_ids))) {
+    stop("Sample ID validation error: Sample IDs must not have leading or trailing whitespace.",
+         call. = FALSE)
+  }
+
   if (any(sample_ids %in% c(".", ".."))) {
     stop("Sample ID validation error: Sample ID cannot be '.' or '..'.", call. = FALSE)
   }
@@ -235,8 +255,20 @@ validate_sample_ids <- function(sample_ids) {
   }
 
   sanitized <- vapply(sample_ids, sanitize_filename, character(1))
-  if (any(duplicated(sanitized))) {
-    stop("Sample ID validation error: Sample IDs collide after filename sanitization.", call. = FALSE)
+  if (any(grepl("[.]$", sanitized))) {
+    stop("Sample ID validation error: Portable output basenames must not end in a dot.",
+         call. = FALSE)
+  }
+  if (anyDuplicated(tolower(sanitized))) {
+    stop("Sample ID validation error: Sample IDs collide after portable filename normalization.",
+         call. = FALSE)
+  }
+  windows_base <- toupper(sub("[.].*$", "", sanitized))
+  reserved <- windows_base %in% c("CON", "PRN", "AUX", "NUL",
+                                  paste0("COM", 1:9), paste0("LPT", 1:9))
+  if (any(reserved)) {
+    stop(sprintf("Sample ID validation error: '%s' is a reserved Windows device basename.",
+                 sample_ids[which(reserved)[1]]), call. = FALSE)
   }
 
   invisible(TRUE)
@@ -349,6 +381,17 @@ read_abundance_table <- function(path, tax_col = "tax", aggregate_cols = c("tota
       "Lineage schema violation at row %d: expected 8 ranks, found %d ('%s')",
       bad_idx + 1, field_counts[bad_idx], lineages[bad_idx]
     ), call. = FALSE)
+  }
+  for (row_index in seq_along(parsed_lineages)) {
+    fields <- parsed_lineages[[row_index]]
+    bad_rank <- which(!nzchar(trimws(fields)) | fields != trimws(fields))
+    if (length(bad_rank) > 0L) {
+      rank_index <- bad_rank[1]
+      stop(sprintf(
+        "Lineage schema violation at row %d: rank '%s' must be non-empty and have no leading/trailing whitespace ('%s').",
+        row_index + 1L, RANKS_8[rank_index], lineages[row_index]
+      ), call. = FALSE)
+    }
   }
 
   # Check unclassified rows
@@ -519,18 +562,24 @@ read_metadata_table <- function(path, selected_samples) {
     stop(sprintf("Metadata file not found: '%s'", path), call. = FALSE)
   }
 
-  meta <- read.delim(path, header = TRUE, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
-
-  if (anyDuplicated(colnames(meta))) {
+  header_line <- readLines(path, n = 1L, warn = FALSE)
+  if (length(header_line) == 0L) {
+    stop("Metadata table is empty.", call. = FALSE)
+  }
+  header <- strsplit(header_line, "\t", fixed = TRUE)[[1]]
+  if (anyDuplicated(header)) {
     stop("Metadata table contains duplicate column names.", call. = FALSE)
   }
-
-  if (!"SampleID" %in% colnames(meta)) {
-    stop("Metadata table must contain a 'SampleID' column.", call. = FALSE)
+  required_identity <- c("SampleID", "Group")
+  missing_identity <- setdiff(required_identity, header)
+  if (length(missing_identity) > 0L) {
+    stop(sprintf("Metadata table must contain column(s): %s.",
+                 paste(missing_identity, collapse = ", ")), call. = FALSE)
   }
-  if (!"Group" %in% colnames(meta)) {
-    stop("Metadata table must contain a 'Group' column.", call. = FALSE)
-  }
+  col_classes <- rep(NA_character_, length(header))
+  col_classes[match(required_identity, header)] <- "character"
+  meta <- read.delim(path, header = TRUE, sep = "\t", stringsAsFactors = FALSE,
+                     check.names = FALSE, colClasses = col_classes)
 
   invalid_sample <- is.na(meta$SampleID) | !nzchar(trimws(meta$SampleID))
   invalid_group <- is.na(meta$Group) | !nzchar(trimws(meta$Group))

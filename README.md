@@ -58,6 +58,8 @@ implied.
 - Tab-delimited table where the first column is `tax`.
 - `tax` contains **exactly eight** semicolon-delimited ranks:
   `superkingdom;kingdom;phylum;class;order;family;genus;species`
+- Every rank must be non-empty after trimming and must not have leading or
+  trailing whitespace; use an explicit label such as `Unknown` when applicable.
 - One or more sample columns containing non-negative, integer counts (e.g. `80556` or `80556.0`).
 - Synthetic unclassified row: `Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown`.
 - Optional aggregate column `total` must reconcile exactly to the row sum across sample columns.

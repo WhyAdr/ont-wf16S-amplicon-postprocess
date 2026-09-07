@@ -74,12 +74,13 @@ run_shared_taxa <- function(context) {
   all_outputs <- c(all_outputs, presence_file)
 
   # 2. Group Prevalence Table & Membership Matrix
-  groups <- unique(meta$Group)
+  group_values <- as.character(meta$Group)
+  groups <- unique(group_values)
   prev_list <- list()
   membership_list <- list()
 
   for (grp in groups) {
-    grp_samples <- meta$SampleID[meta$Group == grp]
+    grp_samples <- meta$SampleID[group_values == grp]
     n_grp <- length(grp_samples)
 
     if (n_grp > 0) {
@@ -96,6 +97,7 @@ run_shared_taxa <- function(context) {
     TaxonPath = agg_counts$TaxonPath,
     Taxon = tax_labels,
     prev_mat,
+    check.names = FALSE,
     stringsAsFactors = FALSE
   )
   prev_file <- file.path(shared_dir, "group_prevalence.tsv")
@@ -108,6 +110,7 @@ run_shared_taxa <- function(context) {
     Taxon = tax_labels,
     Threshold = sprintf("Prevalence >= %.2f within group", group_prev_thresh),
     mem_mat,
+    check.names = FALSE,
     stringsAsFactors = FALSE
   )
   mem_file <- file.path(shared_dir, "group_membership.tsv")

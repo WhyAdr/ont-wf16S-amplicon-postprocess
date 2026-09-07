@@ -183,3 +183,25 @@ test_that("Cohort distance results are invariant to sample and metadata order", 
     tolerance = 1e-12
   )
 })
+
+test_that("Shared taxa preserves numeric-like sample IDs and arbitrary group labels", {
+  root <- tempfile("shared_identity_")
+  dir.create(root)
+  samples <- c("01", "02")
+  abundance <- create_temp_abundance(root, n_species = 4, sample_names = samples)
+  metadata <- create_temp_metadata(root, samples, c("0", "Group-one"))
+  cfg <- get_default_config()
+  cfg$mode <- "cohort"
+  cfg$input$abundance_table <- abundance
+  cfg$input$metadata <- metadata
+  cfg$input$params_json <- create_temp_params(root)
+  cfg$output$base_dir <- file.path(root, "output")
+  cfg$output$dirs <- list(shared_taxa = file.path(cfg$output$base_dir, "06_Shared_Taxa"))
+  context <- build_context(cfg)
+  expect_identical(context$metadata$SampleID, samples)
+  expect_identical(context$metadata$Group, c("0", "Group-one"))
+  expect_equal(run_shared_taxa(context)$status, "completed")
+  prevalence <- read.delim(file.path(cfg$output$dirs$shared_taxa, "group_prevalence.tsv"),
+                           check.names = FALSE)
+  expect_true(all(c("0", "Group-one") %in% names(prevalence)))
+})

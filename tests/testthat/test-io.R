@@ -18,6 +18,20 @@ test_that("producer contract accepts supported minimap2 and rejects unsafe alter
                "expected species rank")
 })
 
+test_that("producer contract requires whole-number length and abundance thresholds", {
+  root <- tempfile("params_integer_contract_")
+  dir.create(root)
+  for (field in c("min_len", "max_len", "abundance_threshold")) {
+    path <- create_temp_params(root)
+    params <- jsonlite::fromJSON(path, simplifyVector = FALSE)
+    params[[field]] <- params[[field]] + 0.5
+    jsonlite::write_json(params, path, auto_unbox = TRUE, null = "null")
+    expect_error(read_upstream_params(path), sprintf("field '%s' must be a whole number", field))
+  }
+  params <- read_upstream_params(create_temp_params(root))
+  expect_equal(params$min_len, 1300)
+})
+
 test_that("bamstats partition is one-to-one and conserves all C0 reads", {
   root <- tempfile("bamstats_contract_")
   dir.create(root)
@@ -75,6 +89,16 @@ test_that("discover_bamstats_files rejects missing or inconsistent sample_names"
   writeLines(c("name\tsample_name\tiden\tref_coverage", "r1\tS1\t95\t95", "r2\tS2\t95\t95"), con)
   close(con)
   expect_error(discover_bamstats(root, c("S1", "S2")), "inconsistent sample names")
+})
+
+test_that("discover_bamstats rejects padded sample names", {
+  root <- tempfile("bamstats_discover_padded_")
+  sub_dir <- file.path(root, "sample.bamstats_results")
+  dir.create(sub_dir, recursive = TRUE)
+  con <- gzfile(file.path(sub_dir, "bamstats.readstats.tsv.gz"), open = "wt")
+  writeLines(c("name\tsample_name\tiden\tref_coverage", "r1\tS1 \t95\t95"), con)
+  close(con)
+  expect_error(discover_bamstats(root, "S1"), "leading/trailing whitespace")
 })
 
 test_that("discover_bamstats rejects multiple bamstats files mapping to the same sample", {
@@ -234,6 +258,23 @@ test_that("Abundance table errors if rank count is not 8", {
   expect_error(read_abundance_table(file_path), "expected 8 ranks, found 6")
 })
 
+test_that("Abundance table rejects empty or padded rank cells", {
+  root <- tempfile("bad_rank_cells_")
+  dir.create(root)
+  bad_lineages <- c(
+    "Bacteria;;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Species",
+    "Bacteria; ;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Species",
+    "Bacteria;Kingdom ;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Species"
+  )
+  for (lineage in bad_lineages) {
+    path <- create_temp_abundance(root, n_species = 1, sample_names = "S1")
+    table <- read.delim(path, check.names = FALSE)
+    table$tax[2] <- lineage
+    write.table(table, path, sep = "\t", row.names = FALSE, quote = FALSE)
+    expect_error(read_abundance_table(path), "Lineage schema violation at row 3: rank")
+  }
+})
+
 test_that("Assignments parser handles pipe and plain lengths and reconciles counts", {
   tmp <- tempdir()
   asgn_file <- create_temp_assignments(tmp, sample_id = "S1", n_classified = 40, n_unclassified = 10)
@@ -312,6 +353,16 @@ test_that("Metadata validation aligns samples and detects discrepancies", {
   )
 })
 
+test_that("Metadata preserves numeric-looking identity columns as exact strings", {
+  root <- tempfile("metadata_identity_")
+  dir.create(root)
+  path <- file.path(root, "metadata.tsv")
+  writeLines(c("SampleID\tGroup", "01\t0", "02\t1"), path)
+  metadata <- read_metadata_table(path, c("01", "02"))
+  expect_identical(metadata$SampleID, c("01", "02"))
+  expect_identical(metadata$Group, c("0", "1"))
+})
+
 test_that("Metadata rejects empty groups", {
   tmp <- tempfile("bad_metadata_")
   dir.create(tmp)
@@ -327,7 +378,14 @@ test_that("Sample IDs reject unsafe names and post-sanitization collisions", {
     c("S1", "."),
     c("S1", ".."),
     c("S1", "bad\nname"),
-    c("A B", "A?B")
+    c("A B", "A?B"),
+    c("S1", " S2"),
+    c("Sample", "sample"),
+    c("S1", "ends."),
+    c("S1", "CON"),
+    c("S1", "NUL.txt"),
+    c("S1", "COM1"),
+    c("S1", "LPT9.tsv")
   )
   for (sample_ids in invalid_sets) {
     expect_error(validate_sample_ids(sample_ids), "Sample ID validation error")
