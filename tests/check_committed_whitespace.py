@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -11,36 +12,59 @@ import sys
 GIT = ["git", "-c", f"safe.directory={pathlib.Path.cwd().resolve().as_posix()}"]
 
 
-def changed_paths() -> list[pathlib.PurePosixPath]:
-    base_candidates = [
-        [*GIT, "merge-base", "HEAD", "origin/main"],
-        [*GIT, "rev-parse", "--verify", "HEAD^"],
-    ]
-    base = None
-    for candidate in base_candidates:
-        probe = subprocess.run(candidate, check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        if probe.returncode == 0:
-            base = probe.stdout.strip().decode("ascii")
-            break
-    parent = subprocess.run(
-        [*GIT, "rev-parse", "--verify", "HEAD^"],
+def valid_commit(value: str | None) -> bool:
+    if not value or value == "0" * 40:
+        return False
+    probe = subprocess.run(
+        [*GIT, "rev-parse", "--verify", value],
         check=False,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    shallow = subprocess.run(
-        [*GIT, "rev-parse", "--is-shallow-repository"],
-        check=True,
-        stdout=subprocess.PIPE,
-    )
-    if parent.returncode != 0 and shallow.stdout.strip() == b"true":
-        raise RuntimeError(
-            "HEAD parent is unavailable in a shallow checkout; "
-            "configure checkout fetch-depth >= 2."
-        )
+    return probe.returncode == 0
 
-    command = [*GIT, "diff", "--name-only", "-z", "--diff-filter=AM"]
-    command.extend([base, "HEAD"] if base else (["HEAD^", "HEAD"] if parent.returncode == 0 else ["--root", "HEAD"]))
+
+def empty_tree() -> str:
+    # The well-known Git empty-tree object is stable across repositories.
+    return "4b825dc642cb6eb9a060e54bf8b69288fbee4904"
+
+
+def choose_base() -> str:
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
+    before = os.environ.get("GITHUB_EVENT_BEFORE")
+    if event == "push" and valid_commit(before):
+        return before  # The push range is exactly before..HEAD.
+
+    if event == "pull_request":
+        base_ref = os.environ.get("GITHUB_BASE_REF")
+        if base_ref:
+            remote_base = f"origin/{base_ref}"
+            if valid_commit(remote_base):
+                merge_base = subprocess.run(
+                    [*GIT, "merge-base", "HEAD", remote_base],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout.decode("ascii", errors="ignore").strip()
+                if valid_commit(merge_base):
+                    return merge_base
+
+    for candidate in ("origin/main", "HEAD^"):
+        if valid_commit(candidate):
+            resolved = subprocess.run(
+                [*GIT, "rev-parse", "--verify", candidate],
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout.decode("ascii").strip()
+            if resolved != subprocess.run([*GIT, "rev-parse", "HEAD"], check=True,
+                                           stdout=subprocess.PIPE).stdout.decode("ascii").strip():
+                return resolved
+    return empty_tree()
+
+
+def changed_paths() -> list[pathlib.PurePosixPath]:
+    base = choose_base()
+    command = [*GIT, "diff", "--name-only", "-z", "--diff-filter=AM", base, "HEAD"]
     result = subprocess.run(command, check=True, stdout=subprocess.PIPE)
     return [pathlib.PurePosixPath(name.decode("utf-8")) for name in result.stdout.split(b"\0") if name]
 

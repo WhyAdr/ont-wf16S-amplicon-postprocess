@@ -282,5 +282,8 @@ test_that("Beta rarefaction stability records isolated Procrustes failures", {
     file.path(cfg$output$dirs$beta, "pcoa_rarefaction_diagnostics.tsv"), check.names = FALSE
   )
   expect_equal(skipped_diagnostics$Status, "Skipped")
+  expect_identical(skipped_diagnostics$ReasonCode, "E_MINIMUM_SUCCESS_NOT_MET")
+  expect_equal(skipped_diagnostics$MinimumSuccessfulIterations, 2L)
   expect_equal(skipped_diagnostics$SuccessfulIterations, 0L)
+  expect_false(file.exists(file.path(cfg$output$dirs$beta, "pcoa_rarefaction_stability.tsv")))
 })

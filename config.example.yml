@@ -83,6 +83,7 @@ beta:
     enabled: false
     iterations: 100
     depth_fraction_of_minimum: 0.75
+    minimum_success_fraction: 0.50
 
 shared_taxa:
   rank: "species"

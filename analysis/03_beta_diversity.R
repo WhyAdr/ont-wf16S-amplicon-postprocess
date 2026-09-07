@@ -14,6 +14,7 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
   dir.create(beta_dir, recursive = TRUE, showWarnings = FALSE)
 
   all_outputs <- character(0)
+  beta_warnings <- character(0)
 
   # Cohort gate
   if (context$mode != "cohort" || length(context$samples) < 2) {
@@ -28,7 +29,8 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
     return(list(
       status = "skipped",
       reason = skip_df$Reason[1],
-      outputs = skip_file
+      outputs = skip_file,
+      warnings = beta_warnings
     ))
   }
 
@@ -165,6 +167,8 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
     stability_file <- file.path(beta_dir, "pcoa_rarefaction_stability.tsv")
     stability_diag <- file.path(beta_dir, "pcoa_rarefaction_diagnostics.tsv")
     stability_depth <- floor(min(sample_sums) * cfg$beta$resampling$depth_fraction_of_minimum)
+    minimum_success_fraction <- cfg$beta$resampling$minimum_success_fraction %||% 0.50
+    minimum_successes <- max(1L, ceiling(cfg$beta$resampling$iterations * minimum_success_fraction))
     reference_dist <- dist_list[[primary_name]]
     reference_values <- as.vector(reference_dist)
     reference_fit <- tryCatch(
@@ -180,7 +184,12 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
         Status = "Skipped",
         ReasonCode = "E_DEGENERATE_PRIMARY_DISTANCE",
         Reason = "Rarefaction stability requires >=3 samples and a finite, nonzero, rank-two primary-distance PCoA.",
-        Distance = primary_name
+        Distance = primary_name,
+        MinimumSuccessFraction = minimum_success_fraction,
+        MinimumSuccessfulIterations = minimum_successes,
+        RequestedIterations = cfg$beta$resampling$iterations,
+        SuccessfulIterations = 0L,
+        FailedIterations = 0L
       ), stability_diag, sep = "\t", row.names = FALSE, quote = FALSE)
       all_outputs <- c(all_outputs, stability_diag)
     } else {
@@ -225,16 +234,21 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
           stringsAsFactors = FALSE
         )
       }
-      if (length(stability_rows)) write.table(do.call(rbind, stability_rows), stability_file,
+      successful_iterations <- length(stability_rows)
+      stability_ok <- successful_iterations >= minimum_successes
+      if (stability_ok && successful_iterations) write.table(do.call(rbind, stability_rows), stability_file,
         sep = "\t", row.names = FALSE, quote = FALSE)
+      if (!stability_ok && file.exists(stability_file)) unlink(stability_file, force = TRUE)
       failed_df <- if (length(failed_iterations)) do.call(rbind, failed_iterations) else
         data.frame(Iteration = integer(0), Reason = character(0))
       write.table(data.frame(
-        Status = if (length(stability_rows)) "Completed" else "Skipped",
-        ReasonCode = if (length(stability_rows)) NA_character_ else "E_NO_SUCCESSFUL_STABILITY_ITERATIONS",
+        Status = if (stability_ok) "Completed" else "Skipped",
+        ReasonCode = if (stability_ok) NA_character_ else "E_MINIMUM_SUCCESS_NOT_MET",
         RequestedIterations = cfg$beta$resampling$iterations,
-        SuccessfulIterations = length(stability_rows),
+        SuccessfulIterations = successful_iterations,
         FailedIterations = nrow(failed_df),
+        MinimumSuccessFraction = minimum_success_fraction,
+        MinimumSuccessfulIterations = minimum_successes,
         Depth = stability_depth,
         Seed = seed,
         Distance = primary_name,
@@ -295,9 +309,11 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
     all_outputs <- c(all_outputs, permanova_file)
 
     # Betadisper
-    disp_res <- vegan::betadisper(primary_dist, meta$Group)
+    disp_res <- withCallingHandlers(vegan::betadisper(primary_dist, meta$Group),
+      warning = function(w) { warning_messages <<- c(warning_messages, conditionMessage(w)); invokeRestart("muffleWarning") })
     disp_perm <- withCallingHandlers(vegan::permutest(disp_res, permutations = permutation_matrix),
       warning = function(w) { warning_messages <<- c(warning_messages, conditionMessage(w)); invokeRestart("muffleWarning") })
+    beta_warnings <- unique(c(beta_warnings, warning_messages))
 
     disp_df <- data.frame(
       Analysis = "Betadisper (Homogeneity of Multivariate Dispersions)",
@@ -338,6 +354,7 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
 
   list(
     status = "completed",
-    outputs = all_outputs
+    outputs = all_outputs,
+    warnings = unique(beta_warnings)
   )
 }

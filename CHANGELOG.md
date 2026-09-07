@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.2] - 2026-09-07
+
+### Fixed
+
+- Make release verification enforce the complete eight-module registry and
+  explicit `not_run` records for unrequested modules.
+- Register runner cleanup inside a transactional function and roll back module
+  writes on failure, including safe migration of legacy output ownership.
+- Activate and record the project library with full lockfile dependency closure,
+  stabilize source digests, and enforce immutable resolver inputs.
+- Align assignment parsing and NCBI refresh context checks across runtimes.
+- Require a minimum beta-resampling success fraction and propagate statistical
+  warnings into module and run manifests.
+- Correct push-range whitespace validation for main-branch CI runs.
+
 ## [0.4.1] - 2026-09-07
 
 ### Fixed

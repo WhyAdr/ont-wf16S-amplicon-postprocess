@@ -150,6 +150,9 @@ validate_config <- function(cfg) {
   assert_scalar_number(cfg$beta$resampling$depth_fraction_of_minimum,
                        "beta.resampling.depth_fraction_of_minimum",
                        lower = 0, upper = 1, lower_open = TRUE)
+  assert_scalar_number(cfg$beta$resampling$minimum_success_fraction,
+                       "beta.resampling.minimum_success_fraction",
+                       lower = 0, upper = 1, lower_open = TRUE)
   if (!is.null(cfg$beta$strata_column) &&
       (!is.character(cfg$beta$strata_column) || length(cfg$beta$strata_column) != 1L ||
        !nzchar(cfg$beta$strata_column))) {
@@ -244,7 +247,8 @@ get_default_config <- function() {
       resampling = list(
         enabled = FALSE,
         iterations = 100L,
-        depth_fraction_of_minimum = 0.75
+        depth_fraction_of_minimum = 0.75,
+        minimum_success_fraction = 0.50
       )
     ),
     shared_taxa = list(

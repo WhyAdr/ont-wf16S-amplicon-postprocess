@@ -72,7 +72,17 @@ jobs:
       - name: Check complete commit-range whitespace
         if: runner.os == 'Linux'
         shell: bash
-        run: git diff --check "$(git merge-base HEAD origin/${GITHUB_BASE_REF:-main})...HEAD"
+        run: |
+          base="${GITHUB_EVENT_BEFORE:-}"
+          if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+            base="$(git merge-base HEAD "origin/${GITHUB_BASE_REF:-main}" 2>/dev/null || true)"
+          fi
+          if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]] || \
+             ! git cat-file -e "$base^{commit}" 2>/dev/null || \
+             [[ "$base" == "$(git rev-parse HEAD)" ]]; then
+            base="$(git rev-parse HEAD^ 2>/dev/null || git hash-object -t tree /dev/null)"
+          fi
+          git diff --check "$base" HEAD
 
   faprotax:
     name: ${{ matrix.os }} / R 4.5.3 / Python 3.12 (FAPROTAX)

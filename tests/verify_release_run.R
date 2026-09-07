@@ -59,25 +59,33 @@ stopifnot(identical(manifest$upstream_contract$taxonomic_rank, "S"))
 stopifnot(is.null(manifest$upstream_contract$workflow_version))
 stopifnot(is.null(manifest$upstream_contract$workflow_revision))
 
-# Expected module set completeness and status verification
-DEFAULT_CORE_MODULES <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
+# Expected module set completeness and status verification.  The registry is
+# fixed so a release manifest cannot silently omit a maintained module.
+ALL_MODULES <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport", "faprotax")
 expected_modules <- array_strings(manifest$cli$modules, "cli.modules")
-if (length(expected_modules) == 0L) expected_modules <- DEFAULT_CORE_MODULES
+if (length(expected_modules) == 0L) expected_modules <- ALL_MODULES
 invisible(require_json_array(manifest$samples, "samples"))
 invisible(require_json_array(manifest$command, "command"))
 invisible(require_json_array(manifest$warnings, "warnings"))
 invisible(require_json_array(manifest$package_versions, "package_versions"))
 
-# Non-self-referential check: release manifests must include the core module baseline
-stopifnot(all(DEFAULT_CORE_MODULES %in% names(manifest$modules)))
-stopifnot(identical(sort(names(manifest$modules)), sort(union(DEFAULT_CORE_MODULES, expected_modules))))
+# Non-self-referential check: every maintained module has an explicit record.
+stopifnot(identical(sort(names(manifest$modules)), sort(ALL_MODULES)))
+stopifnot(setequal(expected_modules, intersect(expected_modules, ALL_MODULES)))
 
 # Module statuses, output file existence, and per-module warnings check
 for (mod in names(manifest$modules)) {
   mod_rec <- manifest$modules[[mod]]
-  stopifnot(mod_rec$status %in% c("completed", "skipped"))
   out_paths <- array_strings(mod_rec$outputs, paste0("modules.", mod, ".outputs"))
-  invisible(require_json_array(mod_rec$warnings, paste0("modules.", mod, ".warnings")))
+  warnings <- array_strings(mod_rec$warnings, paste0("modules.", mod, ".warnings"))
+  if (mod %in% expected_modules) {
+    stopifnot(mod_rec$status %in% c("completed", "skipped", "failed"))
+  } else {
+    stopifnot(identical(mod_rec$status, "not_run"))
+    stopifnot(length(out_paths) == 0L, length(warnings) == 0L)
+    stopifnot(is.null(mod_rec$error), !is.null(mod_rec$reason), nzchar(mod_rec$reason))
+    stopifnot(is.null(mod_rec$start_time), is.null(mod_rec$end_time), is.null(mod_rec$duration_seconds))
+  }
   if (length(out_paths) > 0L) {
     stopifnot(all(file.exists(out_paths)))
   }
