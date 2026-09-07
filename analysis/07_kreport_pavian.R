@@ -50,6 +50,17 @@ run_kreport <- function(context) {
   if (length(assignment_paths) > 0L) {
     cmd_args <- c(cmd_args, as.vector(rbind("--assignments", assignment_paths)))
   }
+  expected_records <- c(
+    list(context$input_inventory$abundance_table, context$input_inventory$taxonomy_cache),
+    context$input_inventory$assignments
+  )
+  expected_records <- Filter(function(record) !is.null(record) && !is.null(record$path) &&
+    !is.null(record$sha256), expected_records)
+  if (length(expected_records)) {
+    expected_specs <- vapply(expected_records, function(record) paste(record$path, record$sha256, sep = "\t"),
+                             character(1))
+    cmd_args <- c(cmd_args, as.vector(rbind("--expected-input", expected_specs)))
+  }
 
   # processx passes a true argument vector on Windows and Unix; do not shell-quote.
   resolver <- processx::run(

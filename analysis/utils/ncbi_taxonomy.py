@@ -13,6 +13,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections import Counter
 
 TOOL_NAME = "ont_wf16s_postprocess"
@@ -20,6 +21,7 @@ MAX_SAFE_INTEGER = 9007199254740991
 MAX_READ_LENGTH = 2147483647
 PLACEHOLDER_NAMES = {"unknown", "unclassified", "uncultured", "unidentified"}
 READ_LENGTH_RE = re.compile(r"^[0-9]+$|^[0-9]+\|[1-9][0-9]*$")
+EXPECTED_RANKS = ("superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species")
 
 
 def parse_taxid(value, context="TaxID"):
@@ -69,7 +71,16 @@ def compute_json_sha256(payload):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_cache(path):
+def verify_expected_file(path, expected_sha256, context):
+    if expected_sha256 is None:
+        return
+    actual = compute_sha256(path)
+    if actual != expected_sha256:
+        raise ValueError(f"{context}: input changed before or after read for {path!r}.")
+
+
+def load_cache(path, expected_sha256=None):
+    verify_expected_file(path, expected_sha256, "taxonomy cache")
     if not os.path.exists(path):
         return {}
     try:
@@ -84,22 +95,27 @@ def load_cache(path):
         if not isinstance(taxon_path, str) or isinstance(taxid, bool) or not isinstance(taxid, (int, str)):
             raise ValueError(f"Invalid cache entry for {taxon_path!r}: expected a canonical TaxID.")
         normalized[taxon_path] = parse_taxid(taxid, f"cache entry {taxon_path!r}")
+    verify_expected_file(path, expected_sha256, "taxonomy cache")
     return normalized
 
 
-def read_abundance_paths(path, tax_column):
+def read_abundance_paths(path, tax_column, expected_sha256=None):
+    verify_expected_file(path, expected_sha256, "abundance")
     with open(path, "r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         if reader.fieldnames is None or tax_column not in reader.fieldnames:
             raise ValueError(f"Abundance table does not contain tax column {tax_column!r}.")
         paths = [row[tax_column].strip() for row in reader if row.get(tax_column, "").strip()]
+    verify_expected_file(path, expected_sha256, "abundance")
     return list(dict.fromkeys(paths))
 
 
-def read_assignment_taxids(paths):
+def read_assignment_taxids(paths, expected_hashes=None):
     lineage_to_taxids = {}
-    seen_read_ids = set()
+    expected_hashes = expected_hashes or {}
     for path in paths:
+        verify_expected_file(path, expected_hashes.get(path), "assignment")
+        seen_read_ids = set()
         opener = gzip.open if str(path).lower().endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -119,8 +135,8 @@ def read_assignment_taxids(paths):
                 if not READ_LENGTH_RE.fullmatch(length_field):
                     raise ValueError(f"{path}:{line_number}: malformed read length field.")
                 read_length = int(length_field.rsplit("|", 1)[-1])
-                if read_length > MAX_READ_LENGTH:
-                    raise ValueError(f"{path}:{line_number}: read length exceeds {MAX_READ_LENGTH}.")
+                if read_length <= 0 or read_length > MAX_READ_LENGTH:
+                    raise ValueError(f"{path}:{line_number}: read length must satisfy 0 < length <= {MAX_READ_LENGTH}.")
                 taxid_text = fields[2]
                 if any(field != field.strip() or any(ord(ch) < 32 for ch in field)
                        for field in (fields[1], taxid_text, lineage)):
@@ -132,6 +148,7 @@ def read_assignment_taxids(paths):
                     raise ValueError(f"{path}:{line_number}: positive TaxID requires a complete lineage.")
                 if taxid > 0:
                     lineage_to_taxids.setdefault(lineage, []).append(taxid)
+        verify_expected_file(path, expected_hashes.get(path), "assignment")
 
     resolved = {}
     conflicts = []
@@ -177,7 +194,56 @@ def iter_taxon_nodes(abundance_paths):
     return [nodes[path] for path in sorted(nodes)]
 
 
-def query_exact_scientific_name(name, email, api_key, attempts=3):
+def fetch_taxonomy_context(taxid, email, api_key):
+    params = {
+        "db": "taxonomy",
+        "id": str(taxid),
+        "retmode": "xml",
+        "tool": TOOL_NAME,
+        "email": email,
+    }
+    if api_key:
+        params["api_key"] = api_key
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={"User-Agent": f"{TOOL_NAME}/1.0"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        root = ET.fromstring(response.read())
+    taxon = root.find(".//Taxon")
+    if taxon is None:
+        raise ValueError(f"NCBI returned no taxonomy record for TaxID {taxid}.")
+    returned_taxid = taxon.findtext("TaxId")
+    if returned_taxid is None or parse_taxid(returned_taxid, "NCBI returned TaxID") != int(taxid):
+        raise ValueError(f"NCBI taxonomy response did not identify requested TaxID {taxid}.")
+    scientific_name = taxon.findtext("ScientificName")
+    rank = taxon.findtext("Rank")
+    lineage = [node.findtext("ScientificName") for node in taxon.findall("./LineageEx/Taxon")]
+    lineage = [value for value in lineage if value]
+    if not scientific_name or not rank:
+        raise ValueError(f"NCBI taxonomy record for TaxID {taxid} lacks name or rank.")
+    return {"scientific_name": scientific_name, "rank": rank, "lineage": lineage}
+
+
+def _normalized_taxon_name(value):
+    return " ".join(str(value).split()).casefold()
+
+
+def validate_taxonomy_context(record, name, expected_rank=None, ancestor_names=None):
+    if _normalized_taxon_name(record["scientific_name"]) != _normalized_taxon_name(name):
+        return "NCBI TaxID scientific name does not exactly match the requested name."
+    if expected_rank and record["rank"].casefold() != expected_rank.casefold():
+        return (f"NCBI TaxID rank mismatch for {name!r}: expected {expected_rank!r}, "
+                f"found {record['rank']!r}.")
+    lineage_names = {_normalized_taxon_name(value) for value in record["lineage"]}
+    missing = [value for value in (ancestor_names or [])
+               if _normalized_taxon_name(value) not in lineage_names]
+    if missing:
+        return (f"NCBI TaxID ancestry mismatch for {name!r}; missing ancestor context: "
+                + ", ".join(missing))
+    return None
+
+
+def query_exact_scientific_name(name, email, api_key, attempts=3,
+                                expected_rank=None, ancestor_names=None):
     params = {
         "db": "taxonomy",
         "term": f'"{name}"[Scientific Name]',
@@ -197,7 +263,15 @@ def query_exact_scientific_name(name, email, api_key, attempts=3):
             ids = sorted({int(taxid) for taxid in result.get("esearchresult", {}).get("idlist", [])})
             if len(ids) > 1:
                 return 0, None, ids
-            return (ids[0] if ids else 0), None, []
+            if not ids:
+                return 0, None, []
+            record = fetch_taxonomy_context(ids[0], email, api_key)
+            context_error = validate_taxonomy_context(
+                record, name, expected_rank=expected_rank, ancestor_names=ancestor_names
+            )
+            if context_error:
+                return 0, context_error, []
+            return ids[0], None, []
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt + 1 < attempts:
@@ -240,6 +314,8 @@ def main():
     parser.add_argument("--abundance", required=True)
     parser.add_argument("--tax-column", default="tax")
     parser.add_argument("--assignments", action="append", default=[])
+    parser.add_argument("--expected-input", action="append", default=[],
+                        help="Expected input fingerprint as PATH<TAB>SHA256; may be repeated")
     parser.add_argument("--cache", required=True, help="Read-only source cache in cache_only mode")
     parser.add_argument("--resolved-cache", help="Run-local resolved cache output")
     parser.add_argument("--mode", choices=["cache_only", "refresh"], default="cache_only")
@@ -255,15 +331,24 @@ def main():
     args = parser.parse_args()
 
     try:
+        expected_inputs = {}
+        for specification in args.expected_input:
+            path, separator, expected_sha256 = specification.partition("\t")
+            if not separator or not path or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
+                raise ValueError("--expected-input must be PATH<TAB>64-hex-SHA256.")
+            expected_inputs[path] = expected_sha256.lower()
         if not os.path.exists(args.abundance):
             raise ValueError(f"Abundance file not found: {args.abundance}")
-        abundance_paths = read_abundance_paths(args.abundance, args.tax_column)
+        abundance_paths = read_abundance_paths(
+            args.abundance, args.tax_column, expected_inputs.get(args.abundance)
+        )
         cache_sha_before = compute_sha256(args.cache)
-        cache = load_cache(args.cache)
+        cache = load_cache(args.cache, expected_inputs.get(args.cache))
         resolution_sources = {
             taxon_path: "source_cache" for taxon_path, taxid in cache.items() if taxid > 0
         }
-        assignment_map, conflicts = read_assignment_taxids(args.assignments)
+        assignment_hashes = {path: expected_inputs[path] for path in args.assignments if path in expected_inputs}
+        assignment_map, conflicts = read_assignment_taxids(args.assignments, assignment_hashes)
 
         for path in abundance_paths:
             parts = path.split(";")
@@ -290,10 +375,17 @@ def main():
             name_results = {}
             for item in unresolved:
                 name = item["name"]
-                if name not in name_results:
-                    name_results[name] = query_exact_scientific_name(name, email, api_key)
+                expected_rank = EXPECTED_RANKS[item["depth"] - 1] if item["depth"] <= len(EXPECTED_RANKS) else None
+                ancestor_names = [part for part in item["path"].split(";")[:-1]
+                                  if part.strip().lower() not in PLACEHOLDER_NAMES]
+                query_key = (name, expected_rank, tuple(ancestor_names))
+                if query_key not in name_results:
+                    name_results[query_key] = query_exact_scientific_name(
+                        name, email, api_key, expected_rank=expected_rank,
+                        ancestor_names=ancestor_names
+                    )
                     time.sleep(delay)
-                taxid, error, ambiguous_taxids = name_results[name]
+                taxid, error, ambiguous_taxids = name_results[query_key]
                 if error:
                     query_failures.append({"path": item["path"], "name": name, "error": error})
                 elif ambiguous_taxids:

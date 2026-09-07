@@ -59,17 +59,26 @@ inventory_inputs <- function(cfg, bamstats = NULL) {
   records
 }
 
-assert_inputs_unchanged <- function(inventory, allow_taxonomy_cache_change = FALSE) {
+assert_inputs_unchanged <- function(inventory, allow_taxonomy_cache_change = FALSE,
+                                     taxonomy_cache_expected_sha256 = NULL) {
   flatten <- c(
     inventory[c("abundance_table", "params_json", "metadata", "taxonomy_cache")],
     inventory$assignments,
     inventory$bamstats
   )
   for (expected in Filter(Negate(is.null), flatten)) {
-    if (isTRUE(allow_taxonomy_cache_change) &&
-        !is.null(inventory$taxonomy_cache) && identical(expected$path, inventory$taxonomy_cache$path)) next
     actual <- fingerprint_file(expected$path, expected$path)
     fields <- c("path", "size_bytes", "mtime_utc", "sha256")
+    taxonomy_record <- !is.null(inventory$taxonomy_cache) &&
+      identical(expected$path, inventory$taxonomy_cache$path)
+    if (taxonomy_record && isTRUE(allow_taxonomy_cache_change)) {
+      expected_hash <- taxonomy_cache_expected_sha256 %||% expected$sha256
+      if (!identical(actual$sha256, expected_hash)) {
+        preflight_error("E_INPUT_CHANGED", sprintf("taxonomy cache did not match the expected transition: '%s'",
+                                                     expected$path))
+      }
+      next
+    }
     if (!identical(expected[fields], actual[fields])) {
       preflight_error("E_INPUT_CHANGED", sprintf("input changed after inventory: '%s'", expected$path))
     }
@@ -79,10 +88,20 @@ assert_inputs_unchanged <- function(inventory, allow_taxonomy_cache_change = FAL
 
 read_lock_status <- function(repo_root, packages) {
   lockfile <- file.path(repo_root, "renv.lock")
+  library_paths <- normalizePath(.libPaths(), winslash = "/", mustWork = FALSE)
+  project_library <- tryCatch(
+    normalizePath(renv::paths$library(project = repo_root), winslash = "/", mustWork = FALSE),
+    error = function(e) NULL
+  )
+  if (length(project_library) && is.na(project_library)) project_library <- NULL
   if (!file.exists(lockfile)) {
     return(list(lock_status = "missing", locked = FALSE, lockfile = NULL,
                 lockfile_sha256 = NULL, expected_r = NULL, actual_r = as.character(getRversion()),
-                r_discrepancies = json_array("renv.lock is missing"), package_discrepancies = json_array(character(0))))
+                r_discrepancies = json_array("renv.lock is missing"),
+                package_discrepancies = json_array(character(0)),
+                library_discrepancies = json_array(character(0)),
+                library_paths = json_array(library_paths), project_library = project_library,
+                package_locations = json_array(list())))
   }
   lock <- jsonlite::fromJSON(lockfile, simplifyVector = FALSE)
   expected_r <- as.character(lock$R$Version %||% "")
@@ -90,15 +109,33 @@ read_lock_status <- function(repo_root, packages) {
   r_diff <- if (identical(expected_r, actual_r)) character(0) else
     sprintf("expected R %s, found %s", expected_r, actual_r)
   package_diff <- character(0)
-  for (package in packages) {
-    expected <- as.character(lock$Packages[[package]]$Version %||% "<missing from lock>")
-    actual <- if (requireNamespace(package, quietly = TRUE))
-      as.character(utils::packageVersion(package)) else "<not installed>"
-    if (!identical(expected, actual)) {
+  lock_packages <- sort(unique(c(names(lock$Packages %||% list()), packages)))
+  package_locations <- vector("list", length(lock_packages))
+  for (index in seq_along(lock_packages)) {
+    package <- lock_packages[[index]]
+    lock_record <- lock$Packages[[package]]
+    expected <- as.character(lock_record$Version %||% "<missing from lock>")
+    location <- tryCatch(find.package(package, quiet = TRUE)[1], error = function(e) NA_character_)
+    if (!length(location) || is.na(location) || !nzchar(location)) location <- NULL
+    actual <- if (!is.null(location)) as.character(utils::packageVersion(package)) else "<not installed>"
+    versions_match <- if (grepl("^[0-9]+([.][0-9]+|[-][0-9]+)+$", expected) &&
+                          grepl("^[0-9]+([.][0-9]+|[-][0-9]+)+$", actual)) {
+      tryCatch(utils::compareVersion(expected, actual) == 0L, error = function(e) FALSE)
+    } else {
+      identical(expected, actual)
+    }
+    if (!versions_match) {
       package_diff <- c(package_diff, sprintf("%s: expected %s, found %s", package, expected, actual))
     }
+    package_locations[[index]] <- list(package = package, version = actual, path = location)
   }
-  synchronized <- length(r_diff) == 0L && length(package_diff) == 0L
+  library_diff <- character(0)
+  if (is.null(project_library) || !any(tolower(normalizePath(library_paths, winslash = "/", mustWork = FALSE)) ==
+                                       tolower(project_library))) {
+    library_diff <- sprintf("active .libPaths() does not include project library '%s'",
+                            project_library %||% "<unknown>")
+  }
+  synchronized <- length(r_diff) == 0L && length(package_diff) == 0L && length(library_diff) == 0L
   list(
     lock_status = if (synchronized) "synchronized" else "mismatch",
     locked = synchronized,
@@ -107,17 +144,36 @@ read_lock_status <- function(repo_root, packages) {
     expected_r = expected_r,
     actual_r = actual_r,
     r_discrepancies = json_array(r_diff),
-    package_discrepancies = json_array(package_diff)
+    package_discrepancies = json_array(package_diff),
+    library_discrepancies = json_array(library_diff),
+    library_paths = json_array(library_paths),
+    project_library = project_library,
+    package_locations = json_array(package_locations)
   )
 }
 
+source_file_allowed <- function(path) {
+  basename(path) %in% c("VERSION", "renv.lock") |
+    grepl("[.](R|r|py|json|ya?ml)$", path, perl = TRUE)
+}
+
 maintained_source_files <- function(repo_root) {
-  candidates <- c(
-    list.files(file.path(repo_root, "analysis"), recursive = TRUE, full.names = TRUE),
-    file.path(repo_root, c("config.example.yml", "VERSION", "renv.lock"))
+  root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  tracked <- tryCatch({
+    result <- processx::run("git", c("-c", paste0("safe.directory=", root), "-C", root,
+      "ls-files", "--", "analysis", "config.example.yml", "VERSION", "renv.lock"),
+      error_on_status = FALSE)
+    if (result$status != 0L) character(0) else {
+      relative <- strsplit(trimws(result$stdout), "\\r?\\n", perl = TRUE)[[1]]
+      file.path(root, relative[nzchar(relative)])
+    }
+  }, error = function(e) character(0))
+  candidates <- if (length(tracked)) tracked else c(
+    list.files(file.path(root, "analysis"), recursive = TRUE, full.names = TRUE),
+    file.path(root, c("config.example.yml", "VERSION", "renv.lock"))
   )
-  sort(normalizePath(candidates[file.exists(candidates) & !dir.exists(candidates)],
-                     winslash = "/", mustWork = TRUE))
+  candidates <- candidates[file.exists(candidates) & !dir.exists(candidates) & source_file_allowed(candidates)]
+  sort(normalizePath(candidates, winslash = "/", mustWork = TRUE))
 }
 
 source_provenance <- function(repo_root) {
@@ -143,9 +199,10 @@ source_provenance <- function(repo_root) {
        source_files = json_array(relative))
 }
 
-validate_output_root <- function(cfg, repo_root) {
+validate_output_root <- function(cfg, repo_root, extra_paths = character(0)) {
   output <- normalizePath(cfg$output$base_dir, winslash = "/", mustWork = FALSE)
-  forbidden <- unique(normalizePath(c(repo_root, Sys.getenv("USERPROFILE"), Sys.getenv("HOME")),
+  homes <- c(Sys.getenv("USERPROFILE"), Sys.getenv("HOME"))
+  forbidden <- unique(normalizePath(c(repo_root, homes[nzchar(homes)]),
                                     winslash = "/", mustWork = FALSE))
   volume <- normalizePath(dirname(output), winslash = "/", mustWork = FALSE)
   while (!identical(dirname(volume), volume)) volume <- dirname(volume)
@@ -154,16 +211,19 @@ validate_output_root <- function(cfg, repo_root) {
     preflight_error("E_OUTPUT_UNSAFE", sprintf("unsafe output root '%s'", output))
   }
   inputs <- c(cfg$input$abundance_table, cfg$input$metadata, cfg$input$params_json,
-              cfg$taxonomy$cache, unlist(cfg$input$assignments, use.names = FALSE))
+              cfg$taxonomy$cache, unlist(cfg$input$assignments, use.names = FALSE), extra_paths)
   input_paths <- normalizePath(inputs[!is.na(inputs) & nzchar(inputs)], winslash = "/", mustWork = FALSE)
-  if (any(startsWith(tolower(input_paths), paste0(tolower(output), "/"))) ||
-      any(startsWith(tolower(output), paste0(tolower(input_paths), "/"))) ||
-      any(tolower(output) == tolower(input_paths))) {
+  overlaps <- function(left, right) {
+    tolower(left) == tolower(right) ||
+      startsWith(tolower(left), paste0(tolower(right), "/")) ||
+      startsWith(tolower(right), paste0(tolower(left), "/"))
+  }
+  if (any(vapply(input_paths, overlaps, logical(1), right = output))) {
     preflight_error("E_OUTPUT_UNSAFE", "output root overlaps an input path")
   }
   upstream <- cfg$input$wf16s_output_root
-  if (!is.null(upstream) && (tolower(output) == tolower(upstream) ||
-      startsWith(tolower(output), paste0(tolower(upstream), "/")))) {
+  if (!is.null(upstream) && any(vapply(normalizePath(upstream, winslash = "/", mustWork = FALSE),
+                                     overlaps, logical(1), right = output))) {
     preflight_error("E_OUTPUT_UNSAFE", "output root is nested within the upstream input root")
   }
   invisible(output)
@@ -193,6 +253,17 @@ run_module_preflight <- function(context, modules) {
     if (isTRUE(cfg$cli$online_preflight)) args <- c(args, "--online-preflight")
     assignments <- unname(unlist(context$assignments, use.names = FALSE))
     if (length(assignments)) args <- c(args, as.vector(rbind("--assignments", assignments)))
+    expected_records <- c(
+      list(context$input_inventory$abundance_table, context$input_inventory$taxonomy_cache),
+      context$input_inventory$assignments
+    )
+    expected_records <- Filter(function(record) !is.null(record) && !is.null(record$path) &&
+      !is.null(record$sha256), expected_records)
+    if (length(expected_records)) {
+      expected_specs <- vapply(expected_records,
+        function(record) paste(record$path, record$sha256, sep = "\t"), character(1))
+      args <- c(args, as.vector(rbind("--expected-input", expected_specs)))
+    }
     probe <- processx::run(python, args, error_on_status = FALSE)
     if (probe$status != 0L) preflight_error("E_KREPORT_PREFLIGHT", trimws(paste(probe$stderr, probe$stdout)))
   }

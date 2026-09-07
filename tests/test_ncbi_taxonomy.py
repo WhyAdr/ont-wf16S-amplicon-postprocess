@@ -95,6 +95,26 @@ class TaxonomyResolverTests(unittest.TestCase):
         self.assertEqual(resolved["Bacteria|Example"], 100)
         self.assertEqual(conflicts[0]["winner_taxid"], 100)
 
+    def test_assignment_read_ids_reset_between_files(self):
+        second = self.work / "assignment-second.tsv"
+        second.write_text(
+            "C\tread1\t1423\t1500\tBacteria|Bacillota\n", encoding="utf-8"
+        )
+        resolved, conflicts = taxonomy.read_assignment_taxids([self.assignment, second])
+        self.assertEqual(resolved["Bacteria|Bacillota|Bacilli|Bacillales|Bacillaceae|Bacillus|Bacillus subtilis"], 1423)
+        self.assertEqual(conflicts, [])
+
+    def test_assignment_rejects_zero_read_length(self):
+        self.assignment.write_text(
+            "C\tread1\t1423\t0\tBacteria|Bacillota\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, r"0 < length"):
+            taxonomy.read_assignment_taxids([self.assignment])
+
+    def test_expected_input_hash_is_checked_before_read(self):
+        with self.assertRaisesRegex(ValueError, "input changed"):
+            taxonomy.read_abundance_paths(self.abundance, "tax", "0" * 64)
+
     def test_ambiguous_exact_name_query_is_not_silently_selected(self):
         payload = json.dumps({"esearchresult": {"idlist": ["22", "11", "22"]}}).encode()
         response = mock.MagicMock()
@@ -107,6 +127,25 @@ class TaxonomyResolverTests(unittest.TestCase):
         self.assertEqual(taxid, 0)
         self.assertIsNone(error)
         self.assertEqual(ambiguous, [11, 22])
+
+    def test_exact_name_query_validates_rank_and_ancestry(self):
+        esearch = json.dumps({"esearchresult": {"idlist": ["11"]}}).encode()
+        efetch = b"""<TaxaSet><Taxon><TaxId>11</TaxId><ScientificName>Bacillus</ScientificName><Rank>genus</Rank><LineageEx><Taxon><ScientificName>Bacteria</ScientificName></Taxon></LineageEx></Taxon></TaxaSet>"""
+
+        def response(payload):
+            item = mock.MagicMock()
+            item.__enter__.return_value.read.return_value = payload
+            item.__exit__.return_value = False
+            return item
+
+        with mock.patch.object(request, "urlopen", side_effect=[response(esearch), response(efetch)]):
+            taxid, error, ambiguous = taxonomy.query_exact_scientific_name(
+                "Bacillus", "test@example.org", None, attempts=1,
+                expected_rank="genus", ancestor_names=["Bacteria"]
+            )
+        self.assertEqual(taxid, 11)
+        self.assertIsNone(error)
+        self.assertEqual(ambiguous, [])
 
     def test_refresh_records_all_resolution_source_labels(self):
         parts = self.lineage.split(";")
