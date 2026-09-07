@@ -77,7 +77,16 @@ create_temp_params <- function(dir, classifier = "minimap2",
                                database_set = "ncbi_16s_18s", taxonomic_rank = "S") {
   path <- file.path(dir, "params.json")
   database_sets <- list()
-  database_sets[[database_set]] <- list(taxonomy = "new_taxdump_2025-01-01.zip")
+  database_sets[[database_set]] <- list(
+    reference = sprintf("s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/%s/%s.fna",
+                        database_set, if (database_set == "ncbi_16s_18s") "ncbi_targeted_loci_16s_18s" else "ncbi_16s_18s_28s_ITS"),
+    database = sprintf("s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/%s/%s_kraken2.tar.gz",
+                       database_set, if (database_set == "ncbi_16s_18s") "ncbi_targeted_loci" else "ncbi_16s_18s_28s_ITS"),
+    ref2taxid = if (database_set == "ncbi_16s_18s")
+      "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/ref2taxid.targloci.tsv"
+      else "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ref2taxid.ncbi_16s_18s_28s_ITS.tsv",
+    taxonomy = sprintf("s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/%s/new_taxdump_2025-01-01.zip", database_set)
+  )
   jsonlite::write_json(list(
     classifier = classifier, database_set = database_set,
     taxonomic_rank = taxonomic_rank, min_len = 1300, max_len = 1700,

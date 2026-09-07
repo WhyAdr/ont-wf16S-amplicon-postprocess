@@ -154,14 +154,14 @@ run_shared_taxa <- function(context) {
     upset_path <- file.path(shared_dir, "06_upset_plot.png")
 
     with_png_device(upset_path, width = 8, height = 5.5, draw = function() {
-      suppressWarnings(print(UpSetR::upset(
+      print(UpSetR::upset(
         upset_df,
         sets = groups,
         order.by = "freq",
         mainbar.y.label = "Shared Taxa Intersections",
         sets.x.label = sprintf("Taxa per Group (prev >= %.1f)", group_prev_thresh),
         text.scale = 1.2
-      )))
+      ))
     })
     all_outputs <- c(all_outputs, upset_path)
   }

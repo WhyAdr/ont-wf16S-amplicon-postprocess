@@ -354,9 +354,11 @@ run_faprotax <- function(context) {
   }
   predictor$cal_func(prok_database = "FAPROTAX")
   raw_binary <- predictor$res_func
-  if (is.null(raw_binary) || is.null(dim(raw_binary)) ||
-      !all(prepared$feature_ids %in% rownames(raw_binary))) {
-    stop("microeco returned a function matrix without the prepared feature IDs.", call. = FALSE)
+  raw_names <- rownames(raw_binary)
+  if (is.null(raw_binary) || is.null(dim(raw_binary)) || is.null(raw_names) ||
+      anyNA(raw_names) || anyDuplicated(raw_names) ||
+      !identical(raw_names, prepared$feature_ids)) {
+    stop("microeco returned a function matrix whose rows are not the exact ordered prepared feature IDs.", call. = FALSE)
   }
   binary <- as.matrix(raw_binary[prepared$feature_ids, , drop = FALSE])
   storage.mode(binary) <- "numeric"
@@ -364,7 +366,8 @@ run_faprotax <- function(context) {
     stop("microeco returned a non-binary or missing taxon-function matrix.", call. = FALSE)
   }
   if (is.null(colnames(binary)) || anyNA(colnames(binary)) ||
-      any(!nzchar(colnames(binary))) || anyDuplicated(colnames(binary))) {
+      any(!nzchar(colnames(binary))) || any(colnames(binary) != trimws(colnames(binary))) ||
+      any(grepl("[[:cntrl:]]", colnames(binary))) || anyDuplicated(colnames(binary))) {
     stop("microeco returned an invalid function-name contract.", call. = FALSE)
   }
 

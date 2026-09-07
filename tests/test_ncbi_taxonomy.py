@@ -64,7 +64,7 @@ class TaxonomyResolverTests(unittest.TestCase):
         after = hashlib.sha256(self.cache.read_bytes()).hexdigest()
         self.assertEqual(before, after)
         resolved = json.loads((self.work / "resolved.json").read_text(encoding="utf-8"))
-        self.assertEqual(resolved[self.lineage], 1423)
+        self.assertEqual(resolved[self.lineage], "1423")
         self.assertEqual((self.work / "unresolved.tsv").read_text(encoding="utf-8").count("\n"), 1)
         sources = (self.work / "resolution_sources.tsv").read_text(encoding="utf-8")
         self.assertIn(f"{self.lineage}\t1423\tassignment", sources)

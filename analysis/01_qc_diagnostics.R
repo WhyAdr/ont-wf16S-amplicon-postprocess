@@ -83,7 +83,7 @@ run_qc <- function(context) {
 
     n_status_C <- sum(reads$status == "C")
     n_status_U <- sum(reads$status == "U")
-    n_qc_reclass <- sum(reads$status == "C" & reads$taxid == 0)
+    n_qc_reclass <- sum(reads$status == "C" & reads$taxid == "0")
     n_eff_class <- sum(reads$effective_classified)
     n_eff_unclass <- sum(!reads$effective_classified)
     accounting_rows[[sample_id]][c("RawC", "RawU", "C_TaxID0", "TaxID_GT0")] <-
@@ -96,7 +96,7 @@ run_qc <- function(context) {
     investigation_rows[[sample_id]]$MedianClassifiedLength <-
       median_or_na(reads$read_length[reads$effective_classified])
     investigation_rows[[sample_id]]$MedianC0Length <-
-      median_or_na(reads$read_length[reads$status == "C" & reads$taxid == 0])
+      median_or_na(reads$read_length[reads$status == "C" & reads$taxid == "0"])
     investigation_rows[[sample_id]]$MedianRawULength <-
       median_or_na(reads$read_length[reads$status == "U"])
 
@@ -125,8 +125,8 @@ run_qc <- function(context) {
 
     # 2. Length summary statistics
     reads$status_category <- ifelse(
-      reads$status == "C" & reads$taxid != 0, "Classified",
-      ifelse(reads$status == "C" & reads$taxid == 0, "QC-filtered", "Never aligned")
+      reads$status == "C" & reads$taxid != "0", "Classified",
+      ifelse(reads$status == "C" & reads$taxid == "0", "QC-filtered", "Never aligned")
     )
     reads$effective_status <- ifelse(reads$effective_classified, "Classified", "Unclassified")
 

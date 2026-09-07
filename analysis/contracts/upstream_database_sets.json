@@ -1,0 +1,14 @@
+{
+  "ncbi_16s_18s": {
+    "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/ncbi_targeted_loci_16s_18s.fna",
+    "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/ncbi_targeted_loci_kraken2.tar.gz",
+    "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/ref2taxid.targloci.tsv",
+    "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s/new_taxdump_2025-01-01.zip"
+  },
+  "ncbi_16s_18s_28s_ITS": {
+    "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS.fna",
+    "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS_kraken2.tar.gz",
+    "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ref2taxid.ncbi_16s_18s_28s_ITS.tsv",
+    "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/new_taxdump_2025-01-01.zip"
+  }
+}

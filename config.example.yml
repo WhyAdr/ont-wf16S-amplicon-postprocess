@@ -75,6 +75,7 @@ krona:
 
 beta:
   distances: ["bray", "jaccard"]
+  primary_distance: "bray"
   permutations: 999
   minimum_count: 1           # presence threshold used for binary Jaccard
   strata_column: null

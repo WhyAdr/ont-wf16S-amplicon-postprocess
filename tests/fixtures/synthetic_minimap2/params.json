@@ -10,7 +10,10 @@
   "abundance_threshold": 1.0,
   "database_sets": {
     "ncbi_16s_18s_28s_ITS": {
-      "taxonomy": "new_taxdump_2025-01-01.zip"
+      "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS.fna",
+      "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS_kraken2.tar.gz",
+      "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ref2taxid.ncbi_16s_18s_28s_ITS.tsv",
+      "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/new_taxdump_2025-01-01.zip"
     }
   },
   "output_unclassified": true,

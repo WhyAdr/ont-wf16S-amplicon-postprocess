@@ -276,8 +276,11 @@ test_that("Beta rarefaction stability records isolated Procrustes failures", {
   expect_identical(as.character(diagnostics$FailedIterations), "1")
   expect_setequal(unique(stability$Iteration), c(2L, 3L))
 
-  expect_error(
-    run_beta(context, procrustes_fn = function(X, Y) stop("always fail")),
-    "All beta-diversity rarefaction stability iterations failed"
+  always_failed <- run_beta(context, procrustes_fn = function(X, Y) stop("always fail"))
+  expect_equal(always_failed$status, "completed")
+  skipped_diagnostics <- read.delim(
+    file.path(cfg$output$dirs$beta, "pcoa_rarefaction_diagnostics.tsv"), check.names = FALSE
   )
+  expect_equal(skipped_diagnostics$Status, "Skipped")
+  expect_equal(skipped_diagnostics$SuccessfulIterations, 0L)
 })

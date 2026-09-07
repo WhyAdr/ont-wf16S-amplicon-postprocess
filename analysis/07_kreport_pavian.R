@@ -170,8 +170,11 @@ run_kreport <- function(context) {
     # Collect resolution info
     for (i in seq_len(nrow(nodes_sorted))) {
       p <- nodes_sorted$path[i]
-      tid <- tax_cache[[p]]
-      if (is.null(tid)) tid <- 0L
+      tid <- as.character(tax_cache[[p]] %||% "0")
+      if (!grepl("^(0|[1-9][0-9]{0,15})$", tid) ||
+          (nchar(tid) == 16L && tid > "9007199254740991")) {
+        stop(sprintf("Resolver returned a noncanonical TaxID for '%s'.", p), call. = FALSE)
+      }
 
       resolution_rows[[length(resolution_rows) + 1L]] <- data.frame(
         SampleID = s,
@@ -179,8 +182,8 @@ run_kreport <- function(context) {
         RankCode = nodes_sorted$rank_code[i],
         NodeName = nodes_sorted$name[i],
         TaxonPath = p,
-        TaxID = as.integer(tid),
-        Status = if (tid > 0) "Resolved" else "Unresolved",
+        TaxID = tid,
+        Status = if (tid != "0") "Resolved" else "Unresolved",
         ResolutionSource = unname(resolution_sources[[p]] %||% "unresolved"),
         stringsAsFactors = FALSE
       )

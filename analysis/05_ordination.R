@@ -85,8 +85,11 @@ run_ordination <- function(context) {
       PC2 = if (max_axes >= 2L) scores_mat[, 2] else NA_real_,
       stringsAsFactors = FALSE
     )
-    if (!is.null(meta)) {
-      scores_df <- dplyr::left_join(meta, scores_df, by = "SampleID")
+      if (!is.null(meta)) {
+        collisions <- intersect(setdiff(names(meta), "SampleID"), setdiff(names(scores_df), "SampleID"))
+        if (length(collisions)) stop(sprintf("Metadata/output column collision before PCA join: %s",
+                                             paste(collisions, collapse = ", ")), call. = FALSE)
+        scores_df <- dplyr::left_join(meta, scores_df, by = "SampleID")
     }
     scores_tsv <- file.path(ord_dir, "pca_scores.tsv")
     write.table(scores_df, scores_tsv, sep = "\t", row.names = FALSE, quote = FALSE)
@@ -126,9 +129,9 @@ run_ordination <- function(context) {
   nmds_diag_path <- file.path(ord_dir, "nmds_diagnostics.tsv")
   if (length(samples) >= 3 && n_unique_samples >= 3) {
     set.seed(seed)
-    nmds_res <- suppressWarnings(tryCatch({
+    nmds_res <- tryCatch({
       vegan::metaMDS(rel_otu, distance = "bray", k = 2, trymax = 50, trace = 0)
-    }, error = function(e) NULL))
+    }, error = function(e) NULL)
 
     if (!is.null(nmds_res) && !is.null(nmds_res$points)) {
       nmds_repetitions <- as.integer(nmds_res$converged %||% 0L)
@@ -142,6 +145,9 @@ run_ordination <- function(context) {
         stringsAsFactors = FALSE
       )
       if (!is.null(meta)) {
+        collisions <- intersect(setdiff(names(meta), "SampleID"), setdiff(names(nmds_df), "SampleID"))
+        if (length(collisions)) stop(sprintf("Metadata/output column collision before NMDS join: %s",
+                                             paste(collisions, collapse = ", ")), call. = FALSE)
         nmds_df <- dplyr::left_join(meta, nmds_df, by = "SampleID")
       }
 

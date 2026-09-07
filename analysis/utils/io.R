@@ -23,6 +23,18 @@ sanitize_filename <- function(s) {
 SUPPORTED_NCBI_DATABASE_SETS <- c("ncbi_16s_18s", "ncbi_16s_18s_28s_ITS")
 BAMSTATS_REQUIRED_COLUMNS <- c("name", "sample_name", "iden", "ref_coverage")
 
+load_upstream_database_contracts <- function() {
+  candidates <- c(
+    file.path(getOption("wf16s.pipeline_root", ""), "analysis", "contracts", "upstream_database_sets.json"),
+    file.path(getwd(), "analysis", "contracts", "upstream_database_sets.json"),
+    file.path(getwd(), "..", "analysis", "contracts", "upstream_database_sets.json"),
+    file.path(getwd(), "..", "..", "analysis", "contracts", "upstream_database_sets.json")
+  )
+  path <- candidates[file.exists(candidates)][1]
+  if (is.na(path)) stop("Maintained upstream database contract file is missing.", call. = FALSE)
+  jsonlite::fromJSON(path, simplifyVector = FALSE)
+}
+
 read_upstream_params <- function(path) {
   if (is.null(path) || !nzchar(path) || !file.exists(path)) {
     stop("input.params_json is required and must identify an existing wf-16s params.json.",
@@ -84,14 +96,30 @@ read_upstream_params <- function(path) {
       stop(sprintf("params.json field '%s' must be one finite number.", field), call. = FALSE)
     }
   }
+  contract <- load_upstream_database_contracts()
+  selected <- params$database_sets[[database_set]]
+  if (is.null(selected) || !is.list(selected)) {
+    stop(sprintf("params.json database_sets is missing selected mapping '%s'.", database_set), call. = FALSE)
+  }
+  required_resources <- c("reference", "database", "ref2taxid", "taxonomy")
+  if (length(setdiff(required_resources, names(selected))) > 0L) {
+    stop(sprintf("params.json selected database mapping '%s' is missing required resource(s).",
+                 database_set), call. = FALSE)
+  }
+  expected <- contract[[database_set]]
+  for (field in required_resources) {
+    if (!identical(as.character(selected[[field]]), as.character(expected[[field]]))) {
+      stop(sprintf("params.json database resource '%s.%s' does not match the maintained contract.",
+                   database_set, field), call. = FALSE)
+    }
+  }
   integer_fields <- c("min_len", "max_len", "abundance_threshold")
   for (field in integer_fields) {
     value <- params[[field]]
-    if (abs(value - round(value)) > sqrt(.Machine$double.eps) ||
-        value > .Machine$integer.max) {
+    if (value != floor(value) || value > 9007199254740991) {
       stop(sprintf(
-        "params.json field '%s' must be a whole number no greater than %d.",
-        field, .Machine$integer.max
+        "params.json field '%s' must be a whole number no greater than %s.",
+        field, 9007199254740991
       ), call. = FALSE)
     }
   }
@@ -116,6 +144,9 @@ extract_upstream_contract <- function(params) {
     database_set = params$database_set,
     taxonomy_namespace = "NCBI",
     database_taxonomy_source = database_meta$taxonomy %||% NULL,
+    database_reference = database_meta$reference %||% NULL,
+    database_ref2taxid = database_meta$ref2taxid %||% NULL,
+    database_archive = database_meta$database %||% NULL,
     taxonomic_rank = params$taxonomic_rank,
     min_len = params$min_len,
     max_len = params$max_len,
@@ -136,6 +167,10 @@ read_bamstats_table <- function(path) {
     stop(sprintf("Invalid bamstats schema or empty file: '%s'", path), call. = FALSE)
   }
   header <- strsplit(header_line, "\t", fixed = TRUE)[[1]]
+  if (any(!is_tsv_safe_identifier(header))) {
+    stop("Bamstats headers must be non-empty, boundary-trimmed, and control-character-free.",
+         call. = FALSE)
+  }
   if (anyDuplicated(header)) {
     stop(sprintf("Bamstats file '%s' contains duplicate column names.", path), call. = FALSE)
   }
@@ -223,7 +258,7 @@ partition_minimap2_failures <- function(reads, bamstats_path, params, sample_id)
   }
   identity_failed <- aligned$iden < params$min_percent_identity
   coverage_failed <- aligned$ref_coverage < params$min_ref_coverage
-  positive <- c_reads$taxid > 0
+  positive <- c_reads$taxid != "0"
   c0 <- !positive
   if (any(identity_failed[positive] | coverage_failed[positive])) {
     stop(sprintf("At least one TaxID>0 read for '%s' fails the recorded thresholds.", sample_id),
@@ -284,6 +319,13 @@ validate_sample_ids <- function(sample_ids) {
                  sample_ids[which(reserved)[1]]), call. = FALSE)
   }
 
+  schema_reserved <- c("Taxon", "TaxonPath", "SampleID", "Threshold", "Group",
+                       "PC1", "PC2", "PCoA1", "PCoA2")
+  if (any(sample_ids %in% schema_reserved)) {
+    stop(sprintf("Sample ID validation error: '%s' is reserved by an output schema.",
+                 sample_ids[which(sample_ids %in% schema_reserved)[1]]), call. = FALSE)
+  }
+
   invisible(TRUE)
 }
 
@@ -339,7 +381,7 @@ read_abundance_table <- function(path, tax_col = "tax", aggregate_cols = c("tota
     if (any(vals < 0)) {
       stop(sprintf("Column '%s' contains negative counts.", sc), call. = FALSE)
     }
-    if (any(abs(vals - round(vals)) > 1e-6)) {
+    if (any(vals != floor(vals)) || any(vals > 9007199254740991)) {
       stop(sprintf("Column '%s' contains non-integer count values.", sc), call. = FALSE)
     }
   }
@@ -350,7 +392,7 @@ read_abundance_table <- function(path, tax_col = "tax", aggregate_cols = c("tota
       actual_sum <- rowSums(as.matrix(raw_df[, all_sample_cols, drop = FALSE]))
       stated_total <- suppressWarnings(as.numeric(raw_df[[ac]]))
       if (anyNA(stated_total) || any(!is.finite(stated_total)) || any(stated_total < 0) ||
-          any(abs(stated_total - round(stated_total)) > 1e-6)) {
+          any(stated_total != floor(stated_total)) || any(stated_total > 9007199254740991)) {
         stop(sprintf("Aggregate column '%s' must contain finite, non-negative integer counts.", ac),
              call. = FALSE)
       }
@@ -470,10 +512,21 @@ split_assignment_fields <- function(line) {
 
 parse_assignment_length <- function(length_field) {
   if (is.na(length_field) || length_field == "") return(NA_integer_)
-  parts <- strsplit(length_field, "\\|")[[1]]
-  last_part <- parts[length(parts)]
-  if (!grepl("^[0-9]+$", last_part)) return(NA_integer_)
-  suppressWarnings(as.integer(last_part))
+  if (!grepl("^(length=)?[1-9][0-9]*$|^(0|[1-9][0-9]*)\\|[1-9][0-9]*$",
+             length_field)) return(NA_integer_)
+  value <- sub("^.*\\|", "", sub("^length=", "", length_field))
+  if (nchar(value) > 10L || (nchar(value) == 10L && value > "2147483647")) return(NA_integer_)
+  suppressWarnings(as.integer(value))
+}
+
+is_tsv_safe_identifier <- function(x) {
+  is.character(x) & !is.na(x) & nzchar(x) & x == trimws(x) &
+    !grepl("[[:cntrl:]]", x, perl = TRUE)
+}
+
+is_canonical_taxid <- function(x) {
+  grepl("^(0|[1-9][0-9]{0,15})$", x) &
+    (nchar(x) < 16L | x <= "9007199254740991")
 }
 
 validate_assignment_chunk <- function(lines, sample_id, line_numbers, seen_read_ids) {
@@ -492,10 +545,11 @@ validate_assignment_chunk <- function(lines, sample_id, line_numbers, seen_read_
   read_id <- fields[, 2]
   taxid_text <- fields[, 3]
   length_field <- fields[, 4]
+  lineage <- fields[, 5]
 
-  if (any(!nzchar(read_id))) {
-    bad_index <- which(!nzchar(read_id))[1]
-    stop(sprintf("Assignments file for sample '%s' has an empty read ID at line %d",
+  if (any(!is_tsv_safe_identifier(read_id))) {
+    bad_index <- which(!is_tsv_safe_identifier(read_id))[1]
+    stop(sprintf("Assignments file for sample '%s' has an unsafe read ID at line %d",
                  sample_id, line_numbers[bad_index]), call. = FALSE)
   }
   already_seen <- vapply(read_id, exists, logical(1), envir = seen_read_ids, inherits = FALSE)
@@ -514,18 +568,27 @@ validate_assignment_chunk <- function(lines, sample_id, line_numbers, seen_read_
                  sample_id, status[bad_index], line_numbers[bad_index]), call. = FALSE)
   }
 
-  valid_taxid <- grepl("^[0-9]+$", taxid_text)
-  taxid <- suppressWarnings(as.numeric(taxid_text))
-  invalid_taxid <- !valid_taxid | is.na(taxid) | !is.finite(taxid)
+  invalid_taxid <- !is_canonical_taxid(taxid_text)
   if (any(invalid_taxid)) {
     bad_index <- which(invalid_taxid)[1]
     stop(sprintf("Assignments file for sample '%s' has non-integer TaxID '%s' at line %d",
                  sample_id, taxid_text[bad_index], line_numbers[bad_index]), call. = FALSE)
   }
-  inconsistent <- status == "U" & taxid > 0
+  inconsistent <- status == "U" & taxid_text != "0"
   if (any(inconsistent)) {
     bad_index <- which(inconsistent)[1]
     stop(sprintf("Assignments file for sample '%s' has status U with positive TaxID at line %d",
+                 sample_id, line_numbers[bad_index]), call. = FALSE)
+  }
+
+  positive <- taxid_text != "0"
+  invalid_lineage <- positive & (!is_tsv_safe_identifier(lineage) |
+    vapply(strsplit(lineage, "\\|", fixed = FALSE), function(parts) {
+      any(!is_tsv_safe_identifier(parts))
+    }, logical(1)))
+  if (any(invalid_lineage)) {
+    bad_index <- which(invalid_lineage)[1]
+    stop(sprintf("Assignments file for sample '%s' has a blank or unsafe lineage for positive TaxID at line %d",
                  sample_id, line_numbers[bad_index]), call. = FALSE)
   }
 
@@ -575,14 +638,28 @@ read_assignments_file <- function(path, sample_id, expected_total = NULL, expect
     stop("'chunk_size' must be a positive integer.", call. = FALSE)
   }
   chunk_size <- as.integer(chunk_size)
+  fingerprint_before <- list(
+    size = file.info(path)$size,
+    mtime = as.numeric(file.info(path)$mtime),
+    sha256 = compute_file_hash(path)
+  )
   row_count <- scan_assignments_file(path, sample_id, chunk_size)
+  fingerprint_after_scan <- list(
+    size = file.info(path)$size,
+    mtime = as.numeric(file.info(path)$mtime),
+    sha256 = compute_file_hash(path)
+  )
+  if (!identical(fingerprint_before, fingerprint_after_scan)) {
+    stop(sprintf("E_INPUT_CHANGED: assignment file for sample '%s' changed during validation.", sample_id),
+         call. = FALSE)
+  }
 
   # The validation pass avoids retaining raw text; this pass only builds the
   # read-level data frame still required by QC downstream.
   raw_reads <- data.frame(
     status = character(row_count),
     read_id = character(row_count),
-    taxid = numeric(row_count),
+    taxid = character(row_count),
     len_field = character(row_count),
     lineage = character(row_count),
     read_length = integer(row_count),
@@ -600,14 +677,23 @@ read_assignments_file <- function(path, sample_id, expected_total = NULL, expect
     indices <- seq.int(row_index + 1L, length.out = nrow(fields))
     raw_reads$status[indices] <- fields[, 1]
     raw_reads$read_id[indices] <- fields[, 2]
-    raw_reads$taxid[indices] <- suppressWarnings(as.numeric(fields[, 3]))
+    raw_reads$taxid[indices] <- fields[, 3]
     raw_reads$len_field[indices] <- fields[, 4]
     raw_reads$lineage[indices] <- fields[, 5]
     raw_reads$read_length[indices] <- vapply(fields[, 4], parse_assignment_length,
                                               integer(1), USE.NAMES = FALSE)
     row_index <- row_index + nrow(fields)
   }
-  raw_reads$effective_classified <- raw_reads$taxid > 0
+  fingerprint_after_read <- list(
+    size = file.info(path)$size,
+    mtime = as.numeric(file.info(path)$mtime),
+    sha256 = compute_file_hash(path)
+  )
+  if (!identical(fingerprint_before, fingerprint_after_read)) {
+    stop(sprintf("E_INPUT_CHANGED: assignment file for sample '%s' changed between parser passes.", sample_id),
+         call. = FALSE)
+  }
+  raw_reads$effective_classified <- raw_reads$taxid != "0"
 
   n_total <- nrow(raw_reads)
   n_eff_class <- sum(raw_reads$effective_classified)
@@ -647,6 +733,10 @@ read_metadata_table <- function(path, selected_samples) {
     stop("Metadata table is empty.", call. = FALSE)
   }
   header <- strsplit(header_line, "\t", fixed = TRUE)[[1]]
+  if (any(!is_tsv_safe_identifier(header))) {
+    stop("Metadata headers must be non-empty, boundary-trimmed, and control-character-free.",
+         call. = FALSE)
+  }
   if (anyDuplicated(header)) {
     stop("Metadata table contains duplicate column names.", call. = FALSE)
   }
@@ -671,6 +761,23 @@ read_metadata_table <- function(path, selected_samples) {
   }
   if (any(meta$SampleID != trimws(meta$SampleID)) || any(meta$Group != trimws(meta$Group))) {
     stop("Metadata SampleID and Group values must not have leading or trailing whitespace.", call. = FALSE)
+  }
+
+  reserved_meta <- c("PC1", "PC2", "PCoA1", "PCoA2", "Shannon", "Simpson",
+                     "InvSimpson", "Observed", "Chao1", "Taxon", "TaxonPath", "Threshold")
+  collision <- intersect(setdiff(header, c("SampleID", "Group")), reserved_meta)
+  if (length(collision)) {
+    stop(sprintf("Metadata header '%s' collides with a generated output field.", collision[1]),
+         call. = FALSE)
+  }
+  if (any(!is_tsv_safe_identifier(as.character(meta$Group)))) {
+    stop("Metadata Group values must be TSV-safe identifiers.", call. = FALSE)
+  }
+  reserved_groups <- c("Taxon", "TaxonPath", "Threshold", "SampleID")
+  if (any(as.character(meta$Group) %in% reserved_groups)) {
+    stop(sprintf("Metadata Group value '%s' is reserved by an output schema.",
+                 as.character(meta$Group[which(as.character(meta$Group) %in% reserved_groups)[1]])),
+         call. = FALSE)
   }
 
   if (any(duplicated(meta$SampleID))) {
@@ -757,7 +864,7 @@ build_context <- function(cfg) {
     stop("Config 'input.assignments' must be a mapping of SampleID -> path or null.", call. = FALSE)
   }
   assignment_data <- list()
-  retain_assignment_rows <- !is.null(cfg$cli) && "qc" %in% cfg$cli$modules && !isTRUE(cfg$cli$validate_only)
+  retain_assignment_rows <- !is.null(cfg$cli) && "qc" %in% cfg$cli$modules
   if (!is.null(assignments_map)) {
     extra_assignment_ids <- setdiff(names(assignments_map), selected_samples)
     if (length(extra_assignment_ids) > 0L) {

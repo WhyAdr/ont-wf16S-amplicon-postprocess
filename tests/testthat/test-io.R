@@ -361,7 +361,7 @@ test_that("Assignments parser streams plain and gzipped files across chunk bound
     "status", "read_id", "taxid", "len_field", "lineage", "read_length", "effective_classified"
   ))
   expect_type(plain$read_id, "character")
-  expect_type(plain$taxid, "double")
+  expect_type(plain$taxid, "character")
   expect_type(plain$read_length, "integer")
   expect_identical(plain$read_length, c(1501L, 1402L, 1303L, 1504L))
   expect_identical(plain$effective_classified, c(TRUE, FALSE, FALSE, TRUE))
@@ -382,9 +382,8 @@ test_that("Assignments parser retains validation contracts while streaming", {
 
   expect_error(read_assignments_file(duplicate_path, "S1", chunk_size = 1L),
                "contains duplicate read ID: 'read_001'")
-  expect_error(read_assignments_file(empty_id_path, "S1"), "empty read ID at line 1")
-  trailing_field <- read_assignments_file(trailing_field_path, "S1")
-  expect_identical(trailing_field$lineage, "")
+  expect_error(read_assignments_file(empty_id_path, "S1"), "unsafe read ID at line 1")
+  expect_error(read_assignments_file(trailing_field_path, "S1"), "blank or unsafe lineage")
   expect_error(read_assignments_file(trailing_field_path, "S1", chunk_size = 0L),
                "chunk_size.*positive integer")
 })
@@ -422,7 +421,7 @@ test_that("Real Ambar Ayunda fixture satisfies all Section 2.2 invariants", {
   expect_equal(nrow(reads), 114056)
   expect_equal(sum(reads$status == "C"), 89809)
   expect_equal(sum(reads$status == "U"), 24247)
-  expect_equal(sum(reads$status == "C" & reads$taxid == 0), 9253)
+  expect_equal(sum(reads$status == "C" & reads$taxid == "0"), 9253)
   expect_equal(sum(reads$effective_classified), 80556)
   expect_identical(sum(reads$read_length), 171330353L)
 
@@ -430,7 +429,7 @@ test_that("Real Ambar Ayunda fixture satisfies all Section 2.2 invariants", {
   # and values, so the streamed reader remains equivalent for the fixture.
   digest_path <- tempfile("assignments_typed_", fileext = ".rds")
   saveRDS(reads, digest_path, version = 2)
-  expect_identical(unname(tools::md5sum(digest_path)), "0223a32d3179ddeae4f36e1aaf13b6f3")
+  expect_identical(unname(tools::md5sum(digest_path)), "5f3b6f3227754fd0a739e2c5b4626caa")
 })
 
 test_that("Metadata validation aligns samples and detects discrepancies", {

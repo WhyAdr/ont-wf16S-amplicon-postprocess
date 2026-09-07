@@ -54,10 +54,7 @@ test_that("Krona CLI opt-in is recorded in config and manifest settings", {
 })
 
 test_that("Requested module parsing preserves order and rejects invalid requests", {
-  expect_equal(
-    parse_requested_modules(" qc,alpha shared\tkreport "),
-    c("qc", "alpha", "shared", "kreport")
-  )
+  expect_error(parse_requested_modules(" qc,alpha shared\tkreport "), "strict comma-separated")
   expect_error(parse_requested_modules("qc,qc"), "Duplicate module name")
   expect_error(parse_requested_modules("   "), "must contain at least one")
 })

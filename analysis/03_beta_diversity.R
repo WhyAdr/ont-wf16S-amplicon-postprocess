@@ -48,6 +48,7 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
   rel_otu <- sweep(otu_table, 1, sample_sums, "/")
 
   distances_cfg <- cfg$beta$distances %||% c("bray", "jaccard")
+  primary_name <- cfg$beta$primary_distance
   n_perm <- cfg$beta$permutations %||% 999L
   minimum_count <- cfg$beta$minimum_count %||% 1L
   strata_col <- cfg$beta$strata_column
@@ -119,6 +120,9 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
       stringsAsFactors = FALSE
     )
     if (!is.null(meta)) {
+      collisions <- intersect(setdiff(names(meta), "SampleID"), setdiff(names(scores_df), "SampleID"))
+      if (length(collisions)) stop(sprintf("Metadata/output column collision before PCoA join: %s",
+                                           paste(collisions, collapse = ", ")), call. = FALSE)
       scores_df <- dplyr::left_join(meta, scores_df, by = "SampleID")
     }
 
@@ -161,38 +165,55 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
     stability_file <- file.path(beta_dir, "pcoa_rarefaction_stability.tsv")
     stability_diag <- file.path(beta_dir, "pcoa_rarefaction_diagnostics.tsv")
     stability_depth <- floor(min(sample_sums) * cfg$beta$resampling$depth_fraction_of_minimum)
-    reference_dist <- vegan::vegdist(rel_otu, method = "bray")
+    reference_dist <- dist_list[[primary_name]]
+    reference_values <- as.vector(reference_dist)
     reference_fit <- tryCatch(
       stats::cmdscale(reference_dist, k = 2L, eig = TRUE, add = TRUE),
       error = function(e) NULL
     )
 
-    if (nrow(otu_table) < 3L || stability_depth < 1L || is.null(reference_fit) ||
-        ncol(as.matrix(reference_fit$points)) < 2L) {
+    if (nrow(otu_table) < 3L || stability_depth < 1L ||
+        !all(is.finite(reference_values)) || !any(reference_values > 0) ||
+        is.null(reference_fit) || ncol(as.matrix(reference_fit$points)) < 2L ||
+        sum(reference_fit$eig > 0) < 2L) {
       write.table(data.frame(
         Status = "Skipped",
-        Reason = "Rarefaction stability requires >=3 samples and a two-axis full-data PCoA solution."
+        ReasonCode = "E_DEGENERATE_PRIMARY_DISTANCE",
+        Reason = "Rarefaction stability requires >=3 samples and a finite, nonzero, rank-two primary-distance PCoA.",
+        Distance = primary_name
       ), stability_diag, sep = "\t", row.names = FALSE, quote = FALSE)
       all_outputs <- c(all_outputs, stability_diag)
     } else {
       set.seed(seed)
       stability_rows <- list()
-      failed_iterations <- integer(0)
+      failed_iterations <- list()
       reference_points <- as.matrix(reference_fit$points)[, 1:2, drop = FALSE]
       for (iteration in seq_len(cfg$beta$resampling$iterations)) {
+        failure_reason <- NULL
         aligned <- tryCatch({
           rare_counts <- vegan::rrarefy(otu_table, sample = stability_depth)
           rare_rel <- sweep(rare_counts, 1, rowSums(rare_counts), "/")
-          rare_dist <- vegan::vegdist(rare_rel, method = "bray")
+          rare_dist <- if (primary_name == "jaccard") {
+            vegan::vegdist(rare_counts >= minimum_count, method = "jaccard", binary = TRUE)
+          } else {
+            vegan::vegdist(rare_rel, method = primary_name)
+          }
           rare_fit <- stats::cmdscale(rare_dist, k = 2L, eig = TRUE, add = TRUE)
           rare_points <- as.matrix(rare_fit$points)
           if (ncol(rare_points) < 2L) {
             stop("Rarefied PCoA returned fewer than two axes.", call. = FALSE)
           }
-          procrustes_fn(reference_points, rare_points[, 1:2, drop = FALSE])$Yrot
-        }, error = function(e) NULL)
+          result <- procrustes_fn(reference_points, rare_points[, 1:2, drop = FALSE])$Yrot
+          if (!is.numeric(result) || !identical(dim(result), dim(reference_points)) ||
+              anyNA(result) || any(!is.finite(result)) ||
+              !identical(rownames(result), rownames(reference_points))) {
+            stop("Procrustes returned malformed or misaligned coordinates.", call. = FALSE)
+          }
+          result
+        }, error = function(e) { failure_reason <<- conditionMessage(e); NULL })
         if (is.null(aligned)) {
-          failed_iterations <- c(failed_iterations, iteration)
+          failed_iterations[[length(failed_iterations) + 1L]] <- data.frame(
+            Iteration = iteration, Reason = failure_reason %||% "unknown failure")
           next
         }
         stability_rows[[length(stability_rows) + 1L]] <- data.frame(
@@ -204,25 +225,27 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
           stringsAsFactors = FALSE
         )
       }
-      if (length(stability_rows) == 0L) {
-        stop("All beta-diversity rarefaction stability iterations failed.", call. = FALSE)
-      }
-      write.table(do.call(rbind, stability_rows), stability_file,
-                  sep = "\t", row.names = FALSE, quote = FALSE)
+      if (length(stability_rows)) write.table(do.call(rbind, stability_rows), stability_file,
+        sep = "\t", row.names = FALSE, quote = FALSE)
+      failed_df <- if (length(failed_iterations)) do.call(rbind, failed_iterations) else
+        data.frame(Iteration = integer(0), Reason = character(0))
       write.table(data.frame(
-        Status = "Completed",
+        Status = if (length(stability_rows)) "Completed" else "Skipped",
+        ReasonCode = if (length(stability_rows)) NA_character_ else "E_NO_SUCCESSFUL_STABILITY_ITERATIONS",
         RequestedIterations = cfg$beta$resampling$iterations,
         SuccessfulIterations = length(stability_rows),
-        FailedIterations = paste(failed_iterations, collapse = ","),
+        FailedIterations = nrow(failed_df),
         Depth = stability_depth,
-        Seed = seed
+        Seed = seed,
+        Distance = primary_name,
+        FailureReasonsJSON = jsonlite::toJSON(failed_df, dataframe = "rows", auto_unbox = TRUE)
       ), stability_diag, sep = "\t", row.names = FALSE, quote = FALSE)
-      all_outputs <- c(all_outputs, stability_file, stability_diag)
+      all_outputs <- c(all_outputs, if (file.exists(stability_file)) stability_file, stability_diag)
     }
   }
 
-  # PERMANOVA & Betadisper (Primary distance: Bray-Curtis)
-  primary_dist <- dist_list[["bray"]] %||% dist_list[[1]]
+  # PERMANOVA and betadisper share one materialized permutation design.
+  primary_dist <- dist_list[[primary_name]]
 
   permanova_file <- file.path(beta_dir, "permanova.tsv")
   betadisper_file <- file.path(beta_dir, "betadisper.tsv")
@@ -235,19 +258,37 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
     residual_df > 0 && any(is.finite(primary_values) & primary_values > 0)
 
   if (can_run_permanova) {
-    # Check strata
     strata_vec <- if (!is.null(strata_col)) meta[[strata_col]] else NULL
-
     set.seed(seed)
-    perm_res <- suppressWarnings(vegan::adonis2(
+    control <- permute::how(blocks = if (is.null(strata_vec)) NULL else as.factor(strata_vec))
+    permutation_matrix <- permute::shuffleSet(nrow(meta), nset = n_perm, control = control)
+    label_changing <- apply(permutation_matrix, 1L, function(index)
+      !identical(unname(as.character(meta$Group[index])), unname(as.character(meta$Group))))
+    permutation_matrix <- permutation_matrix[label_changing, , drop = FALSE]
+    if (!nrow(permutation_matrix)) {
+      can_run_permanova <- FALSE
+    }
+  }
+
+  if (can_run_permanova) {
+    warning_messages <- character(0)
+    perm_res <- withCallingHandlers(vegan::adonis2(
       primary_dist ~ Group,
       data = meta,
-      permutations = n_perm,
-      strata = strata_vec
-    ))
+      permutations = permutation_matrix
+    ), warning = function(w) { warning_messages <<- c(warning_messages, conditionMessage(w)); invokeRestart("muffleWarning") })
 
     perm_df <- as.data.frame(perm_res)
     perm_df$Term <- rownames(perm_df)
+    perm_df$Distance <- primary_name
+    perm_df$Transform <- if (primary_name == "jaccard") "binary" else "classified_relative_abundance"
+    perm_df$Seed <- seed
+    perm_df$RequestedPermutations <- n_perm
+    perm_df$EffectivePermutations <- nrow(permutation_matrix)
+    perm_df$StrataColumn <- strata_col %||% NA_character_
+    perm_df$BlockSizes <- if (is.null(strata_vec)) NA_character_ else paste(table(strata_vec), collapse = ",")
+    perm_df$DesignStatus <- "admissible_label_changing"
+    perm_df$Warnings <- paste(unique(warning_messages), collapse = " | ")
     perm_df <- perm_df[, c("Term", setdiff(colnames(perm_df), "Term"))]
 
     write.table(perm_df, permanova_file, sep = "\t", row.names = FALSE, quote = FALSE)
@@ -255,13 +296,22 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
 
     # Betadisper
     disp_res <- vegan::betadisper(primary_dist, meta$Group)
-    disp_perm <- vegan::permutest(disp_res, permutations = n_perm)
+    disp_perm <- withCallingHandlers(vegan::permutest(disp_res, permutations = permutation_matrix),
+      warning = function(w) { warning_messages <<- c(warning_messages, conditionMessage(w)); invokeRestart("muffleWarning") })
 
     disp_df <- data.frame(
       Analysis = "Betadisper (Homogeneity of Multivariate Dispersions)",
       F_Statistic = disp_perm$tab$F[1],
       P_Value = disp_perm$tab$`Pr(>F)`[1],
-      Permutations = n_perm,
+      Distance = primary_name,
+      Transform = if (primary_name == "jaccard") "binary" else "classified_relative_abundance",
+      Seed = seed,
+      RequestedPermutations = n_perm,
+      EffectivePermutations = nrow(permutation_matrix),
+      StrataColumn = strata_col %||% NA_character_,
+      BlockSizes = if (is.null(strata_vec)) NA_character_ else paste(table(strata_vec), collapse = ","),
+      DesignStatus = "admissible_label_changing",
+      StatisticalWarnings = paste(unique(warning_messages), collapse = " | "),
       Warning = if (any(group_counts < 3)) "Sample size < 3 in at least one group; low statistical power" else "None",
       stringsAsFactors = FALSE
     )
@@ -270,6 +320,11 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
   } else {
     skip_perm <- data.frame(
       Status = "Skipped",
+      Distance = primary_name,
+      Seed = seed,
+      RequestedPermutations = n_perm,
+      StrataColumn = strata_col %||% NA_character_,
+      DesignStatus = if (exists("permutation_matrix") && !nrow(permutation_matrix)) "no_label_changing_permutation" else "prerequisites_not_met",
       Reason = sprintf(
         "PERMANOVA requires non-zero distances, residual degrees of freedom, and at least 2 groups with >= 2 samples each. Found: %s",
         paste(sprintf("%s (n=%d)", names(group_counts), as.integer(group_counts)), collapse = ", ")

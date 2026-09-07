@@ -15,6 +15,19 @@ import urllib.request
 from collections import Counter
 
 TOOL_NAME = "ont_wf16s_postprocess"
+MAX_SAFE_INTEGER = 9007199254740991
+PLACEHOLDER_NAMES = {"unknown", "unclassified", "uncultured", "unidentified"}
+
+
+def parse_taxid(value, context="TaxID"):
+    """Parse the shared canonical decimal-string TaxID contract."""
+    text = str(value)
+    if not text.isascii() or not text.isdigit() or (len(text) > 1 and text.startswith("0")):
+        raise ValueError(f"{context}: expected canonical unsigned decimal TaxID, found {text!r}.")
+    parsed = int(text)
+    if parsed > MAX_SAFE_INTEGER:
+        raise ValueError(f"{context}: TaxID exceeds {MAX_SAFE_INTEGER}.")
+    return parsed
 
 
 def normalize_abundance_path_to_7(path):
@@ -58,10 +71,12 @@ def load_cache(path):
         raise ValueError(f"Could not read taxonomy cache safely: {exc}") from exc
     if not isinstance(cache, dict):
         raise ValueError("Taxonomy cache root must be a JSON object.")
+    normalized = {}
     for taxon_path, taxid in cache.items():
-        if not isinstance(taxon_path, str) or not isinstance(taxid, int) or isinstance(taxid, bool) or taxid < 0:
-            raise ValueError(f"Invalid cache entry for {taxon_path!r}: expected a non-negative integer TaxID.")
-    return cache
+        if not isinstance(taxon_path, str) or isinstance(taxid, bool) or not isinstance(taxid, (int, str)):
+            raise ValueError(f"Invalid cache entry for {taxon_path!r}: expected a canonical TaxID.")
+        normalized[taxon_path] = parse_taxid(taxid, f"cache entry {taxon_path!r}")
+    return normalized
 
 
 def read_abundance_paths(path, tax_column):
@@ -75,8 +90,9 @@ def read_abundance_paths(path, tax_column):
 
 def read_assignment_taxids(paths):
     lineage_to_taxids = {}
+    seen_read_ids = set()
     for path in paths:
-        opener = gzip.open if str(path).endswith(".gz") else open
+        opener = gzip.open if str(path).lower().endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if not line.rstrip("\r\n"):
@@ -84,12 +100,30 @@ def read_assignment_taxids(paths):
                 fields = line.rstrip("\r\n").split("\t")
                 if len(fields) != 5:
                     raise ValueError(f"{path}:{line_number}: expected exactly 5 assignment fields.")
-                taxid_text = fields[2].strip()
-                lineage = fields[4].strip()
-                if not taxid_text.isdigit():
-                    raise ValueError(f"{path}:{line_number}: invalid TaxID {taxid_text!r}.")
-                taxid = int(taxid_text)
-                if taxid > 0 and lineage:
+                status, read_id, length_field, lineage = fields[0], fields[1], fields[3], fields[4]
+                if status not in {"C", "U"}:
+                    raise ValueError(f"{path}:{line_number}: invalid status {status!r}.")
+                if not read_id or read_id != read_id.strip() or any(ord(ch) < 32 for ch in read_id):
+                    raise ValueError(f"{path}:{line_number}: unsafe or empty read ID.")
+                if read_id in seen_read_ids:
+                    raise ValueError(f"{path}:{line_number}: duplicate read ID {read_id!r}.")
+                seen_read_ids.add(read_id)
+                if not (length_field.isdigit() and int(length_field) > 0 or
+                        ("|" in length_field and len(length_field.split("|")) == 2 and
+                         length_field.split("|", 1)[0].isdigit() and
+                         length_field.split("|", 1)[1].isdigit() and
+                         int(length_field.split("|", 1)[1]) > 0)):
+                    raise ValueError(f"{path}:{line_number}: malformed read length field.")
+                taxid_text = fields[2]
+                if any(field != field.strip() or any(ord(ch) < 32 for ch in field)
+                       for field in (fields[1], taxid_text, lineage)):
+                    raise ValueError(f"{path}:{line_number}: unsafe boundary whitespace or control character.")
+                taxid = parse_taxid(taxid_text, f"{path}:{line_number}")
+                if status == "U" and taxid != 0:
+                    raise ValueError(f"{path}:{line_number}: status U requires TaxID 0.")
+                if taxid > 0 and (not lineage or any(not part for part in lineage.split("|"))):
+                    raise ValueError(f"{path}:{line_number}: positive TaxID requires a complete lineage.")
+                if taxid > 0:
                     lineage_to_taxids.setdefault(lineage, []).append(taxid)
 
     resolved = {}
@@ -116,6 +150,8 @@ def find_unresolved(abundance_paths, cache):
         parts = path.split(";")
         for depth in range(1, len(parts) + 1):
             subpath = ";".join(parts[:depth])
+            if parts[depth - 1].strip().lower() in PLACEHOLDER_NAMES:
+                continue
             if cache.get(subpath, 0) <= 0:
                 unresolved[subpath] = {"path": subpath, "depth": depth, "name": parts[depth - 1]}
     return [unresolved[path] for path in sorted(unresolved)]
@@ -198,15 +234,17 @@ def main():
     parser.add_argument("--tax-column", default="tax")
     parser.add_argument("--assignments", action="append", default=[])
     parser.add_argument("--cache", required=True, help="Read-only source cache in cache_only mode")
-    parser.add_argument("--resolved-cache", required=True, help="Run-local resolved cache output")
+    parser.add_argument("--resolved-cache", help="Run-local resolved cache output")
     parser.add_argument("--mode", choices=["cache_only", "refresh"], default="cache_only")
     parser.add_argument("--email-env", default="NCBI_EMAIL")
     parser.add_argument("--api-key-env", default="NCBI_API_KEY")
     parser.add_argument("--unresolved-policy", choices=["warn", "error"], default="warn")
-    parser.add_argument("--unresolved-tsv", required=True)
-    parser.add_argument("--conflicts-tsv", required=True)
-    parser.add_argument("--resolution-sources-tsv", required=True)
-    parser.add_argument("--provenance", required=True)
+    parser.add_argument("--unresolved-tsv")
+    parser.add_argument("--conflicts-tsv")
+    parser.add_argument("--resolution-sources-tsv")
+    parser.add_argument("--provenance")
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--online-preflight", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -237,6 +275,9 @@ def main():
             email = os.environ.get(args.email_env, "").strip()
             if not email:
                 raise ValueError(f"Environment variable {args.email_env!r} is required for refresh mode.")
+            if args.validate_only and not args.online_preflight:
+                print(f"[taxonomy] Preflight complete: {len(unresolved)} node(s) require online refresh.")
+                return 0
             api_key = os.environ.get(args.api_key_env, "").strip() or None
             delay = 0.12 if api_key else 0.35
             name_results = {}
@@ -257,11 +298,18 @@ def main():
                     resolution_sources[item["path"]] = "ncbi_refresh"
 
             unresolved = find_unresolved(abundance_paths, cache)
-            if not query_failures:
-                atomic_write_json(args.cache, cache)
-                cache_updated = True
+        if args.validate_only:
+            if args.unresolved_policy == "error" and unresolved:
+                raise ValueError(f"{len(unresolved)} taxonomy nodes remain unresolved.")
+            print(f"[taxonomy] Preflight complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
+            return 0
 
-        atomic_write_json(args.resolved_cache, cache)
+        required_outputs = (args.resolved_cache, args.unresolved_tsv, args.conflicts_tsv,
+                            args.resolution_sources_tsv, args.provenance)
+        if any(not value for value in required_outputs):
+            raise ValueError("Resolver output paths are required unless --validate-only is used.")
+
+        atomic_write_json(args.resolved_cache, {key: str(value) for key, value in cache.items()})
         write_unresolved_tsv(args.unresolved_tsv, unresolved)
         write_conflicts_tsv(args.conflicts_tsv, conflicts)
         taxon_nodes = iter_taxon_nodes(abundance_paths)
@@ -304,6 +352,12 @@ def main():
         if args.unresolved_policy == "error" and unresolved:
             print(f"[taxonomy] ERROR: {len(unresolved)} taxonomy nodes remain unresolved.", file=sys.stderr)
             return 1
+        if args.mode == "refresh":
+            atomic_write_json(args.cache, {key: str(value) for key, value in cache.items()})
+            cache_updated = True
+            provenance["source_cache_updated"] = True
+            provenance["source_cache_sha256_after"] = compute_sha256(args.cache)
+            atomic_write_json(args.provenance, provenance)
         print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
         return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:

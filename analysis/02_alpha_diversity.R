@@ -68,6 +68,9 @@ run_alpha <- function(context) {
 
   # Attach metadata if available
   if (!is.null(context$metadata)) {
+    collisions <- intersect(setdiff(names(context$metadata), "SampleID"), setdiff(names(alpha_wide), "SampleID"))
+    if (length(collisions)) stop(sprintf("Metadata/output column collision before alpha join: %s",
+                                         paste(collisions, collapse = ", ")), call. = FALSE)
     alpha_wide <- dplyr::left_join(context$metadata, alpha_wide, by = "SampleID")
   }
 
@@ -224,14 +227,14 @@ run_alpha <- function(context) {
           if (length(metric_group_counts) < 2L || any(metric_group_counts < 3L)) next
 
           if (nlevels(grp) == 2L) {
-            wt <- suppressWarnings(wilcox.test(y ~ grp))
+            wt <- wilcox.test(y ~ grp)
             test_rows[[m]] <- data.frame(
               Metric = m, Test = "Wilcoxon rank-sum",
               Statistic = wt$statistic, P_Value = wt$p.value,
               stringsAsFactors = FALSE
             )
           } else {
-            kt <- suppressWarnings(kruskal.test(y ~ grp))
+            kt <- kruskal.test(y ~ grp)
             test_rows[[m]] <- data.frame(
               Metric = m, Test = "Kruskal-Wallis",
               Statistic = kt$statistic, P_Value = kt$p.value,

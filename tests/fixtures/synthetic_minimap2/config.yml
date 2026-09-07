@@ -36,6 +36,7 @@ composition:
 
 beta:
   distances: ["bray"]
+  primary_distance: "bray"
   permutations: 99
   minimum_count: 1
   strata_column: null
