@@ -96,14 +96,18 @@ test_that("invalid modules, assignments, and metadata return non-zero", {
 test_that("invalid module requests fail before malformed inputs or output creation", {
   root <- tempfile("invalid_module_fast_fail_")
   dir.create(root)
-  config <- write_process_config(root)
-  writeLines("malformed", file.path(root, "assignments.tsv"))
+  malformed <- file.path(root, "assignments.tsv")
+  writeLines("malformed", malformed)
+  config <- write_process_config(
+    root, assignments = list(S1 = normalizePath(malformed, winslash = "/"))
+  )
   output <- file.path(root, "should_not_exist")
   result <- run_pipeline_process(
     c("--config", config, "--modules", "not_a_module", "--output-dir", output), tempdir()
   )
   expect_gt(result$status, 0L)
   expect_match(result$stderr, "Unknown module")
+  expect_false(grepl("expected exactly 5", result$stderr))
   expect_false(file.exists(output))
 })
 

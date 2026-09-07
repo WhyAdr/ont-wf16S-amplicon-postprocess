@@ -8,7 +8,7 @@ suppressMessages({
   library(ggplot2)
 })
 
-run_beta <- function(context) {
+run_beta <- function(context, procrustes_fn = vegan::procrustes) {
   cfg <- context$config
   beta_dir <- cfg$output$dirs$beta
   dir.create(beta_dir, recursive = TRUE, showWarnings = FALSE)
@@ -189,7 +189,7 @@ run_beta <- function(context) {
           if (ncol(rare_points) < 2L) {
             stop("Rarefied PCoA returned fewer than two axes.", call. = FALSE)
           }
-          vegan::procrustes(reference_points, rare_points[, 1:2, drop = FALSE])$Yrot
+          procrustes_fn(reference_points, rare_points[, 1:2, drop = FALSE])$Yrot
         }, error = function(e) NULL)
         if (is.null(aligned)) {
           failed_iterations <- c(failed_iterations, iteration)

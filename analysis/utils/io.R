@@ -21,6 +21,7 @@ sanitize_filename <- function(s) {
 }
 
 SUPPORTED_NCBI_DATABASE_SETS <- c("ncbi_16s_18s", "ncbi_16s_18s_28s_ITS")
+BAMSTATS_REQUIRED_COLUMNS <- c("name", "sample_name", "iden", "ref_coverage")
 
 read_upstream_params <- function(path) {
   if (is.null(path) || !nzchar(path) || !file.exists(path)) {
@@ -127,6 +128,32 @@ extract_upstream_contract <- function(params) {
   )
 }
 
+read_bamstats_table <- function(path) {
+  header_con <- gzfile(path, open = "rt")
+  on.exit(close(header_con), add = TRUE)
+  header_line <- readLines(header_con, n = 1L, warn = FALSE)
+  if (length(header_line) == 0L) {
+    stop(sprintf("Invalid bamstats schema or empty file: '%s'", path), call. = FALSE)
+  }
+  header <- strsplit(header_line, "\t", fixed = TRUE)[[1]]
+  if (anyDuplicated(header)) {
+    stop(sprintf("Bamstats file '%s' contains duplicate column names.", path), call. = FALSE)
+  }
+  missing <- setdiff(BAMSTATS_REQUIRED_COLUMNS, header)
+  if (length(missing) > 0L) {
+    stop(sprintf("Bamstats file '%s' lacks required column(s): %s.", path,
+                 paste(missing, collapse = ", ")), call. = FALSE)
+  }
+  col_classes <- stats::setNames(rep("NULL", length(header)), header)
+  col_classes[BAMSTATS_REQUIRED_COLUMNS] <- "character"
+  stats <- read.delim(gzfile(path), header = TRUE, sep = "\t", colClasses = col_classes,
+                      check.names = FALSE, stringsAsFactors = FALSE)
+  if (nrow(stats) == 0L) {
+    stop(sprintf("Invalid bamstats schema or empty file: '%s'", path), call. = FALSE)
+  }
+  stats
+}
+
 discover_bamstats <- function(root, sample_ids) {
   mapped <- stats::setNames(rep(NA_character_, length(sample_ids)), sample_ids)
   if (is.null(root)) return(mapped)
@@ -142,16 +169,8 @@ discover_bamstats <- function(root, sample_ids) {
     return(mapped)
   }
   for (path in candidates) {
-    probe <- read.delim(gzfile(path), nrows = 1L, check.names = FALSE,
-                        stringsAsFactors = FALSE)
-    required <- c("name", "sample_name", "iden", "ref_coverage")
-    if (!all(required %in% names(probe)) || nrow(probe) != 1L) {
-      stop(sprintf("Invalid bamstats schema or empty file: '%s'", path), call. = FALSE)
-    }
-    col_classes <- rep("NULL", length(names(probe)))
-    col_classes[which(names(probe) == "sample_name")] <- "character"
-    samples_in_file <- unique(read.delim(gzfile(path), colClasses = col_classes, check.names = FALSE,
-                                         stringsAsFactors = FALSE)[[1]])
+    stats <- read_bamstats_table(path)
+    samples_in_file <- unique(stats$sample_name)
     if (length(samples_in_file) == 0L || anyNA(samples_in_file) || any(!nzchar(trimws(samples_in_file)))) {
       stop(sprintf("Bamstats file '%s' contains missing or empty sample_name values.", path), call. = FALSE)
     }
@@ -179,13 +198,7 @@ discover_bamstats <- function(root, sample_ids) {
 }
 
 partition_minimap2_failures <- function(reads, bamstats_path, params, sample_id) {
-  stats <- read.delim(gzfile(bamstats_path), check.names = FALSE,
-                      stringsAsFactors = FALSE)
-  required <- c("name", "sample_name", "iden", "ref_coverage")
-  if (!all(required %in% names(stats))) {
-    stop(sprintf("Bamstats for '%s' lacks required columns: %s", sample_id,
-                 paste(setdiff(required, names(stats)), collapse = ", ")), call. = FALSE)
-  }
+  stats <- read_bamstats_table(bamstats_path)
   if (anyNA(stats$name) || any(!nzchar(stats$name)) || anyDuplicated(stats$name)) {
     stop(sprintf("Bamstats read names for '%s' must be non-empty and unique.", sample_id),
          call. = FALSE)

@@ -240,3 +240,44 @@ test_that("NMDS repetition helper follows vegan metaMDS semantics", {
   expect_false(nmds_solution_repeated(NA))
   expect_false(nmds_solution_repeated("not-a-number"))
 })
+
+test_that("Beta rarefaction stability records isolated Procrustes failures", {
+  root <- tempfile("beta_resampling_failure_")
+  dir.create(root)
+  samples <- c("Ctrl1", "Ctrl2", "Ctrl3", "Trt1", "Trt2", "Trt3")
+  cfg <- get_default_config()
+  cfg$mode <- "cohort"
+  cfg$input$abundance_table <- create_temp_abundance(root, n_species = 12, sample_names = samples)
+  cfg$input$metadata <- create_temp_metadata(
+    root, samples, c("Control", "Control", "Control", "Treated", "Treated", "Treated")
+  )
+  cfg$input$params_json <- create_temp_params(root)
+  cfg$beta$permutations <- 19L
+  cfg$beta$resampling$enabled <- TRUE
+  cfg$beta$resampling$iterations <- 3L
+  cfg$output$base_dir <- file.path(root, "output")
+  cfg$output$dirs <- list(beta = file.path(cfg$output$base_dir, "03_Beta_Diversity"))
+  context <- build_context(cfg)
+
+  calls <- 0L
+  fail_once <- function(X, Y) {
+    calls <<- calls + 1L
+    if (calls == 1L) stop("injected Procrustes failure")
+    vegan::procrustes(X, Y)
+  }
+  expect_equal(run_beta(context, procrustes_fn = fail_once)$status, "completed")
+  diagnostics <- read.delim(
+    file.path(cfg$output$dirs$beta, "pcoa_rarefaction_diagnostics.tsv"), check.names = FALSE
+  )
+  stability <- read.delim(
+    file.path(cfg$output$dirs$beta, "pcoa_rarefaction_stability.tsv"), check.names = FALSE
+  )
+  expect_equal(diagnostics$SuccessfulIterations, 2L)
+  expect_identical(as.character(diagnostics$FailedIterations), "1")
+  expect_setequal(unique(stability$Iteration), c(2L, 3L))
+
+  expect_error(
+    run_beta(context, procrustes_fn = function(X, Y) stop("always fail")),
+    "All beta-diversity rarefaction stability iterations failed"
+  )
+})

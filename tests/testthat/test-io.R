@@ -30,6 +30,11 @@ test_that("producer contract requires whole-number length and abundance threshol
   }
   params <- read_upstream_params(create_temp_params(root))
   expect_equal(params$min_len, 1300)
+  path <- create_temp_params(root)
+  one_point_zero <- jsonlite::fromJSON(path, simplifyVector = FALSE)
+  one_point_zero$abundance_threshold <- 1.0
+  jsonlite::write_json(one_point_zero, path, auto_unbox = TRUE, null = "null")
+  expect_no_error(read_upstream_params(path))
 })
 
 test_that("bamstats partition is one-to-one and conserves all C0 reads", {
@@ -111,6 +116,36 @@ test_that("discover_bamstats rejects multiple bamstats files mapping to the same
   create_temp_bamstats(dir1, "S1", data.frame(name = "r1", iden = 95, ref_coverage = 95))
   create_temp_bamstats(dir2, "S1", data.frame(name = "r2", iden = 95, ref_coverage = 95))
   expect_error(discover_bamstats(root, "S1"), "Multiple bamstats files discovered for sample 'S1'")
+})
+
+test_that("bamstats preserves numeric-looking read and sample identifiers", {
+  root <- tempfile("bamstats_numeric_identifiers_")
+  dir.create(root)
+  bams_dir <- file.path(root, "numeric.bamstats_results")
+  dir.create(bams_dir)
+  bamstats <- create_temp_bamstats(
+    bams_dir, "01", data.frame(name = "0001", iden = 89, ref_coverage = 95)
+  )
+  reads <- data.frame(status = "C", read_id = "0001", taxid = 0,
+                      stringsAsFactors = FALSE)
+  params <- read_upstream_params(create_temp_params(root))
+  discovered <- discover_bamstats(root, "01")
+  expect_identical(basename(discovered[["01"]]), basename(bamstats))
+  expect_equal(
+    unlist(partition_minimap2_failures(reads, discovered[["01"]], params, "01")),
+    c(matched = 1, identity_only = 1, coverage_only = 0, both = 0)
+  )
+})
+
+test_that("bamstats helper preserves ordinary alphanumeric identifiers", {
+  root <- tempfile("bamstats_alphanumeric_identifiers_")
+  dir.create(root)
+  path <- create_temp_bamstats(root, "Sample_A", data.frame(
+    name = "read_0001", iden = 95, ref_coverage = 95
+  ))
+  parsed <- read_bamstats_table(path)
+  expect_identical(parsed$name, "read_0001")
+  expect_identical(parsed$sample_name, "Sample_A")
 })
 
 test_that("partition_minimap2_failures rejects duplicate read names within a single bamstats file", {
@@ -380,6 +415,7 @@ test_that("Sample IDs reject unsafe names and post-sanitization collisions", {
     c("S1", "bad\nname"),
     c("A B", "A?B"),
     c("S1", " S2"),
+    c("S1", "S2 "),
     c("Sample", "sample"),
     c("S1", "ends."),
     c("S1", "CON"),
