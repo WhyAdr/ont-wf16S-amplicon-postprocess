@@ -25,6 +25,23 @@ assert_nonempty_string <- function(x, name) {
   invisible(TRUE)
 }
 
+parse_requested_modules <- function(value) {
+  defaults <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
+  if (is.null(value)) return(defaults)
+  if (!is.character(value) || length(value) != 1L || is.na(value) ||
+      !nzchar(trimws(value))) {
+    stop("'--modules' must contain at least one module name.", call. = FALSE)
+  }
+
+  modules <- strsplit(trimws(value), "[,[:space:]]+", perl = TRUE)[[1]]
+  duplicates <- unique(modules[duplicated(modules)])
+  if (length(duplicates) > 0L) {
+    stop(sprintf("Duplicate module name(s): %s", paste(duplicates, collapse = ", ")),
+         call. = FALSE)
+  }
+  modules
+}
+
 validate_config <- function(cfg) {
   if (!identical(as.integer(cfg$schema_version), 1L)) {
     stop("Unsupported schema_version; expected 1.", call. = FALSE)
@@ -34,7 +51,8 @@ validate_config <- function(cfg) {
       !cfg$mode %in% c("auto", "single", "cohort")) {
     stop("'mode' must be one of: auto, single, cohort.", call. = FALSE)
   }
-  assert_scalar_number(cfg$seed, "seed", lower = 0, integer = TRUE)
+  assert_scalar_number(cfg$seed, "seed", lower = 0,
+                       upper = .Machine$integer.max, integer = TRUE)
 
   assert_nonempty_string(cfg$input$abundance_table, "input.abundance_table")
   assert_nonempty_string(cfg$input$params_json, "input.params_json")
@@ -258,6 +276,9 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
 
   raw_yaml <- yaml::read_yaml(config_file_abs)
   default_cfg <- get_default_config()
+  if (!is.list(raw_yaml) || is.null(names(raw_yaml))) {
+    stop("Configuration YAML root must be a named mapping.", call. = FALSE)
+  }
   cfg <- merge_config(default_cfg, raw_yaml)
   cli_refresh <- isTRUE(cli_opts$refresh_taxonomy) ||
     isTRUE(cli_opts[["refresh-taxonomy"]])
@@ -289,17 +310,14 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
 
   validate_config(cfg)
 
+  requested_modules <- parse_requested_modules(cli_opts$modules)
   cfg$cli <- list(
     validate_only = isTRUE(cli_opts$validate_only) || isTRUE(cli_opts[["validate-only"]]),
     keep_going = isTRUE(cli_opts$keep_going) || isTRUE(cli_opts[["keep-going"]]),
     overwrite = isTRUE(cli_opts$overwrite),
     refresh_taxonomy = cli_refresh,
     krona = isTRUE(cfg$krona$enabled),
-    modules = if (!is.null(cli_opts$modules) && nzchar(cli_opts$modules)) {
-      strsplit(cli_opts$modules, "[, ]+")[[1]]
-    } else {
-      c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
-    }
+    modules = requested_modules
   )
 
   # Path resolution against config_dir

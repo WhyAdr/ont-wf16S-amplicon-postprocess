@@ -53,6 +53,26 @@ test_that("Krona CLI opt-in is recorded in config and manifest settings", {
   expect_true(cfg$cli$krona)
 })
 
+test_that("Requested module parsing preserves order and rejects invalid requests", {
+  expect_equal(
+    parse_requested_modules(" qc,alpha shared\tkreport "),
+    c("qc", "alpha", "shared", "kreport")
+  )
+  expect_error(parse_requested_modules("qc,qc"), "Duplicate module name")
+  expect_error(parse_requested_modules("   "), "must contain at least one")
+})
+
+test_that("Configuration YAML root must be a named mapping", {
+  root <- tempfile("config_root_")
+  dir.create(root)
+  scalar <- file.path(root, "scalar.yml")
+  empty <- file.path(root, "empty.yml")
+  writeLines("not-a-mapping", scalar)
+  writeLines(character(0), empty)
+  expect_error(load_config(scalar), "named mapping")
+  expect_error(load_config(empty), "named mapping")
+})
+
 test_that("CLI --output-dir overrides base_dir and all derived paths", {
   config_path <- file.path("..", "..", "config.yml")
   override_dir <- file.path(tempdir(), "test_override_output")

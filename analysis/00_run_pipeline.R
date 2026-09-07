@@ -58,14 +58,6 @@ cfg <- tryCatch({
 })
 cfg$pipeline_root <- repo_root
 
-# 3. Build and validate shared context
-context <- tryCatch({
-  build_context(cfg)
-}, error = function(e) {
-  cat(sprintf("[FATAL] Input validation error: %s\n", e$message), file = stderr())
-  quit(status = 1)
-})
-
 # Module registry and request validation must happen before any output mutation.
 module_registry <- list(
   qc          = run_qc,
@@ -92,6 +84,14 @@ if (isTRUE(cfg$krona$enabled) && !("kreport" %in% requested_modules)) {
       file = stderr())
   quit(status = 1)
 }
+
+# 3. Build and validate shared context only after validating requested modules.
+context <- tryCatch({
+  build_context(cfg)
+}, error = function(e) {
+  cat(sprintf("[FATAL] Input validation error: %s\n", e$message), file = stderr())
+  quit(status = 1)
+})
 
 # Optional module dependencies and embedded database checks are performed only
 # for explicitly requested modules, before validate-only and output mutation.

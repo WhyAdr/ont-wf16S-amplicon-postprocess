@@ -93,6 +93,29 @@ test_that("invalid modules, assignments, and metadata return non-zero", {
   expect_match(invalid_metadata$stderr, "Metadata SampleID mismatch")
 })
 
+test_that("invalid module requests fail before malformed inputs or output creation", {
+  root <- tempfile("invalid_module_fast_fail_")
+  dir.create(root)
+  config <- write_process_config(root)
+  writeLines("malformed", file.path(root, "assignments.tsv"))
+  output <- file.path(root, "should_not_exist")
+  result <- run_pipeline_process(
+    c("--config", config, "--modules", "not_a_module", "--output-dir", output), tempdir()
+  )
+  expect_gt(result$status, 0L)
+  expect_match(result$stderr, "Unknown module")
+  expect_false(file.exists(output))
+})
+
+test_that("duplicate module requests fail during configuration", {
+  root <- tempfile("duplicate_module_process_")
+  dir.create(root)
+  config <- write_process_config(root)
+  result <- run_pipeline_process(c("--config", config, "--modules", "qc,qc"), tempdir())
+  expect_gt(result$status, 0L)
+  expect_match(result$stderr, "Duplicate module name")
+})
+
 test_that("Krona opt-in requires the kreport module before output mutation", {
   root <- tempfile("krona_dependency_")
   dir.create(root)
