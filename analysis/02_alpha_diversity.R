@@ -141,9 +141,7 @@ run_alpha <- function(context) {
         counts = counts_s,
         subsample_depth = realized_depth,
         n_iterations = n_iterations,
-        seed = as.integer((seed + strtoi(substr(
-          digest::digest(s, algo = "xxhash32", serialize = FALSE), 1L, 7L
-        ), base = 16L)) %% .Machine$integer.max)
+        seed = derive_sample_seed(seed, s)
       )
       res_df$SampleID <- s
       resample_records[[s]] <- res_df

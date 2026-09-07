@@ -103,3 +103,17 @@ test_that("Seeded rarefaction resample output is byte-stable", {
     digest::digest(file = second, algo = "sha256")
   )
 })
+
+test_that("Derived sample seeds are deterministic throughout the set.seed range", {
+  samples <- c("S1", "sample with spaces", "another-sample")
+  derived <- vapply(samples, function(sample_id) {
+    derive_sample_seed(.Machine$integer.max, sample_id)
+  }, integer(1))
+  expect_true(all(is.finite(derived)))
+  expect_true(all(derived >= 0L & derived <= .Machine$integer.max))
+  expect_identical(
+    derive_sample_seed(.Machine$integer.max, "S1"),
+    derive_sample_seed(.Machine$integer.max, "S1")
+  )
+  expect_error(derive_sample_seed(.Machine$integer.max + 1, "S1"), "set.seed\\(\\) range")
+})

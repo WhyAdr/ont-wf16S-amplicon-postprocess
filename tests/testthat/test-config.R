@@ -130,3 +130,9 @@ test_that("taxonomy refresh requires explicit CLI opt-in", {
   expect_equal(resolved$taxonomy$network_mode, "refresh")
   expect_true(resolved$cli$refresh_taxonomy)
 })
+
+test_that("Configuration rejects base seeds outside R's supported integer range", {
+  cfg <- get_default_config()
+  cfg$seed <- .Machine$integer.max + 1
+  expect_error(validate_config(cfg), "Invalid configuration value 'seed'")
+})

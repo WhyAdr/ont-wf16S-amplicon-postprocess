@@ -7,6 +7,23 @@ suppressMessages({
   library(dplyr)
 })
 
+derive_sample_seed <- function(seed, sample_id) {
+  if (!is.numeric(seed) || length(seed) != 1L || is.na(seed) || !is.finite(seed) ||
+      seed < 0 || seed > .Machine$integer.max ||
+      abs(seed - round(seed)) > sqrt(.Machine$double.eps)) {
+    stop("Base seed must be an integer in the set.seed() range.", call. = FALSE)
+  }
+  if (!is.character(sample_id) || length(sample_id) != 1L || is.na(sample_id) ||
+      !nzchar(sample_id)) {
+    stop("Sample ID for seed derivation must be one non-empty string.", call. = FALSE)
+  }
+  hash_part <- strtoi(substr(
+    digest::digest(sample_id, algo = "xxhash32", serialize = FALSE), 1L, 7L
+  ), base = 16L)
+  as.integer((as.double(seed) + as.double(hash_part)) %%
+               as.double(.Machine$integer.max))
+}
+
 calc_alpha_indices <- function(counts) {
   counts <- as.integer(round(counts[counts > 0]))
   total_classified <- sum(counts)
