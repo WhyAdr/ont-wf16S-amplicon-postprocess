@@ -336,6 +336,59 @@ test_that("Assignments parser rejects non-five-field rows with a physical line n
   expect_error(read_assignments_file(bad_file, "S1"), "4 fields at line 2; expected exactly 5")
 })
 
+test_that("Assignments parser streams plain and gzipped files across chunk boundaries", {
+  root <- tempfile("streamed_assignments_")
+  dir.create(root)
+  lines <- c(
+    "C\tread_001\t123\t0|1501\tBacteria|Example",
+    "",
+    "U\tread_002\t0\t1402\tUnclassified",
+    "C\tread_003\t0\t1|1303\tUnclassified",
+    "C\tread_004\t456\t1504\tBacteria|Example"
+  )
+  plain_path <- file.path(root, "assignments.tsv")
+  gz_path <- paste0(plain_path, ".gz")
+  writeLines(lines, plain_path)
+  gz_connection <- gzfile(gz_path, open = "wt")
+  writeLines(lines, gz_connection)
+  close(gz_connection)
+
+  plain <- read_assignments_file(plain_path, "S1", expected_total = 4L, chunk_size = 2L)
+  gzipped <- read_assignments_file(gz_path, "S1", expected_total = 4L, chunk_size = 3L)
+
+  expect_identical(plain, gzipped)
+  expect_identical(names(plain), c(
+    "status", "read_id", "taxid", "len_field", "lineage", "read_length", "effective_classified"
+  ))
+  expect_type(plain$read_id, "character")
+  expect_type(plain$taxid, "double")
+  expect_type(plain$read_length, "integer")
+  expect_identical(plain$read_length, c(1501L, 1402L, 1303L, 1504L))
+  expect_identical(plain$effective_classified, c(TRUE, FALSE, FALSE, TRUE))
+})
+
+test_that("Assignments parser retains validation contracts while streaming", {
+  root <- tempfile("streamed_assignment_validation_")
+  dir.create(root)
+  duplicate_path <- file.path(root, "duplicate.tsv")
+  empty_id_path <- file.path(root, "empty_id.tsv")
+  trailing_field_path <- file.path(root, "trailing_field.tsv")
+  writeLines(c(
+    "C\tread_001\t123\t1500\tBacteria",
+    "U\tread_001\t0\t1400\tUnclassified"
+  ), duplicate_path)
+  writeLines("C\t\t123\t1500\tBacteria", empty_id_path)
+  writeLines("C\tread_001\t123\t1500\t", trailing_field_path)
+
+  expect_error(read_assignments_file(duplicate_path, "S1", chunk_size = 1L),
+               "contains duplicate read ID: 'read_001'")
+  expect_error(read_assignments_file(empty_id_path, "S1"), "empty read ID at line 1")
+  trailing_field <- read_assignments_file(trailing_field_path, "S1")
+  expect_identical(trailing_field$lineage, "")
+  expect_error(read_assignments_file(trailing_field_path, "S1", chunk_size = 0L),
+               "chunk_size.*positive integer")
+})
+
 test_that("Real Ambar Ayunda fixture satisfies all Section 2.2 invariants", {
   ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
   asgn_path <- file.path("..", "..", "output_AAy", "reads_assignments",
@@ -371,6 +424,13 @@ test_that("Real Ambar Ayunda fixture satisfies all Section 2.2 invariants", {
   expect_equal(sum(reads$status == "U"), 24247)
   expect_equal(sum(reads$status == "C" & reads$taxid == 0), 9253)
   expect_equal(sum(reads$effective_classified), 80556)
+  expect_identical(sum(reads$read_length), 171330353L)
+
+  # This digest covers the complete typed return value, including column order
+  # and values, so the streamed reader remains equivalent for the fixture.
+  digest_path <- tempfile("assignments_typed_", fileext = ".rds")
+  saveRDS(reads, digest_path, version = 2)
+  expect_identical(unname(tools::md5sum(digest_path)), "0223a32d3179ddeae4f36e1aaf13b6f3")
 })
 
 test_that("Metadata validation aligns samples and detects discrepancies", {

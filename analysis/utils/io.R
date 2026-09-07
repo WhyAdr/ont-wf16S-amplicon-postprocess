@@ -454,93 +454,160 @@ read_abundance_table <- function(path, tax_col = "tax", aggregate_cols = c("tota
   )
 }
 
-read_assignments_file <- function(path, sample_id, expected_total = NULL, expected_classified = NULL, expected_unclassified = NULL) {
+open_assignments_connection <- function(path) {
+  if (grepl("\\.gz$", path, ignore.case = TRUE)) {
+    gzfile(path, open = "rt")
+  } else {
+    file(path, open = "rt")
+  }
+}
+
+split_assignment_fields <- function(line) {
+  # Appending a sentinel tab makes strsplit() retain physical trailing empty
+  # fields, which is required for exact five-column validation.
+  strsplit(paste0(line, "\t"), "\t", fixed = TRUE)[[1]]
+}
+
+parse_assignment_length <- function(length_field) {
+  if (is.na(length_field) || length_field == "") return(NA_integer_)
+  parts <- strsplit(length_field, "\\|")[[1]]
+  last_part <- parts[length(parts)]
+  if (!grepl("^[0-9]+$", last_part)) return(NA_integer_)
+  suppressWarnings(as.integer(last_part))
+}
+
+validate_assignment_chunk <- function(lines, sample_id, line_numbers, seen_read_ids) {
+  fields <- strsplit(paste0(lines, "\t"), "\t", fixed = TRUE)
+  field_counts <- lengths(fields)
+  if (any(field_counts != 5L)) {
+    bad_index <- which(field_counts != 5L)[1]
+    stop(sprintf(
+      "Assignments file for sample '%s' has %d fields at line %d; expected exactly 5.",
+      sample_id, field_counts[bad_index], line_numbers[bad_index]
+    ), call. = FALSE)
+  }
+
+  fields <- do.call(rbind, fields)
+  status <- fields[, 1]
+  read_id <- fields[, 2]
+  taxid_text <- fields[, 3]
+  length_field <- fields[, 4]
+
+  if (any(!nzchar(read_id))) {
+    bad_index <- which(!nzchar(read_id))[1]
+    stop(sprintf("Assignments file for sample '%s' has an empty read ID at line %d",
+                 sample_id, line_numbers[bad_index]), call. = FALSE)
+  }
+  already_seen <- vapply(read_id, exists, logical(1), envir = seen_read_ids, inherits = FALSE)
+  duplicate <- duplicated(read_id) | already_seen
+  if (any(duplicate)) {
+    duplicate_id <- read_id[which(duplicate)[1]]
+    stop(sprintf("Assignments file for sample '%s' contains duplicate read ID: '%s'",
+                 sample_id, duplicate_id), call. = FALSE)
+  }
+  list2env(stats::setNames(as.list(rep(TRUE, length(read_id))), read_id), envir = seen_read_ids)
+
+  valid_status <- status %in% c("C", "U")
+  if (any(!valid_status)) {
+    bad_index <- which(!valid_status)[1]
+    stop(sprintf("Assignments file for sample '%s' has invalid status '%s' at line %d",
+                 sample_id, status[bad_index], line_numbers[bad_index]), call. = FALSE)
+  }
+
+  valid_taxid <- grepl("^[0-9]+$", taxid_text)
+  taxid <- suppressWarnings(as.numeric(taxid_text))
+  invalid_taxid <- !valid_taxid | is.na(taxid) | !is.finite(taxid)
+  if (any(invalid_taxid)) {
+    bad_index <- which(invalid_taxid)[1]
+    stop(sprintf("Assignments file for sample '%s' has non-integer TaxID '%s' at line %d",
+                 sample_id, taxid_text[bad_index], line_numbers[bad_index]), call. = FALSE)
+  }
+  inconsistent <- status == "U" & taxid > 0
+  if (any(inconsistent)) {
+    bad_index <- which(inconsistent)[1]
+    stop(sprintf("Assignments file for sample '%s' has status U with positive TaxID at line %d",
+                 sample_id, line_numbers[bad_index]), call. = FALSE)
+  }
+
+  read_length <- vapply(length_field, parse_assignment_length, integer(1), USE.NAMES = FALSE)
+  invalid_length <- is.na(read_length) | !is.finite(read_length) | read_length <= 0
+  if (any(invalid_length)) {
+    bad_index <- which(invalid_length)[1]
+    stop(sprintf("Assignments file for sample '%s' has malformed length field '%s' at line %d",
+                 sample_id, length_field[bad_index], line_numbers[bad_index]), call. = FALSE)
+  }
+
+  invisible(NULL)
+}
+
+scan_assignments_file <- function(path, sample_id, chunk_size) {
+  connection <- open_assignments_connection(path)
+  on.exit(close(connection), add = TRUE)
+  seen_read_ids <- new.env(hash = TRUE, parent = emptyenv())
+  row_count <- 0L
+  physical_line <- 0L
+
+  repeat {
+    lines <- readLines(connection, n = chunk_size, warn = FALSE)
+    if (length(lines) == 0L) break
+    line_numbers <- physical_line + seq_along(lines)
+    physical_line <- physical_line + length(lines)
+    nonempty <- nzchar(lines)
+    if (!any(nonempty)) next
+    validate_assignment_chunk(lines[nonempty], sample_id, line_numbers[nonempty], seen_read_ids)
+    row_count <- row_count + sum(nonempty)
+  }
+
+  if (row_count == 0L) {
+    stop(sprintf("Assignments file for sample '%s' is empty.", sample_id), call. = FALSE)
+  }
+  row_count
+}
+
+read_assignments_file <- function(path, sample_id, expected_total = NULL, expected_classified = NULL,
+                                  expected_unclassified = NULL, chunk_size = 100000L) {
   if (!file.exists(path)) {
     stop(sprintf("Assignments file for sample '%s' not found: '%s'", sample_id, path), call. = FALSE)
   }
 
-  # Validate the physical five-field schema before read.delim() can normalize it.
-  lines <- readLines(path, warn = FALSE)
-  nonempty_line_numbers <- which(nzchar(lines))
-  if (length(nonempty_line_numbers) == 0L) {
-    stop(sprintf("Assignments file for sample '%s' is empty.", sample_id), call. = FALSE)
+  if (!is.numeric(chunk_size) || length(chunk_size) != 1L || is.na(chunk_size) ||
+      chunk_size < 1 || chunk_size != as.integer(chunk_size)) {
+    stop("'chunk_size' must be a positive integer.", call. = FALSE)
   }
-  field_counts <- lengths(strsplit(lines[nonempty_line_numbers], "\t", fixed = TRUE))
-  if (any(field_counts != 5L)) {
-    bad <- which(field_counts != 5L)[1]
-    stop(sprintf(
-      "Assignments file for sample '%s' has %d fields at line %d; expected exactly 5.",
-      sample_id, field_counts[bad], nonempty_line_numbers[bad]
-    ), call. = FALSE)
-  }
+  chunk_size <- as.integer(chunk_size)
+  row_count <- scan_assignments_file(path, sample_id, chunk_size)
 
-  raw_reads <- read.delim(
-    text = paste(lines[nonempty_line_numbers], collapse = "\n"),
-    header = FALSE,
-    sep = "\t",
-    col.names = c("status", "read_id", "taxid", "len_field", "lineage"),
-    colClasses = c("character", "character", "character", "character", "character"),
-    stringsAsFactors = FALSE,
-    quote = "",
-    fill = FALSE
+  # The validation pass avoids retaining raw text; this pass only builds the
+  # read-level data frame still required by QC downstream.
+  raw_reads <- data.frame(
+    status = character(row_count),
+    read_id = character(row_count),
+    taxid = numeric(row_count),
+    len_field = character(row_count),
+    lineage = character(row_count),
+    read_length = integer(row_count),
+    stringsAsFactors = FALSE
   )
-
-  if (any(is.na(raw_reads$read_id) | !nzchar(raw_reads$read_id))) {
-    bad_idx <- which(is.na(raw_reads$read_id) | !nzchar(raw_reads$read_id))[1]
-    stop(sprintf("Assignments file for sample '%s' has an empty read ID at line %d",
-                 sample_id, nonempty_line_numbers[bad_idx]), call. = FALSE)
+  connection <- open_assignments_connection(path)
+  on.exit(close(connection), add = TRUE)
+  row_index <- 0L
+  repeat {
+    lines <- readLines(connection, n = chunk_size, warn = FALSE)
+    if (length(lines) == 0L) break
+    nonempty <- nzchar(lines)
+    if (!any(nonempty)) next
+    fields <- do.call(rbind, lapply(lines[nonempty], split_assignment_fields))
+    indices <- seq.int(row_index + 1L, length.out = nrow(fields))
+    raw_reads$status[indices] <- fields[, 1]
+    raw_reads$read_id[indices] <- fields[, 2]
+    raw_reads$taxid[indices] <- suppressWarnings(as.numeric(fields[, 3]))
+    raw_reads$len_field[indices] <- fields[, 4]
+    raw_reads$lineage[indices] <- fields[, 5]
+    raw_reads$read_length[indices] <- vapply(fields[, 4], parse_assignment_length,
+                                              integer(1), USE.NAMES = FALSE)
+    row_index <- row_index + nrow(fields)
   }
-
-  # Check unique read IDs
-  if (any(duplicated(raw_reads$read_id))) {
-    dup_id <- raw_reads$read_id[duplicated(raw_reads$read_id)][1]
-    stop(sprintf("Assignments file for sample '%s' contains duplicate read ID: '%s'", sample_id, dup_id), call. = FALSE)
-  }
-
-  # Validate status
-  valid_statuses <- raw_reads$status %in% c("C", "U")
-  if (!all(valid_statuses)) {
-    bad_idx <- which(!valid_statuses)[1]
-    stop(sprintf("Assignments file for sample '%s' has invalid status '%s' at line %d",
-                 sample_id, raw_reads$status[bad_idx], nonempty_line_numbers[bad_idx]), call. = FALSE)
-  }
-
-  # Parse TaxID
-  valid_taxid <- grepl("^[0-9]+$", raw_reads$taxid)
-  taxid_num <- suppressWarnings(as.numeric(raw_reads$taxid))
-  if (any(!valid_taxid | is.na(taxid_num) | !is.finite(taxid_num))) {
-    bad_idx <- which(!valid_taxid | is.na(taxid_num) | !is.finite(taxid_num))[1]
-    stop(sprintf("Assignments file for sample '%s' has non-integer TaxID '%s' at line %d",
-                 sample_id, raw_reads$taxid[bad_idx], nonempty_line_numbers[bad_idx]), call. = FALSE)
-  }
-  raw_reads$taxid <- taxid_num
-
-  inconsistent <- raw_reads$status == "U" & raw_reads$taxid > 0
-  if (any(inconsistent)) {
-    bad_idx <- which(inconsistent)[1]
-    stop(sprintf("Assignments file for sample '%s' has status U with positive TaxID at line %d",
-                 sample_id, nonempty_line_numbers[bad_idx]), call. = FALSE)
-  }
-
-  # Parse read length defensively: single integer or last numeric part of pipe-delimited string
-  # Examples: "0|1481" -> 1481; "1500" -> 1500
-  parsed_len <- vapply(raw_reads$len_field, function(lf) {
-    if (is.null(lf) || is.na(lf) || lf == "") return(NA_integer_)
-    parts <- strsplit(lf, "\\|")[[1]]
-    last_p <- parts[length(parts)]
-    if (!grepl("^[0-9]+$", last_p)) return(NA_integer_)
-    suppressWarnings(as.integer(last_p))
-  }, integer(1), USE.NAMES = FALSE)
-
-  if (any(is.na(parsed_len) | !is.finite(parsed_len) | parsed_len <= 0)) {
-    bad_idx <- which(is.na(parsed_len) | !is.finite(parsed_len) | parsed_len <= 0)[1]
-    stop(sprintf("Assignments file for sample '%s' has malformed length field '%s' at line %d",
-                 sample_id, raw_reads$len_field[bad_idx], nonempty_line_numbers[bad_idx]), call. = FALSE)
-  }
-  raw_reads$read_length <- parsed_len
-
-  # Effective classification: taxid > 0
-  raw_reads$effective_classified <- (raw_reads$taxid > 0)
+  raw_reads$effective_classified <- raw_reads$taxid > 0
 
   n_total <- nrow(raw_reads)
   n_eff_class <- sum(raw_reads$effective_classified)
