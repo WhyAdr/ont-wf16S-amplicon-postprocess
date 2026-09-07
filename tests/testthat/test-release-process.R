@@ -171,3 +171,28 @@ test_that("keep-going records failure, executes later modules, and exits non-zer
   expect_equal(manifest$modules$kreport$status, "failed")
   expect_equal(manifest$modules$composition$status, "completed")
 })
+
+test_that("fail-fast runs record later requested modules as not_run", {
+  root <- tempfile("not_run_process_")
+  dir.create(root)
+  config <- write_process_config(root, unresolved_policy = "error")
+  output <- file.path(root, "fail fast output")
+  result <- run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "kreport,composition,alpha"),
+    tempdir()
+  )
+  expect_gt(result$status, 0L)
+  manifest <- jsonlite::fromJSON(file.path(output, "run_manifest.json"), simplifyVector = FALSE)
+  expect_equal(manifest$schema_version, 2L)
+  expect_equal(manifest$modules$kreport$status, "failed")
+  for (module_name in c("composition", "alpha")) {
+    record <- manifest$modules[[module_name]]
+    expect_equal(record$status, "not_run")
+    expect_match(record$reason, "Pipeline stopped after failure in module 'kreport'")
+    expect_length(record$outputs, 0L)
+    expect_length(record$warnings, 0L)
+    expect_null(record$error)
+  }
+  expect_false(dir.exists(file.path(output, "04_Taxa_Composition")))
+  expect_false(dir.exists(file.path(output, "02_Alpha_Diversity")))
+})

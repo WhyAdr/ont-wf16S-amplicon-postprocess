@@ -32,6 +32,7 @@ source(file.path(script_dir, "utils", "config.R"))
 source(file.path(script_dir, "utils", "io.R"))
 source(file.path(script_dir, "utils", "metrics.R"))
 source(file.path(script_dir, "utils", "plotting.R"))
+source(file.path(script_dir, "utils", "manifest.R"))
 source(file.path(script_dir, "utils", "kreport.R"))
 
 # Source all analysis modules
@@ -143,7 +144,10 @@ cat(sprintf("Project: %s | Mode: %s | Samples: %d\n",
 cat(sprintf("Output root: %s\n", cfg$output$base_dir))
 cat("=============================================================================\n")
 
-module_results <- list()
+module_results <- stats::setNames(
+  lapply(requested_modules, function(module_name) new_not_run_module_record()),
+  requested_modules
+)
 any_failed <- FALSE
 
 for (mod_name in requested_modules) {
@@ -180,6 +184,17 @@ for (mod_name in requested_modules) {
   if (mod_res$status == "failed") {
     any_failed <- TRUE
     if (!cfg$cli$keep_going) {
+      failure_index <- match(mod_name, requested_modules)
+      later_modules <- if (failure_index < length(requested_modules)) {
+        requested_modules[seq.int(failure_index + 1L, length(requested_modules))]
+      } else {
+        character(0)
+      }
+      for (later_module in later_modules) {
+        module_results[[later_module]] <- new_not_run_module_record(sprintf(
+          "Pipeline stopped after failure in module '%s'.", mod_name
+        ))
+      }
       cat(sprintf("\n[FATAL] Pipeline stopped due to failure in module [%s]. (Use --keep-going to continue past errors)\n", mod_name), file = stderr())
       break
     }
@@ -242,7 +257,7 @@ input_meta <- list(
     sha256 = context$file_hashes$taxonomy_cache
   ) else NULL,
   assignments = if (length(context$assignments) > 0L) {
-    lapply(names(context$assignments), function(sample_id) {
+    json_array(lapply(names(context$assignments), function(sample_id) {
       path <- context$assignments[[sample_id]]
       list(
         sample_id = sample_id,
@@ -251,10 +266,10 @@ input_meta <- list(
         mtime = as.character(file.info(path)$mtime),
         sha256 = context$file_hashes[[paste0("assignment_", sample_id)]]
       )
-    })
+    }))
   } else NULL,
   bamstats = if (any(!is.na(context$bamstats))) {
-    lapply(names(context$bamstats)[!is.na(context$bamstats)], function(sample_id) {
+    json_array(lapply(names(context$bamstats)[!is.na(context$bamstats)], function(sample_id) {
       path <- context$bamstats[[sample_id]]
       list(
         sample_id = sample_id,
@@ -263,7 +278,7 @@ input_meta <- list(
         mtime = as.character(file.info(path)$mtime),
         sha256 = context$file_hashes[[paste0("bamstats_", sample_id)]]
       )
-    })
+    }))
   } else NULL
 )
 
@@ -304,7 +319,8 @@ manifest <- list(
   pipeline = "ont-wf16s-postprocess",
   pipeline_version = pipeline_version,
   git_commit = git_commit,
-  schema_version = cfg$schema_version,
+  schema_version = 2L,
+  config_schema_version = cfg$schema_version,
   run_status = overall_status,
   start_time = format(start_time, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
   end_time = format(end_time, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
@@ -312,18 +328,18 @@ manifest <- list(
   project_name = cfg$project_name,
   mode = context$mode,
   seed = cfg$seed,
-  samples = context$samples,
+  samples = json_array(context$samples),
   config_file = cfg$config_file,
   output_root = cfg$output$base_dir,
-  command = commandArgs(trailingOnly = FALSE),
-  cli = cfg$cli,
+  command = json_array(commandArgs(trailingOnly = FALSE)),
+  cli = utils::modifyList(cfg$cli, list(modules = json_array(cfg$cli$modules))),
   inputs = input_meta,
   upstream_contract = context$upstream_contract,
-  modules = module_results,
-  warnings = unique(c(
+  modules = lapply(module_results, manifest_module_record),
+  warnings = json_array(unique(c(
     context$warnings,
     unlist(lapply(module_results, function(x) x$warnings %||% character(0)), use.names = FALSE)
-  )),
+  ))),
   taxonomy = list(
     network_mode = cfg$taxonomy$network_mode,
     unresolved_policy = cfg$taxonomy$unresolved_policy,
@@ -336,10 +352,12 @@ manifest <- list(
     platform = R.version$platform,
     python = python_version
   ),
-  package_versions = deps
+  package_versions = json_array(lapply(names(deps), function(package_name) {
+    list(package = package_name, version = deps[[package_name]])
+  }))
 )
 
-jsonlite::write_json(manifest, cfg$output$manifest_file, pretty = TRUE, auto_unbox = TRUE, null = "null")
+write_manifest_v2(manifest, cfg$output$manifest_file)
 
 cat("\n=============================================================================\n")
 cat(sprintf("Pipeline finished with status: [%s]\n", toupper(overall_status)))

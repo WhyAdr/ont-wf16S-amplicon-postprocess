@@ -15,8 +15,28 @@ manifest <- jsonlite::fromJSON(
   simplifyVector = FALSE
 )
 
+require_json_array <- function(value, path) {
+  if (!is.list(value) || !is.null(names(value))) {
+    stop(sprintf("Expected JSON array at '%s'.", path))
+  }
+  value
+}
+
+array_strings <- function(value, path) {
+  value <- require_json_array(value, path)
+  values <- vapply(value, function(item) {
+    if (!is.character(item) || length(item) != 1L || is.na(item)) {
+      stop(sprintf("Expected string array item at '%s'.", path))
+    }
+    item
+  }, character(1))
+  unname(values)
+}
+
 stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(identical(manifest$mode, "single"))
+stopifnot(identical(manifest$schema_version, 2L))
+stopifnot(identical(manifest$config_schema_version, 1L))
 stopifnot(identical(manifest$pipeline_version, expected_pipeline_version))
 stopifnot(grepl("^[0-9a-f]{40}$", manifest$git_commit))
 stopifnot(grepl("^R version 4[.]", manifest$interpreter$r))
@@ -30,11 +50,12 @@ stopifnot(is.null(manifest$upstream_contract$workflow_revision))
 
 # Expected module set completeness and status verification
 DEFAULT_CORE_MODULES <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
-expected_modules <- if (!is.null(manifest$cli$modules) && length(manifest$cli$modules) > 0L) {
-  unlist(manifest$cli$modules)
-} else {
-  DEFAULT_CORE_MODULES
-}
+expected_modules <- array_strings(manifest$cli$modules, "cli.modules")
+if (length(expected_modules) == 0L) expected_modules <- DEFAULT_CORE_MODULES
+require_json_array(manifest$samples, "samples")
+require_json_array(manifest$command, "command")
+require_json_array(manifest$warnings, "warnings")
+require_json_array(manifest$package_versions, "package_versions")
 
 # Non-self-referential check: release manifests must include the core module baseline
 stopifnot(all(DEFAULT_CORE_MODULES %in% names(manifest$modules)))
@@ -44,8 +65,9 @@ stopifnot(identical(sort(names(manifest$modules)), sort(union(DEFAULT_CORE_MODUL
 for (mod in names(manifest$modules)) {
   mod_rec <- manifest$modules[[mod]]
   stopifnot(mod_rec$status %in% c("completed", "skipped"))
-  if (length(mod_rec$outputs) > 0L) {
-    out_paths <- unlist(mod_rec$outputs, use.names = FALSE)
+  out_paths <- array_strings(mod_rec$outputs, paste0("modules.", mod, ".outputs"))
+  require_json_array(mod_rec$warnings, paste0("modules.", mod, ".warnings"))
+  if (length(out_paths) > 0L) {
     stopifnot(all(file.exists(out_paths)))
   }
 }
@@ -126,7 +148,7 @@ if (isTRUE(manifest$cli$krona)) {
     stop("Krona was enabled but '07_Kreport/krona/krona_provenance.json' is missing.")
   }
   krona_provenance <- jsonlite::fromJSON(krona_provenance_file, simplifyVector = FALSE)
-  krona_samples <- unlist(manifest$samples, use.names = FALSE)
+  krona_samples <- array_strings(manifest$samples, "samples")
   sanitize_release_filename <- function(sample_id) {
     gsub("[^A-Za-z0-9_.-]", "_", sample_id)
   }
@@ -157,6 +179,7 @@ if (isTRUE(manifest$cli$krona)) {
     ))
   }
   stopifnot(html_status %in% c("not_requested", "renderer_missing", "rendered"))
+  require_json_array(krona_provenance$samples, "krona_provenance.samples")
   stopifnot(length(krona_provenance$samples) == length(krona_samples))
 
   krona_records <- krona_provenance$samples

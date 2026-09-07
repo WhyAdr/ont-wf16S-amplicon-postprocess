@@ -213,7 +213,7 @@ run_kreport <- function(context) {
       requested_executable = krona_requested_executable,
       resolved_executable = if (html_rendered) krona_executable else NULL,
       render_html = render_html,
-      samples = krona_records
+      samples = json_array(krona_records)
     )
     jsonlite::write_json(
       krona_provenance,
