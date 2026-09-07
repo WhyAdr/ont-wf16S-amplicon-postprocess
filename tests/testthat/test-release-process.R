@@ -181,3 +181,68 @@ test_that("fail-fast runs record later requested modules as not_run", {
   expect_match(result$stderr, "E_KREPORT_PREFLIGHT")
   expect_false(file.exists(file.path(output, "run_manifest.json")))
 })
+
+test_that("module failure rollback removes partial writes before publishing a failed manifest", {
+  root <- tempfile("module_failure_rollback_")
+  dir.create(root)
+  config <- write_process_config(root)
+  output <- file.path(root, "injected failure output")
+  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "qc")
+  result <- run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "qc,alpha"), tempdir()
+  )
+  expect_gt(result$status, 0L)
+  manifest_path <- file.path(output, "run_manifest.json")
+  expect_true(file.exists(manifest_path), info = paste(result$stderr, result$stdout))
+  manifest <- jsonlite::fromJSON(manifest_path, simplifyVector = FALSE)
+  expect_identical(manifest$run_status, "failed")
+  expect_identical(manifest$modules$qc$status, "failed")
+  expect_length(manifest$modules$qc$outputs, 0L)
+  expect_identical(manifest$modules$alpha$status, "not_run")
+  physical <- list.files(output, recursive = TRUE, all.files = TRUE, full.names = FALSE)
+  physical <- physical[!dir.exists(file.path(output, physical))]
+  expect_setequal(physical, c("resolved_config.yml", "session_info.txt", "run_manifest.json"))
+})
+
+test_that("keep-going continues after an injected module write and preserves only declared outputs", {
+  root <- tempfile("module_failure_keep_going_")
+  dir.create(root)
+  config <- write_process_config(root)
+  output <- file.path(root, "injected keep-going output")
+  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "qc")
+  result <- run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "qc,alpha", "--keep-going"),
+    tempdir()
+  )
+  expect_gt(result$status, 0L)
+  manifest <- jsonlite::fromJSON(file.path(output, "run_manifest.json"), simplifyVector = FALSE)
+  expect_identical(manifest$run_status, "failed")
+  expect_identical(manifest$modules$qc$status, "failed")
+  expect_identical(manifest$modules$alpha$status, "completed")
+  owned <- unlist(manifest$owned_outputs, use.names = FALSE)
+  physical <- list.files(output, recursive = TRUE, all.files = TRUE, full.names = FALSE)
+  physical <- physical[!dir.exists(file.path(output, physical))]
+  expect_setequal(physical, owned)
+})
+
+test_that("failed overwrite preserves the previously completed output tree", {
+  root <- tempfile("overwrite_rollback_")
+  dir.create(root)
+  config <- write_process_config(root)
+  output <- file.path(root, "overwrite output")
+  first <- run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "kreport"), tempdir()
+  )
+  expect_equal(first$status, 0L, info = paste(first$stderr, first$stdout))
+  before <- readBin(file.path(output, "run_manifest.json"), "raw",
+                    n = file.info(file.path(output, "run_manifest.json"))$size)
+  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "kreport")
+  second <- run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "kreport", "--overwrite"),
+    tempdir()
+  )
+  expect_gt(second$status, 0L)
+  after <- readBin(file.path(output, "run_manifest.json"), "raw",
+                   n = file.info(file.path(output, "run_manifest.json"))$size)
+  expect_identical(after, before)
+})

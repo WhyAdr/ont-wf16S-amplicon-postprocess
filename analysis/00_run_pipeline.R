@@ -20,36 +20,40 @@ read_pipeline_version <- function(path) {
   sub("\\n$", "", text)
 }
 
-script_dir <- get_script_dir()
-repo_root <- normalizePath(dirname(script_dir), winslash = "/")
-options(wf16s.pipeline_root = repo_root)
-pipeline_version <- read_pipeline_version(file.path(repo_root, "VERSION"))
+main <- function() {
+  script_dir <- get_script_dir()
+  repo_root <- normalizePath(dirname(script_dir), winslash = "/")
+  options(wf16s.pipeline_root = repo_root)
+  pipeline_version <- read_pipeline_version(file.path(repo_root, "VERSION"))
 
-source(file.path(script_dir, "utils", "dependencies.R"))
-check_dependencies()
-for (file in c("cli.R", "config.R", "io.R", "metrics.R", "plotting.R", "manifest.R",
-               "kreport.R", "atomic_io.R", "module_result.R", "preflight.R")) {
-  source(file.path(script_dir, "utils", file))
-}
-for (file in sprintf("%02d_%s.R", 1:8, c("qc_diagnostics", "alpha_diversity",
-    "beta_diversity", "taxa_composition", "ordination", "shared_taxa",
-    "kreport_pavian", "faprotax"))) source(file.path(script_dir, file))
-
-fatal <- function(label, error) {
-  if (exists("taxonomy_cache_committed", inherits = TRUE) &&
-      exists("restore_taxonomy_cache", inherits = TRUE) &&
-      !isTRUE(taxonomy_cache_committed)) {
-    tryCatch({
-      restore_taxonomy_cache()
-      taxonomy_cache_committed <<- TRUE
-    }, error = function(restore_error) {
-      cat(sprintf("[FATAL] Could not restore taxonomy source cache: %s\n",
-                  conditionMessage(restore_error)), file = stderr())
-    })
+  fatal <- function(label, error) {
+    stop(sprintf("[FATAL] %s: %s", label, conditionMessage(error)), call. = FALSE)
   }
-  cat(sprintf("[FATAL] %s: %s\n", label, conditionMessage(error)), file = stderr())
-  quit(status = 1L)
-}
+
+  if (!requireNamespace("renv", quietly = TRUE)) {
+    fatal("Environment activation", simpleError("E_RENV_ACTIVATION: package 'renv' is required."))
+  }
+  tryCatch(renv::activate(project = repo_root),
+           error = function(e) fatal("Environment activation", e))
+  project_library <- tryCatch(
+    normalizePath(renv::paths$library(project = repo_root), winslash = "/", mustWork = FALSE),
+    error = function(e) NA_character_
+  )
+  if (is.na(project_library) || !dir.exists(project_library)) {
+    fatal("Environment activation", simpleError(
+      sprintf("E_RENV_ACTIVATION: project library is unavailable: '%s'", project_library)))
+  }
+  .libPaths(unique(c(project_library, .libPaths())))
+
+  source(file.path(script_dir, "utils", "dependencies.R"))
+  check_dependencies()
+  for (file in c("cli.R", "config.R", "io.R", "metrics.R", "plotting.R", "manifest.R",
+                 "kreport.R", "atomic_io.R", "module_result.R", "preflight.R")) {
+    source(file.path(script_dir, "utils", file))
+  }
+  for (file in sprintf("%02d_%s.R", 1:8, c("qc_diagnostics", "alpha_diversity",
+      "beta_diversity", "taxa_composition", "ordination", "shared_taxa",
+      "kreport_pavian", "faprotax"))) source(file.path(script_dir, file))
 
 cli_opts <- parse_cli_args()
 cfg <- tryCatch(load_config(cli_opts$config, cli_opts = cli_opts),
@@ -77,9 +81,10 @@ if (isTRUE(source_info$git_dirty) && !isTRUE(cfg$cli$allow_dirty)) {
     "E_SOURCE_DIRTY: maintained tracked source files differ from HEAD; use --allow-dirty for development only"))
 }
 packages <- unique(c(RUNTIME_PACKAGES, get_module_packages(requested_modules)))
-lock_info <- read_lock_status(repo_root, packages)
-if (!identical(lock_info$lock_status, "synchronized") && !isTRUE(cfg$cli$allow_unlocked)) {
-  discrepancies <- c(unlist(lock_info$r_discrepancies), unlist(lock_info$package_discrepancies))
+  lock_info <- read_lock_status(repo_root, packages)
+  if (!identical(lock_info$lock_status, "synchronized") && !isTRUE(cfg$cli$allow_unlocked)) {
+    discrepancies <- c(unlist(lock_info$r_discrepancies), unlist(lock_info$package_discrepancies),
+                       unlist(lock_info$library_discrepancies))
   fatal("Preflight error", simpleError(sprintf("E_LOCK_MISMATCH: %s",
     paste(discrepancies, collapse = "; "))))
 }
@@ -89,9 +94,12 @@ if (!identical(lock_info$lock_status, "synchronized")) {
 }
 check_module_dependencies(requested_modules)
 
-initial_inventory <- tryCatch(inventory_inputs(cfg), error = function(e) fatal("Preflight error", e))
-context <- tryCatch(build_context(cfg), error = function(e) fatal("Input validation error", e))
-full_inventory <- tryCatch(inventory_inputs(cfg, context$bamstats),
+  initial_inventory <- tryCatch(inventory_inputs(cfg), error = function(e) fatal("Preflight error", e))
+  context <- tryCatch(build_context(cfg), error = function(e) fatal("Input validation error", e))
+  tryCatch(validate_output_root(cfg, repo_root,
+    extra_paths = unlist(context$bamstats, use.names = FALSE)),
+    error = function(e) fatal("Preflight error", e))
+  full_inventory <- tryCatch(inventory_inputs(cfg, context$bamstats),
                            error = function(e) fatal("Preflight error", e))
 tryCatch(assert_inputs_unchanged(initial_inventory), error = function(e) fatal("Preflight error", e))
 context$input_inventory <- full_inventory
@@ -108,7 +116,7 @@ if (isTRUE(cfg$cli$validate_only)) {
   )
   cat(jsonlite::toJSON(summary, pretty = TRUE, auto_unbox = TRUE, null = "null"), "\n")
   cat("Validation check PASSED. Zero filesystem mutations performed.\n")
-  quit(status = 0L)
+  return(invisible(0L))
 }
 
 final_root <- normalizePath(cfg$output$base_dir, winslash = "/", mustWork = FALSE)
@@ -122,16 +130,27 @@ taxonomy_cache_original <- if (identical(cfg$taxonomy$network_mode, "refresh")) 
   NULL
 }
 taxonomy_cache_committed <- !identical(cfg$taxonomy$network_mode, "refresh")
-restore_taxonomy_cache <- function() {
+  restore_taxonomy_cache <- function() {
   if (!identical(cfg$taxonomy$network_mode, "refresh") || is.null(taxonomy_cache_original)) return(invisible(TRUE))
   atomic_replace(taxonomy_cache_path, function(temp) writeBin(taxonomy_cache_original, temp))
-  invisible(TRUE)
-}
+    invisible(TRUE)
+  }
+  taxonomy_cache_expected_hash <- function() {
+    if (!identical(cfg$taxonomy$network_mode, "refresh")) return(NULL)
+    provenance_path <- file.path(stage, "07_Kreport", "taxonomy_provenance.json")
+    if (!file.exists(provenance_path)) return(full_inventory$taxonomy_cache$sha256)
+    provenance <- tryCatch(jsonlite::fromJSON(provenance_path, simplifyVector = FALSE),
+                           error = function(e) list())
+    provenance$source_cache_sha256_committed %||% full_inventory$taxonomy_cache$sha256
+  }
 
 stage <- prepare_run_staging(final_root)
 stage_active <- TRUE
 on.exit({
   if (!taxonomy_cache_committed) restore_taxonomy_cache()
+  if (exists("module_snapshots", inherits = FALSE) && length(module_snapshots)) {
+    unlink(module_snapshots, recursive = TRUE, force = TRUE)
+  }
   if (stage_active && dir.exists(stage)) unlink(stage, recursive = TRUE, force = TRUE)
 }, add = TRUE)
 tryCatch(preserve_unowned_outputs(final_root, stage, prior_manifest),
@@ -158,11 +177,15 @@ cat(sprintf("ONT wf-16s post-processing %s | %s | %d sample(s)\n",
 start_time <- Sys.time()
 module_results <- stats::setNames(lapply(names(module_registry), function(name) {
   new_not_run_module_record(sprintf("Module '%s' was not requested.", name))
-}), names(module_registry))
-any_failed <- FALSE
+  }), names(module_registry))
+  any_failed <- FALSE
+  module_snapshots <- character(0)
 
-for (module_name in requested_modules) {
-  cat(sprintf(">>> Executing module [%s]...\n", module_name))
+  for (module_name in requested_modules) {
+    module_snapshot <- tryCatch(snapshot_staging_directory(stage),
+                                error = function(e) fatal("Module staging snapshot failed", e))
+    module_snapshots <- c(module_snapshots, module_snapshot)
+    cat(sprintf(">>> Executing module [%s]...\n", module_name))
   started <- Sys.time()
   warnings <- character(0)
   result <- tryCatch(withCallingHandlers(module_registry[[module_name]](context), warning = function(w) {
@@ -172,21 +195,37 @@ for (module_name in requested_modules) {
     list(status = "failed", error = paste("Module result contract violation:", conditionMessage(e)),
          outputs = character(0))
   })
+  injected_failure <- Sys.getenv("WF16S_INJECT_MODULE_FAILURE", unset = "")
+  if (identical(injected_failure, module_name)) {
+    # Test-only failure injection exercises rollback after a module has already
+    # written files; it is intentionally not exposed as a public CLI option.
+    result <- list(status = "failed", error = sprintf(
+      "Injected failure after module '%s' wrote its outputs.", module_name),
+      outputs = character(0))
+  }
   ended <- Sys.time()
   result$start_time <- utc_timestamp(started)
   result$end_time <- utc_timestamp(ended)
   result$duration_seconds <- as.numeric(difftime(ended, started, units = "secs"))
   result$warnings <- unique(warnings)
   module_results[[module_name]] <- result
-  tryCatch(assert_inputs_unchanged(full_inventory,
-    allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh")),
-    error = function(e) {
-      result$status <<- "failed"; result$error <<- conditionMessage(e); result$outputs <<- character(0)
-      module_results[[module_name]] <<- result
-    })
-  if (identical(result$status, "failed")) {
-    any_failed <- TRUE
-    cat(sprintf("ERROR in module [%s]: %s\n", module_name, result$error), file = stderr())
+    input_check <- tryCatch({
+      assert_inputs_unchanged(full_inventory,
+        allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh"),
+        taxonomy_cache_expected_sha256 = taxonomy_cache_expected_hash())
+      NULL
+    }, error = function(e) e)
+    if (!is.null(input_check)) {
+      result$status <- "failed"
+      result$error <- conditionMessage(input_check)
+      result$outputs <- character(0)
+      module_results[[module_name]] <- result
+    }
+    if (identical(result$status, "failed")) {
+      tryCatch(restore_staging_directory(stage, module_snapshot),
+               error = function(e) fatal("Module staging rollback failed", e))
+      any_failed <- TRUE
+      cat(sprintf("ERROR in module [%s]: %s\n", module_name, result$error), file = stderr())
     if (!isTRUE(cfg$cli$keep_going)) {
       later <- requested_modules[match(module_name, requested_modules):length(requested_modules)]
       later <- setdiff(later, module_name)
@@ -195,6 +234,8 @@ for (module_name in requested_modules) {
       break
     }
   }
+  unlink(module_snapshot, recursive = TRUE, force = TRUE)
+  module_snapshots <- setdiff(module_snapshots, module_snapshot)
 }
 
 if (any_failed && !taxonomy_cache_committed) {
@@ -205,7 +246,13 @@ if (any_failed && !taxonomy_cache_committed) {
 }
 
 end_time <- Sys.time()
-deps <- get_dependency_versions(packages)
+lock_locations <- lock_info$package_locations %||% list()
+if (length(lock_locations)) {
+  deps <- stats::setNames(vapply(lock_locations, function(record) as.character(record$version), character(1)),
+                          vapply(lock_locations, function(record) as.character(record$package), character(1)))
+} else {
+  deps <- get_dependency_versions(packages)
+}
 session_lines <- c(
   "=== System & Interpreter ===", sprintf("R version: %s", R.version.string),
   sprintf("Platform:  %s", R.version$platform),
@@ -262,25 +309,35 @@ manifest <- list(
     resolution_source_counts = taxonomy_provenance$resolution_source_counts %||% NULL),
   interpreter = list(r = R.version.string, platform = R.version$platform, python = python_version),
   environment = lock_info,
-  package_versions = json_array(lapply(names(deps), function(package) list(package = package, version = deps[[package]])))
+  package_versions = json_array(lapply(names(deps), function(package) list(
+    package = package, version = deps[[package]]
+  )))
 )
 tryCatch(write_manifest_v2(manifest, cfg$output$manifest_file, physical_root = stage),
          error = function(e) fatal("Manifest publication failed", e))
 tryCatch(assert_inputs_unchanged(full_inventory,
-  allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh")),
+  allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh") && !any_failed,
+  taxonomy_cache_expected_sha256 = taxonomy_cache_expected_hash()),
   error = function(e) fatal("Pre-publication input check failed", e))
 if (any_failed && !is.null(prior_manifest)) {
   unlink(stage, recursive = TRUE, force = TRUE)
   stage_active <- FALSE
-  cat("[FATAL] Transaction aborted; the previous completed output was preserved.\n", file = stderr())
-  quit(status = 1L)
+  stop("[FATAL] Transaction aborted; the previous completed output was preserved.", call. = FALSE)
 }
 tryCatch(publish_staged_run(stage, final_root),
          error = function(e) fatal("Output publication failed", e))
 stage_active <- FALSE
 if (!any_failed) taxonomy_cache_committed <- TRUE
 if (any_failed) {
-  cat(sprintf("[FATAL] Failed run manifest published: %s\n", file.path(final_root, "run_manifest.json")), file = stderr())
-  quit(status = 1L)
+  stop(sprintf("[FATAL] Failed run manifest published: %s", file.path(final_root, "run_manifest.json")),
+       call. = FALSE)
 }
 cat(sprintf("Pipeline completed transactionally. Manifest: %s\n", file.path(final_root, "run_manifest.json")))
+invisible(0L)
+}
+
+status <- tryCatch(main(), error = function(error) {
+  cat(sprintf("%s\n", conditionMessage(error)), file = stderr())
+  1L
+})
+quit(status = status, save = "no")
