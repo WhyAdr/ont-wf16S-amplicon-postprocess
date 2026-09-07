@@ -28,6 +28,13 @@ get_cli_parser <- function() {
       help = "Comma-separated list of modules to run (e.g. qc,alpha,composition,kreport,faprotax)"
     ),
     optparse::make_option(
+      c("--krona"),
+      action = "store_true",
+      default = FALSE,
+      dest = "krona",
+      help = "Enable Krona-compatible TSV output; optional HTML rendering requires KronaTools ktImportText"
+    ),
+    optparse::make_option(
       c("--validate-only"),
       action = "store_true",
       default = FALSE,

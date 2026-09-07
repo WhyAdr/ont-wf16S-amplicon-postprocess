@@ -92,6 +92,24 @@ test_that("invalid modules, assignments, and metadata return non-zero", {
   expect_gt(invalid_metadata$status, 0L)
   expect_match(invalid_metadata$stderr, "Metadata SampleID mismatch")
 })
+
+test_that("Krona opt-in requires the kreport module before output mutation", {
+  root <- tempfile("krona_dependency_")
+  dir.create(root)
+  config <- write_process_config(root)
+  output <- file.path(root, "krona output")
+
+  result <- run_pipeline_process(
+    c("--config", config, "--output-dir", output,
+      "--modules", "composition", "--krona", "--validate-only"),
+    tempdir()
+  )
+
+  expect_gt(result$status, 0L)
+  expect_match(result$stderr, "Krona export requires the 'kreport' module")
+  expect_false(file.exists(output))
+})
+
 test_that("Kraken2 is rejected from params before assignment schema parsing", {
   root <- tempfile("kraken_contract_")
   dir.create(root)

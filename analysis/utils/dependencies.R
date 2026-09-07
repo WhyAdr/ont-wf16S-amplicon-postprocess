@@ -85,3 +85,42 @@ find_python <- function() {
   }
   stop("Neither 'python3' nor 'python' was found on PATH.", call. = FALSE)
 }
+
+find_krona_executable <- function(executable = "ktImportText") {
+  if (is.null(executable) || length(executable) != 1L ||
+      is.na(executable) || !nzchar(trimws(executable))) {
+    return(NA_character_)
+  }
+
+  executable <- trimws(executable)
+  if (file.exists(executable) || grepl("[/\\\\]", executable)) {
+    if (!file.exists(executable) || dir.exists(executable)) return(NA_character_)
+    return(normalizePath(executable, winslash = "/", mustWork = TRUE))
+  }
+
+  found <- Sys.which(executable)
+  if (!nzchar(found)) {
+    NA_character_
+  } else {
+    normalizePath(found, winslash = "/", mustWork = TRUE)
+  }
+}
+
+get_krona_version <- function(executable) {
+  if (is.null(executable) || length(executable) != 1L || is.na(executable) ||
+      !nzchar(executable)) {
+    return(NULL)
+  }
+
+  probe <- tryCatch(
+    processx::run(executable, args = character(0), error_on_status = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(probe)) return(NULL)
+
+  output <- paste(c(probe$stdout, probe$stderr), collapse = "\n")
+  match <- regexec("KronaTools[[:space:]]+([0-9]+([.][0-9]+){1,3})",
+                   output, perl = TRUE)
+  captures <- regmatches(output, match)[[1]]
+  if (length(captures) >= 2L) captures[2] else NULL
+}

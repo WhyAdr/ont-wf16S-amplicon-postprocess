@@ -10,7 +10,7 @@ manifest <- jsonlite::fromJSON(
 
 stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(identical(manifest$mode, "single"))
-stopifnot(identical(manifest$pipeline_version, "0.2.0"))
+stopifnot(identical(manifest$pipeline_version, "0.3.0"))
 stopifnot(grepl("^[0-9a-f]{40}$", manifest$git_commit))
 stopifnot(grepl("^R version 4[.]", manifest$interpreter$r))
 stopifnot(grepl("Python 3[.]12", manifest$interpreter$python))
@@ -112,12 +112,113 @@ composition <- read.delim(
 stopifnot(!anyNA(composition))
 stopifnot(composition$ClassifiedReads + composition$UnclassifiedReads == composition$TotalReads)
 
+if (isTRUE(manifest$cli$krona)) {
+  krona_dir <- file.path(root, "07_Kreport", "krona")
+  krona_provenance_file <- file.path(krona_dir, "krona_provenance.json")
+  if (!file.exists(krona_provenance_file)) {
+    stop("Krona was enabled but '07_Kreport/krona/krona_provenance.json' is missing.")
+  }
+  krona_provenance <- jsonlite::fromJSON(krona_provenance_file, simplifyVector = FALSE)
+  krona_samples <- unlist(manifest$samples, use.names = FALSE)
+  sanitize_release_filename <- function(sample_id) {
+    gsub("[^A-Za-z0-9_.-]", "_", sample_id)
+  }
+  expected_tsv <- sort(paste0(vapply(krona_samples, sanitize_release_filename, character(1)), ".krona.tsv"))
+  actual_tsv <- sort(list.files(krona_dir, pattern = "[.]krona[.]tsv$", full.names = FALSE))
+  if (!identical(actual_tsv, expected_tsv)) {
+    stop(sprintf(
+      "Krona TSV artifact mismatch; expected [%s], found [%s].",
+      paste(expected_tsv, collapse = ", "), paste(actual_tsv, collapse = ", ")
+    ))
+  }
+
+  html_status <- if (is.null(krona_provenance$html_status)) {
+    ""
+  } else {
+    as.character(krona_provenance$html_status)
+  }
+  expected_html <- if (identical(html_status, "rendered")) {
+    sort(paste0(vapply(krona_samples, sanitize_release_filename, character(1)), ".krona.html"))
+  } else {
+    character(0)
+  }
+  actual_html <- sort(list.files(krona_dir, pattern = "[.]krona[.]html$", full.names = FALSE))
+  if (!identical(actual_html, expected_html)) {
+    stop(sprintf(
+      "Krona HTML artifact mismatch for status '%s'; expected [%s], found [%s].",
+      html_status, paste(expected_html, collapse = ", "), paste(actual_html, collapse = ", ")
+    ))
+  }
+  stopifnot(html_status %in% c("not_requested", "renderer_missing", "rendered"))
+  stopifnot(length(krona_provenance$samples) == length(krona_samples))
+
+  krona_records <- krona_provenance$samples
+  krona_record_ids <- vapply(krona_records, function(record) as.character(record$sample_id), character(1))
+  stopifnot(setequal(krona_record_ids, krona_samples))
+
+  read_krona_totals <- function(path) {
+    lines <- readLines(path, warn = FALSE)
+    stopifnot(length(lines) > 0L, all(nzchar(lines)))
+    fields <- strsplit(lines, "\t", fixed = TRUE)
+    stopifnot(all(vapply(fields, length, integer(1)) >= 2L))
+    magnitudes <- suppressWarnings(as.numeric(vapply(fields, function(field) field[[1]], character(1))))
+    stopifnot(all(is.finite(magnitudes)), all(magnitudes >= 0))
+    stopifnot(all(abs(magnitudes - round(magnitudes)) <= sqrt(.Machine$double.eps)))
+    is_unclassified <- vapply(fields, function(field) identical(field[[2]], "Unclassified"), logical(1))
+    stopifnot(sum(is_unclassified) <= 1L)
+    list(
+      total = sum(magnitudes),
+      classified = sum(magnitudes[!is_unclassified]),
+      unclassified = sum(magnitudes[is_unclassified])
+    )
+  }
+
+  for (record in krona_records) {
+    sample_id <- as.character(record$sample_id)
+    accounting_row <- accounting[accounting$SampleID == sample_id, , drop = FALSE]
+    stopifnot(nrow(accounting_row) == 1L)
+    tsv_path <- as.character(record$tsv_path)
+    stopifnot(file.exists(tsv_path))
+    stopifnot(identical(basename(tsv_path), paste0(sanitize_release_filename(sample_id), ".krona.tsv")))
+    totals <- read_krona_totals(tsv_path)
+    stopifnot(totals$total == accounting_row$TotalReads)
+    stopifnot(totals$classified == accounting_row$ClassifiedReads)
+    stopifnot(totals$unclassified == accounting_row$UnclassifiedReads)
+    stopifnot(as.numeric(record$total_reads) == accounting_row$TotalReads)
+    stopifnot(as.numeric(record$classified_reads) == accounting_row$ClassifiedReads)
+    stopifnot(as.numeric(record$unclassified_reads) == accounting_row$UnclassifiedReads)
+    stopifnot(as.numeric(record$emitted_magnitude_sum) == totals$total)
+
+    if (identical(html_status, "rendered")) {
+      html_path <- as.character(record$html_path)
+      stopifnot(file.exists(html_path), file.info(html_path)$size > 0)
+      stopifnot(identical(basename(html_path), paste0(sanitize_release_filename(sample_id), ".krona.html")))
+    } else {
+      stopifnot(is.null(record$html_path))
+    }
+  }
+}
+
 # 4. Dataset-specific verification
 if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   stopifnot(identical(manifest$upstream_contract$wf_agent, "epi2melabs/5.2.5"))
-  stopifnot(length(manifest$warnings) == 0L)
+  unexpected_warnings <- unlist(manifest$warnings, use.names = FALSE)
+  if (isTRUE(manifest$cli$krona)) {
+    unexpected_warnings <- unexpected_warnings[
+      !grepl("^KronaTools executable .* was not found; writing Krona TSV files without HTML rendering[.]$",
+             unexpected_warnings)
+    ]
+  }
+  stopifnot(length(unexpected_warnings) == 0L)
   for (mod in names(manifest$modules)) {
-    stopifnot(length(manifest$modules[[mod]]$warnings) == 0L)
+    module_warnings <- unlist(manifest$modules[[mod]]$warnings, use.names = FALSE)
+    if (isTRUE(manifest$cli$krona) && identical(mod, "kreport")) {
+      module_warnings <- module_warnings[
+        !grepl("^KronaTools executable .* was not found; writing Krona TSV files without HTML rendering[.]$",
+               module_warnings)
+      ]
+    }
+    stopifnot(length(module_warnings) == 0L)
   }
   stopifnot(identical(as.integer(manifest$taxonomy$unresolved_count), 46L))
   stopifnot(identical(as.integer(manifest$taxonomy$conflicts_count), 26L))

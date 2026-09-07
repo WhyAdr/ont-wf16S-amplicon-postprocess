@@ -1,5 +1,5 @@
 # =============================================================================
-# Module 07: Kraken Report (.kreport) Generation for Pavian Sankey
+# Module 07: Kraken Report (.kreport) and optional Krona export
 # =============================================================================
 
 suppressMessages({
@@ -83,6 +83,37 @@ run_kreport <- function(context) {
   }
   resolution_sources <- setNames(source_df$ResolutionSource, source_df$TaxonPath)
 
+  krona_cfg <- cfg$krona %||% list(
+    enabled = FALSE,
+    render_html = FALSE,
+    executable = "ktImportText"
+  )
+  krona_enabled <- isTRUE(krona_cfg$enabled)
+  render_html <- krona_enabled && isTRUE(krona_cfg$render_html)
+  krona_dir <- file.path(kreport_dir, "krona")
+  krona_provenance_file <- file.path(krona_dir, "krona_provenance.json")
+  krona_executable <- NA_character_
+  krona_requested_executable <- krona_cfg$executable %||% "ktImportText"
+  html_status <- if (render_html) "renderer_missing" else "not_requested"
+  krona_records <- list()
+
+  if (krona_enabled) {
+    dir.create(krona_dir, recursive = TRUE, showWarnings = FALSE)
+    if (!dir.exists(krona_dir)) {
+      stop(sprintf("Could not create Krona output directory '%s'.", krona_dir), call. = FALSE)
+    }
+
+    if (render_html) {
+      krona_executable <- find_krona_executable(krona_requested_executable)
+      if (is.na(krona_executable)) {
+        warning(sprintf(
+          "KronaTools executable '%s' was not found; writing Krona TSV files without HTML rendering.",
+          krona_requested_executable
+        ), call. = FALSE)
+      }
+    }
+  }
+
   # Generate .kreport for each sample
   samples <- context$samples
   unclass_idx <- context$unclass_index
@@ -110,6 +141,32 @@ run_kreport <- function(context) {
     writeLines(kreport_lines, out_file)
     all_outputs <- c(all_outputs, out_file)
 
+    if (krona_enabled) {
+      sample_filename <- sanitize_filename(s)
+      krona_tsv <- file.path(krona_dir, sprintf("%s.krona.tsv", sample_filename))
+      write_krona_input(krona_tsv, nodes_sorted, total_reads, uncl_reads)
+      all_outputs <- c(all_outputs, krona_tsv)
+
+      emitted_magnitudes <- nodes_sorted$reads_taxon[nodes_sorted$reads_taxon > 0]
+      emitted_sum <- uncl_reads + sum(emitted_magnitudes)
+      sample_record <- list(
+        sample_id = s,
+        total_reads = as.numeric(total_reads),
+        classified_reads = as.numeric(total_reads - uncl_reads),
+        unclassified_reads = as.numeric(uncl_reads),
+        emitted_magnitude_sum = as.numeric(emitted_sum),
+        tsv_path = krona_tsv
+      )
+
+      if (render_html && !is.na(krona_executable)) {
+        krona_html <- file.path(krona_dir, sprintf("%s.krona.html", sample_filename))
+        render_krona_html(krona_executable, krona_html, s, krona_tsv)
+        all_outputs <- c(all_outputs, krona_html)
+        sample_record$html_path <- krona_html
+      }
+      krona_records[[length(krona_records) + 1L]] <- sample_record
+    }
+
     # Collect resolution info
     for (i in seq_len(nrow(nodes_sorted))) {
       p <- nodes_sorted$path[i]
@@ -136,6 +193,41 @@ run_kreport <- function(context) {
     res_df <- do.call(rbind, resolution_rows)
     write.table(res_df, res_summary_file, sep = "\t", row.names = FALSE, quote = FALSE)
     all_outputs <- c(all_outputs, res_summary_file)
+  }
+
+  if (krona_enabled) {
+    html_rendered <- render_html && !is.na(krona_executable)
+    if (html_rendered) {
+      html_status <- "rendered"
+    }
+    krona_version <- if (html_rendered) get_krona_version(krona_executable) else NULL
+    krona_provenance <- list(
+      format = "KronaTools ktImportText tab-delimited lineage format",
+      renderer = if (html_rendered) "ktImportText" else NULL,
+      krona_tools_version = if (html_rendered) krona_version else NULL,
+      html_status = html_status,
+      standalone_html = if (html_rendered) TRUE else NULL,
+      count_model = "direct abundance-table taxon counts plus canonical unclassified count",
+      denominator = "TotalReads",
+      classified_definition = "sum of direct positive-count classified taxonomy rows",
+      requested_executable = krona_requested_executable,
+      resolved_executable = if (html_rendered) krona_executable else NULL,
+      render_html = render_html,
+      samples = krona_records
+    )
+    jsonlite::write_json(
+      krona_provenance,
+      krona_provenance_file,
+      pretty = TRUE,
+      auto_unbox = TRUE,
+      null = "null"
+    )
+    if (!file.exists(krona_provenance_file) ||
+        !isTRUE(file.info(krona_provenance_file)$size > 0)) {
+      stop(sprintf("Krona provenance was not written: '%s'.", krona_provenance_file),
+           call. = FALSE)
+    }
+    all_outputs <- c(all_outputs, krona_provenance_file)
   }
 
   list(

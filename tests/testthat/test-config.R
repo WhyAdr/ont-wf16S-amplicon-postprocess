@@ -37,7 +37,20 @@ test_that("load_config loads default config.yml and resolves relative paths to c
   expect_equal(cfg$output$dirs$kreport, file.path(cfg$output$base_dir, "07_Kreport"))
   expect_equal(cfg$output$dirs$faprotax, file.path(cfg$output$base_dir, "08_FAPROTAX"))
   expect_equal(cfg$faprotax$top_n_functions, 20L)
+  expect_false(cfg$krona$enabled)
+  expect_true(is.logical(cfg$krona$render_html))
+  expect_true(cfg$krona$render_html)
+  expect_equal(cfg$krona$executable, "ktImportText")
+  expect_false(cfg$cli$krona)
   expect_false("faprotax" %in% cfg$cli$modules)
+})
+
+test_that("Krona CLI opt-in is recorded in config and manifest settings", {
+  config_path <- file.path("..", "..", "config.yml")
+  cfg <- load_config(config_path, cli_opts = list(krona = TRUE))
+
+  expect_true(cfg$krona$enabled)
+  expect_true(cfg$cli$krona)
 })
 
 test_that("CLI --output-dir overrides base_dir and all derived paths", {
@@ -64,6 +77,24 @@ test_that("load_config errors on missing config file", {
 test_that("unknown config keys fail closed", {
   bad <- get_default_config()
   expect_error(merge_config(bad, list(alhpa = list())), "Unknown configuration key.*alhpa")
+  expect_error(
+    merge_config(bad, list(krona = list(renderer = "unexpected"))),
+    "Unknown configuration key.*krona.renderer"
+  )
+})
+
+test_that("Krona configuration values fail closed", {
+  bad_enabled <- get_default_config()
+  bad_enabled$krona$enabled <- "yes"
+  expect_error(validate_config(bad_enabled), "krona.enabled")
+
+  bad_render <- get_default_config()
+  bad_render$krona$render_html <- NA
+  expect_error(validate_config(bad_render), "krona.render_html")
+
+  bad_executable <- get_default_config()
+  bad_executable$krona$executable <- "  "
+  expect_error(validate_config(bad_executable), "krona.executable")
 })
 
 test_that("taxonomy refresh requires explicit CLI opt-in", {

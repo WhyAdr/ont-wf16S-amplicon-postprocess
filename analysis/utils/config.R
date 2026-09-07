@@ -40,6 +40,18 @@ validate_config <- function(cfg) {
   assert_nonempty_string(cfg$input$params_json, "input.params_json")
   assert_nonempty_string(cfg$input$tax_column, "input.tax_column")
   assert_nonempty_string(cfg$output$base_dir, "output.base_dir")
+  if (!is.list(cfg$krona)) {
+    stop("'krona' must be a configuration mapping.", call. = FALSE)
+  }
+  if (!is.logical(cfg$krona$enabled) || length(cfg$krona$enabled) != 1L ||
+      is.na(cfg$krona$enabled)) {
+    stop("'krona.enabled' must be true or false.", call. = FALSE)
+  }
+  if (!is.logical(cfg$krona$render_html) || length(cfg$krona$render_html) != 1L ||
+      is.na(cfg$krona$render_html)) {
+    stop("'krona.render_html' must be true or false.", call. = FALSE)
+  }
+  assert_nonempty_string(cfg$krona$executable, "krona.executable")
   if (!is.null(cfg$input$wf16s_output_root)) {
     assert_nonempty_string(cfg$input$wf16s_output_root, "input.wf16s_output_root")
   }
@@ -188,6 +200,11 @@ get_default_config <- function() {
     faprotax = list(
       top_n_functions = 20L
     ),
+    krona = list(
+      enabled = FALSE,
+      render_html = TRUE,
+      executable = "ktImportText"
+    ),
     beta = list(
       distances = c("bray", "jaccard"),
       permutations = 999L,
@@ -244,6 +261,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   cfg <- merge_config(default_cfg, raw_yaml)
   cli_refresh <- isTRUE(cli_opts$refresh_taxonomy) ||
     isTRUE(cli_opts[["refresh-taxonomy"]])
+  cli_krona <- isTRUE(cli_opts$krona) || isTRUE(cli_opts[["krona"]])
 
   if (identical(cfg$taxonomy$network_mode, "refresh") && !cli_refresh) {
     stop(paste(
@@ -265,6 +283,9 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   if (cli_refresh) {
     cfg$taxonomy$network_mode <- "refresh"
   }
+  if (cli_krona) {
+    cfg$krona$enabled <- TRUE
+  }
 
   validate_config(cfg)
 
@@ -273,6 +294,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     keep_going = isTRUE(cli_opts$keep_going) || isTRUE(cli_opts[["keep-going"]]),
     overwrite = isTRUE(cli_opts$overwrite),
     refresh_taxonomy = cli_refresh,
+    krona = isTRUE(cfg$krona$enabled),
     modules = if (!is.null(cli_opts$modules) && nzchar(cli_opts$modules)) {
       strsplit(cli_opts$modules, "[, ]+")[[1]]
     } else {

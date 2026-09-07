@@ -52,13 +52,13 @@ read_upstream_params <- function(path) {
   taxonomic_rank <- scalar_string("taxonomic_rank")
   if (!identical(classifier, "minimap2")) {
     stop(sprintf(
-      "Unsupported wf-16s classifier '%s'. v0.2.0 supports minimap2 only; Kraken2/Bracken requires a classifier-specific denominator model.",
+      "Unsupported wf-16s classifier '%s'. v0.3.0 supports minimap2 only; Kraken2/Bracken requires a classifier-specific denominator model.",
       classifier
     ), call. = FALSE)
   }
   if (!database_set %in% SUPPORTED_NCBI_DATABASE_SETS) {
     stop(sprintf(
-      "Unsupported wf-16s database_set '%s'. v0.2.0 supports the bundled NCBI database sets only.",
+      "Unsupported wf-16s database_set '%s'. v0.3.0 supports the bundled NCBI database sets only.",
       database_set
     ), call. = FALSE)
   }

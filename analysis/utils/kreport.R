@@ -108,6 +108,177 @@ validate_kreport_tree <- function(nodes_df, total_reads, uncl_reads) {
   invisible(TRUE)
 }
 
+validate_krona_count <- function(value, name) {
+  valid <- is.numeric(value) && length(value) == 1L && !is.na(value) &&
+    is.finite(value) && value >= 0 &&
+    abs(value - round(value)) <= sqrt(.Machine$double.eps)
+  if (!valid) {
+    stop(sprintf("Krona %s must be a finite, non-negative integer.", name), call. = FALSE)
+  }
+  as.numeric(value)
+}
+
+validate_krona_count_vector <- function(values, name) {
+  if (!is.numeric(values) || any(!is.finite(values)) || any(is.na(values)) ||
+      any(values < 0) || any(abs(values - round(values)) > sqrt(.Machine$double.eps))) {
+    stop(sprintf("Krona %s must contain only finite, non-negative integers.", name),
+         call. = FALSE)
+  }
+  as.numeric(values)
+}
+
+normalize_krona_path <- function(path, index) {
+  if (!is.character(path) || length(path) != 1L || is.na(path) || !nzchar(path)) {
+    stop(sprintf("Krona taxonomy path at row %d is empty or invalid.", index), call. = FALSE)
+  }
+
+  labels <- strsplit(path, ";", fixed = TRUE)[[1]]
+  if (length(labels) == 0L || length(labels) > length(RANKS_8)) {
+    stop(sprintf("Krona taxonomy path at row %d has an invalid rank depth.", index),
+         call. = FALSE)
+  }
+
+  labels <- vapply(labels, function(label) {
+    if (!is.na(label) && grepl("[\t\r\n]", label, perl = TRUE)) {
+      stop(sprintf("Krona taxonomy label at row %d contains a tab or newline.", index),
+           call. = FALSE)
+    }
+    if (is.na(label) || !nzchar(trimws(label))) "Unknown" else label
+  }, character(1))
+
+  paste(labels, collapse = "\t")
+}
+
+format_krona_magnitude <- function(value) {
+  trimws(formatC(value, format = "f", digits = 0))
+}
+
+build_krona_lines <- function(nodes_df, total_reads, uncl_reads) {
+  total_num <- validate_krona_count(total_reads, "total_reads")
+  uncl_num <- validate_krona_count(uncl_reads, "uncl_reads")
+  if (total_num <= 0) {
+    stop("Krona total_reads must be greater than zero.", call. = FALSE)
+  }
+  if (uncl_num > total_num) {
+    stop("Krona unclassified reads cannot exceed total_reads.", call. = FALSE)
+  }
+
+  if (!is.data.frame(nodes_df) || !all(c("path", "reads_taxon") %in% names(nodes_df))) {
+    stop("Krona nodes_df must contain 'path' and 'reads_taxon' columns.", call. = FALSE)
+  }
+
+  direct_counts <- validate_krona_count_vector(nodes_df$reads_taxon, "nodes_df$reads_taxon")
+  classified_num <- total_num - uncl_num
+  direct_sum <- sum(direct_counts)
+  if (!isTRUE(direct_sum == classified_num)) {
+    stop(sprintf(
+      "Krona classified direct counts (%s) do not equal ClassifiedReads (%s).",
+      format_krona_magnitude(direct_sum), format_krona_magnitude(classified_num)
+    ), call. = FALSE)
+  }
+
+  positive_rows <- which(direct_counts > 0)
+  lines <- character(0)
+  if (uncl_num > 0) {
+    lines <- paste(format_krona_magnitude(uncl_num), "Unclassified", sep = "\t")
+  }
+
+  if (length(positive_rows) > 0L) {
+    classified_lines <- vapply(positive_rows, function(row_index) {
+      path <- normalize_krona_path(nodes_df$path[row_index], row_index)
+      paste(format_krona_magnitude(direct_counts[row_index]), path, sep = "\t")
+    }, character(1))
+    lines <- c(lines, classified_lines)
+  }
+
+  emitted_sum <- uncl_num + sum(direct_counts[positive_rows])
+  if (!isTRUE(emitted_sum == total_num)) {
+    stop(sprintf(
+      "Krona emitted magnitude sum (%s) does not equal total_reads (%s).",
+      format_krona_magnitude(emitted_sum), format_krona_magnitude(total_num)
+    ), call. = FALSE)
+  }
+
+  if (length(lines) == 0L) {
+    stop("Krona export produced no data lines.", call. = FALSE)
+  }
+  lines
+}
+
+write_krona_input <- function(output_path, nodes_df, total_reads, uncl_reads) {
+  if (!is.character(output_path) || length(output_path) != 1L ||
+      is.na(output_path) || !nzchar(trimws(output_path))) {
+    stop("Krona output_path must be one non-empty path.", call. = FALSE)
+  }
+
+  parent_dir <- dirname(output_path)
+  dir.create(parent_dir, recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(parent_dir)) {
+    stop(sprintf("Could not create Krona output directory '%s'.", parent_dir), call. = FALSE)
+  }
+
+  lines <- build_krona_lines(nodes_df, total_reads, uncl_reads)
+  writeLines(lines, output_path)
+  if (!file.exists(output_path) || !isTRUE(file.info(output_path)$size > 0)) {
+    stop(sprintf("Krona input was not written or is empty: '%s'.", output_path), call. = FALSE)
+  }
+  invisible(output_path)
+}
+
+render_krona_html <- function(executable, output_path, sample_id, input_path) {
+  valid_executable <- is.character(executable) && length(executable) == 1L &&
+    !is.na(executable) && nzchar(trimws(executable))
+  valid_sample <- is.character(sample_id) && length(sample_id) == 1L &&
+    !is.na(sample_id) && nzchar(sample_id)
+  if (!valid_executable || !valid_sample) {
+    stop("Krona HTML rendering requires a non-empty executable and sample ID.", call. = FALSE)
+  }
+  if (!file.exists(input_path) || !isTRUE(file.info(input_path)$size > 0)) {
+    stop(sprintf("Krona input for sample '%s' is missing or empty.", sample_id), call. = FALSE)
+  }
+
+  parent_dir <- dirname(output_path)
+  dir.create(parent_dir, recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(parent_dir)) {
+    stop(sprintf("Could not create Krona HTML output directory '%s'.", parent_dir), call. = FALSE)
+  }
+  if (file.exists(output_path) && !file.remove(output_path)) {
+    stop(sprintf("Krona HTML output for sample '%s' could not be replaced.", sample_id),
+         call. = FALSE)
+  }
+
+  args <- c("-o", output_path, "-n", sample_id, input_path)
+  result <- tryCatch(
+    processx::run(
+      command = executable,
+      args = args,
+      error_on_status = FALSE
+    ),
+    error = function(e) {
+      stop(sprintf(
+        "Krona HTML rendering failed for sample '%s' using executable '%s': %s",
+        sample_id, executable, e$message
+      ), call. = FALSE)
+    }
+  )
+
+  if (!isTRUE(result$status == 0L)) {
+    status <- if (is.null(result$status)) "unknown" else as.character(result$status)
+    stop(sprintf(
+      "Krona HTML rendering failed for sample '%s' using executable '%s' (exit status %s).",
+      sample_id, executable, status
+    ), call. = FALSE)
+  }
+  if (!file.exists(output_path) || !isTRUE(file.info(output_path)$size > 0)) {
+    stop(sprintf(
+      "Krona HTML renderer reported success but produced no output for sample '%s' using executable '%s'.",
+      sample_id, executable
+    ), call. = FALSE)
+  }
+
+  invisible(output_path)
+}
+
 format_kreport_lines <- function(nodes_sorted, total_reads, uncl_reads, taxid_cache = list()) {
   cl_reads <- total_reads - uncl_reads
 

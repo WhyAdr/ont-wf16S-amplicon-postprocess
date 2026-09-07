@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-09-07
+
+### Added
+
+- Opt-in Krona-compatible taxonomy export through `--krona` or the `krona`
+  configuration block. R always writes portable `.krona.tsv` files from the
+  validated kreport tree; optional `.krona.html` rendering uses KronaTools
+  `ktImportText` when available.
+- Krona provenance with exact read accounting, direct-count semantics, and
+  explicit renderer availability/status.
+
 ## [0.2.0] - 2026-09-07
 
 ### Added

@@ -44,6 +44,88 @@ test_that("kreport tree validates clade arithmetic and total read invariants", {
   )
 })
 
+test_that("Krona lines use direct terminal counts without ancestor clade duplication", {
+  lin1 <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_sp1"
+  lin2 <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_sp2"
+  uncl <- "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown"
+  nodes <- build_kreport_tree(c(uncl, lin1, lin2), c(20, 30, 50))
+
+  lines <- build_krona_lines(nodes, total_reads = 100, uncl_reads = 20)
+  fields <- strsplit(lines, "\t", fixed = TRUE)
+  magnitudes <- as.numeric(vapply(fields, function(field) field[[1]], character(1)))
+
+  expect_length(lines, 3L)
+  expect_equal(fields[[1]], c("20", "Unclassified"))
+  expect_equal(sum(magnitudes), 100)
+  expect_equal(sum(magnitudes[-1]), 80)
+  expect_true(all(vapply(fields[-1], function(field) length(field) == 9L, logical(1))))
+  expect_equal(
+    sort(vapply(fields[-1], function(field) field[[9]], character(1))),
+    c("Bacillus_sp1", "Bacillus_sp2")
+  )
+})
+
+test_that("Krona lines omit zero unclassified contributions and preserve exact sums", {
+  lin1 <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_sp1"
+  lin2 <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus_sp2;Bacillus_sp2"
+  nodes <- build_kreport_tree(c(lin1, lin2), c(30, 70))
+
+  lines <- build_krona_lines(nodes, total_reads = 100, uncl_reads = 0)
+  fields <- strsplit(lines, "\t", fixed = TRUE)
+  magnitudes <- as.numeric(vapply(fields, function(field) field[[1]], character(1)))
+
+  expect_length(lines, 2L)
+  expect_false(any(vapply(fields, function(field) identical(field[[2]], "Unclassified"), logical(1))))
+  expect_equal(sum(magnitudes), 100)
+})
+
+test_that("Krona paths reject physical delimiters and normalize empty labels", {
+  lineage <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_sp1"
+  nodes <- build_kreport_tree(lineage, 10)
+
+  bad_tab <- nodes
+  bad_tab$path[8] <- "Bacteria;bad\tlabel"
+  expect_error(build_krona_lines(bad_tab, 10, 0), "tab or newline")
+
+  bad_newline <- nodes
+  bad_newline$path[8] <- "Bacteria;bad\nlabel"
+  expect_error(build_krona_lines(bad_newline, 10, 0), "tab or newline")
+
+  empty_label <- nodes
+  empty_label$path[8] <- "Bacteria;;Bacillota"
+  lines <- build_krona_lines(empty_label, 10, 0)
+  expect_true(grepl("Bacteria\tUnknown\tBacillota$", lines[1]))
+})
+
+test_that("Krona arithmetic rejects invalid and mismatched counts", {
+  lineage <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_sp1"
+  nodes <- build_kreport_tree(lineage, 10)
+
+  expect_error(build_krona_lines(nodes, total_reads = 0, uncl_reads = 0), "greater than zero")
+  expect_error(build_krona_lines(nodes, total_reads = 10.5, uncl_reads = 0), "finite")
+  expect_error(build_krona_lines(nodes, total_reads = 10, uncl_reads = -1), "finite")
+  expect_error(build_krona_lines(nodes, total_reads = 10, uncl_reads = 1), "classified direct")
+
+  non_integer <- nodes
+  non_integer$reads_taxon[8] <- 1.5
+  expect_error(build_krona_lines(non_integer, 10, 0), "finite")
+
+  negative <- nodes
+  negative$reads_taxon[8] <- -1
+  expect_error(build_krona_lines(negative, 10, 0), "finite")
+})
+
+test_that("write_krona_input creates a physical TSV under paths with spaces", {
+  lineage <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_sp1"
+  nodes <- build_kreport_tree(lineage, 10)
+  output <- file.path(tempdir(), "krona path with spaces", "sample id.krona.tsv")
+
+  expect_equal(write_krona_input(output, nodes, 10, 0), output)
+  expect_true(file.exists(output))
+  expect_equal(readLines(output, warn = FALSE),
+               "10\tBacteria\tBacillati\tBacillota\tBacilli\tBacillales\tBacillaceae\tBacillus\tBacillus_sp1")
+})
+
 test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
   cache_path <- file.path("..", "..", "output_AAy", "taxonomy_cache.json")
@@ -65,6 +147,7 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   cfg$input$assignments <- list(AmbarAyunda_minimap2_16S = asgn_path)
   cfg$output$base_dir <- out_dir
   cfg$output$dirs <- list(kreport = file.path(out_dir, "07_Kreport"))
+  cfg$krona <- list(enabled = TRUE, render_html = FALSE, executable = "ktImportText")
 
   context <- build_context(cfg)
 
@@ -85,6 +168,22 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   # Check kingdom row uses K
   expect_true(any(grepl("\tK\t", lines)))
   expect_false(any(grepl("\tD1\t", lines)))
+
+  krona_file <- file.path(cfg$output$dirs$kreport, "krona",
+                          "AmbarAyunda_minimap2_16S.krona.tsv")
+  krona_provenance_file <- file.path(cfg$output$dirs$kreport, "krona",
+                                     "krona_provenance.json")
+  expect_true(file.exists(krona_file))
+  expect_true(file.exists(krona_provenance_file))
+  krona_magnitudes <- as.numeric(vapply(
+    strsplit(readLines(krona_file, warn = FALSE), "\t", fixed = TRUE),
+    function(field) field[[1]], character(1)
+  ))
+  expect_equal(sum(krona_magnitudes), 114056)
+  expect_equal(sum(krona_magnitudes[-1]), 80556)
+  krona_provenance <- jsonlite::fromJSON(krona_provenance_file, simplifyVector = FALSE)
+  expect_equal(krona_provenance$html_status, "not_requested")
+  expect_equal(krona_provenance$samples[[1]]$emitted_magnitude_sum, 114056)
 
   unresolved <- read.delim(file.path(cfg$output$dirs$kreport,
                                      "unresolved_taxids.tsv"),
@@ -140,9 +239,11 @@ test_that("kreport resolver handles input and output paths containing spaces", {
   cfg$taxonomy$cache <- cache_file
   cfg$output$base_dir <- file.path(root, "output directory")
   cfg$output$dirs <- list(kreport = file.path(cfg$output$base_dir, "07_Kreport"))
+  cfg$krona <- NULL
   cfg$cli <- list(modules = "kreport", validate_only = FALSE)
 
   context <- build_context(cfg)
   expect_equal(run_kreport(context)$status, "completed")
   expect_true(file.exists(file.path(cfg$output$dirs$kreport, "S1.kreport")))
+  expect_false(dir.exists(file.path(cfg$output$dirs$kreport, "krona")))
 })

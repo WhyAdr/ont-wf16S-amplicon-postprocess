@@ -87,6 +87,12 @@ if (length(invalid_modules) > 0) {
   quit(status = 1)
 }
 
+if (isTRUE(cfg$krona$enabled) && !("kreport" %in% requested_modules)) {
+  cat("[FATAL] Krona export requires the 'kreport' module; include kreport in --modules.\n",
+      file = stderr())
+  quit(status = 1)
+}
+
 # Optional module dependencies and embedded database checks are performed only
 # for explicitly requested modules, before validate-only and output mutation.
 check_module_dependencies(requested_modules)

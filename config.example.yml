@@ -67,6 +67,12 @@ faprotax:
   # Plot selection only; all non-zero functions remain in the TSV output.
   top_n_functions: 20
 
+# Optional Krona-compatible export from the kreport tree.
+krona:
+  enabled: false
+  render_html: true
+  executable: "ktImportText"
+
 beta:
   distances: ["bray", "jaccard"]
   permutations: 999
