@@ -36,6 +36,17 @@ for (file in sprintf("%02d_%s.R", 1:8, c("qc_diagnostics", "alpha_diversity",
     "kreport_pavian", "faprotax"))) source(file.path(script_dir, file))
 
 fatal <- function(label, error) {
+  if (exists("taxonomy_cache_committed", inherits = TRUE) &&
+      exists("restore_taxonomy_cache", inherits = TRUE) &&
+      !isTRUE(taxonomy_cache_committed)) {
+    tryCatch({
+      restore_taxonomy_cache()
+      taxonomy_cache_committed <<- TRUE
+    }, error = function(restore_error) {
+      cat(sprintf("[FATAL] Could not restore taxonomy source cache: %s\n",
+                  conditionMessage(restore_error)), file = stderr())
+    })
+  }
   cat(sprintf("[FATAL] %s: %s\n", label, conditionMessage(error)), file = stderr())
   quit(status = 1L)
 }
@@ -103,9 +114,26 @@ if (isTRUE(cfg$cli$validate_only)) {
 final_root <- normalizePath(cfg$output$base_dir, winslash = "/", mustWork = FALSE)
 prior_manifest <- tryCatch(validate_prior_output(final_root, cfg$cli$overwrite),
                            error = function(e) fatal("Output validation error", e))
+
+taxonomy_cache_path <- cfg$taxonomy$cache
+taxonomy_cache_original <- if (identical(cfg$taxonomy$network_mode, "refresh")) {
+  readBin(taxonomy_cache_path, "raw", n = file.info(taxonomy_cache_path)$size)
+} else {
+  NULL
+}
+taxonomy_cache_committed <- !identical(cfg$taxonomy$network_mode, "refresh")
+restore_taxonomy_cache <- function() {
+  if (!identical(cfg$taxonomy$network_mode, "refresh") || is.null(taxonomy_cache_original)) return(invisible(TRUE))
+  atomic_replace(taxonomy_cache_path, function(temp) writeBin(taxonomy_cache_original, temp))
+  invisible(TRUE)
+}
+
 stage <- prepare_run_staging(final_root)
 stage_active <- TRUE
-on.exit(if (stage_active && dir.exists(stage)) unlink(stage, recursive = TRUE, force = TRUE), add = TRUE)
+on.exit({
+  if (!taxonomy_cache_committed) restore_taxonomy_cache()
+  if (stage_active && dir.exists(stage)) unlink(stage, recursive = TRUE, force = TRUE)
+}, add = TRUE)
 tryCatch(preserve_unowned_outputs(final_root, stage, prior_manifest),
          error = function(e) fatal("Output staging error", e))
 
@@ -169,6 +197,13 @@ for (module_name in requested_modules) {
   }
 }
 
+if (any_failed && !taxonomy_cache_committed) {
+  tryCatch({
+    restore_taxonomy_cache()
+    taxonomy_cache_committed <- TRUE
+  }, error = function(e) fatal("Taxonomy source-cache rollback failed", e))
+}
+
 end_time <- Sys.time()
 deps <- get_dependency_versions(packages)
 session_lines <- c(
@@ -229,7 +264,8 @@ manifest <- list(
   environment = lock_info,
   package_versions = json_array(lapply(names(deps), function(package) list(package = package, version = deps[[package]])))
 )
-write_manifest_v2(manifest, cfg$output$manifest_file, physical_root = stage)
+tryCatch(write_manifest_v2(manifest, cfg$output$manifest_file, physical_root = stage),
+         error = function(e) fatal("Manifest publication failed", e))
 tryCatch(assert_inputs_unchanged(full_inventory,
   allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh")),
   error = function(e) fatal("Pre-publication input check failed", e))
@@ -239,8 +275,10 @@ if (any_failed && !is.null(prior_manifest)) {
   cat("[FATAL] Transaction aborted; the previous completed output was preserved.\n", file = stderr())
   quit(status = 1L)
 }
-publish_staged_run(stage, final_root)
+tryCatch(publish_staged_run(stage, final_root),
+         error = function(e) fatal("Output publication failed", e))
 stage_active <- FALSE
+if (!any_failed) taxonomy_cache_committed <- TRUE
 if (any_failed) {
   cat(sprintf("[FATAL] Failed run manifest published: %s\n", file.path(final_root, "run_manifest.json")), file = stderr())
   quit(status = 1L)

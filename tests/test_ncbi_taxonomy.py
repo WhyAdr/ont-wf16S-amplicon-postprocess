@@ -71,6 +71,9 @@ class TaxonomyResolverTests(unittest.TestCase):
         provenance = json.loads((self.work / "provenance.json").read_text(encoding="utf-8"))
         self.assertEqual(provenance["resolution_source_counts"]["assignment"], 1)
         self.assertEqual(provenance["resolution_source_counts"]["unresolved"], 0)
+        self.assertEqual(provenance["source_cache_sha256_before"], before)
+        self.assertEqual(provenance["source_cache_sha256_committed"], before)
+        self.assertRegex(provenance["source_cache_sha256_candidate"], r"^[0-9a-f]{64}$")
 
     def test_refresh_failure_preserves_source_cache_and_returns_nonzero(self):
         before = hashlib.sha256(self.cache.read_bytes()).hexdigest()

@@ -64,6 +64,11 @@ def atomic_write_json(path, payload):
             os.unlink(temp_path)
 
 
+def compute_json_sha256(payload):
+    encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def load_cache(path):
     if not os.path.exists(path):
         return {}
@@ -300,6 +305,8 @@ def main():
                     resolution_sources[item["path"]] = "ncbi_refresh"
 
             unresolved = find_unresolved(abundance_paths, cache)
+        candidate_cache = {key: str(value) for key, value in cache.items()}
+        cache_sha_candidate = compute_json_sha256(candidate_cache)
         if args.validate_only:
             if args.unresolved_policy == "error" and unresolved:
                 raise ValueError(f"{len(unresolved)} taxonomy nodes remain unresolved.")
@@ -336,6 +343,8 @@ def main():
             "assignments_sha256": {path: compute_sha256(path) for path in args.assignments},
             "source_cache_sha256_before": cache_sha_before,
             "source_cache_sha256_after": compute_sha256(args.cache),
+            "source_cache_sha256_candidate": cache_sha_candidate,
+            "source_cache_sha256_committed": cache_sha_before if args.mode == "cache_only" else None,
             "resolved_cache_sha256": compute_sha256(args.resolved_cache),
             "source_cache_updated": cache_updated,
             "total_lineages": len(abundance_paths),
@@ -355,10 +364,11 @@ def main():
             print(f"[taxonomy] ERROR: {len(unresolved)} taxonomy nodes remain unresolved.", file=sys.stderr)
             return 1
         if args.mode == "refresh":
-            atomic_write_json(args.cache, {key: str(value) for key, value in cache.items()})
+            atomic_write_json(args.cache, candidate_cache)
             cache_updated = True
             provenance["source_cache_updated"] = True
             provenance["source_cache_sha256_after"] = compute_sha256(args.cache)
+            provenance["source_cache_sha256_committed"] = provenance["source_cache_sha256_after"]
             atomic_write_json(args.provenance, provenance)
         print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
         return 0
