@@ -87,8 +87,12 @@ jobs:
         run: python tests/check_committed_whitespace.py
 
   faprotax:
-    name: ubuntu-latest / R 4.5 / Python 3.12 (FAPROTAX)
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / R 4.5 / Python 3.12 (FAPROTAX)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:

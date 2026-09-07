@@ -89,6 +89,20 @@ test_that("discover_bamstats rejects multiple bamstats files mapping to the same
   expect_error(discover_bamstats(root, "S1"), "Multiple bamstats files discovered for sample 'S1'")
 })
 
+test_that("partition_minimap2_failures rejects duplicate read names within a single bamstats file", {
+  root <- tempfile("bamstats_duplicate_name_")
+  dir.create(root)
+  reads <- data.frame(status = c("C"), read_id = c("r1"), taxid = c(123), stringsAsFactors = FALSE)
+  con <- gzfile(file.path(root, "bamstats.readstats.tsv.gz"), open = "wt")
+  writeLines(c("name\tsample_name\tiden\tref_coverage", "r1\tS1\t95\t95", "r1\tS1\t95\t95"), con)
+  close(con)
+  params <- read_upstream_params(create_temp_params(root))
+  expect_error(
+    partition_minimap2_failures(reads, file.path(root, "bamstats.readstats.tsv.gz"), params, "S1"),
+    "Bamstats read names for 'S1' must be non-empty and unique"
+  )
+})
+
 test_that("partition_minimap2_failures rejects bamstats missing status-C reads", {
   root <- tempfile("bamstats_missing_c_")
   dir.create(root)

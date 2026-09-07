@@ -22,12 +22,16 @@ stopifnot(is.null(manifest$upstream_contract$workflow_version))
 stopifnot(is.null(manifest$upstream_contract$workflow_revision))
 
 # Expected module set completeness and status verification
+DEFAULT_CORE_MODULES <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
 expected_modules <- if (!is.null(manifest$cli$modules) && length(manifest$cli$modules) > 0L) {
   unlist(manifest$cli$modules)
 } else {
-  c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport")
+  DEFAULT_CORE_MODULES
 }
-stopifnot(identical(sort(names(manifest$modules)), sort(expected_modules)))
+
+# Non-self-referential check: release manifests must include the core module baseline
+stopifnot(all(DEFAULT_CORE_MODULES %in% names(manifest$modules)))
+stopifnot(identical(sort(names(manifest$modules)), sort(union(DEFAULT_CORE_MODULES, expected_modules))))
 
 # Module statuses, output file existence, and per-module warnings check
 for (mod in names(manifest$modules)) {
@@ -49,18 +53,26 @@ if (identical(manifest$mode, "single")) {
   }
 }
 
+faprotax_required <- c(
+  "08_FAPROTAX/faprotax_function_abundance.tsv",
+  "08_FAPROTAX/faprotax_mapping_coverage.tsv",
+  "08_FAPROTAX/faprotax_taxon_function_assignments.tsv",
+  "08_FAPROTAX/faprotax_top_functions.png",
+  "08_FAPROTAX/faprotax_provenance.json"
+)
+
 if ("faprotax" %in% expected_modules) {
-  stopifnot(identical(manifest$modules$faprotax$status, "completed"))
-  faprotax_required <- c(
-    "08_FAPROTAX/faprotax_function_abundance.tsv",
-    "08_FAPROTAX/faprotax_mapping_coverage.tsv",
-    "08_FAPROTAX/faprotax_taxon_function_assignments.tsv",
-    "08_FAPROTAX/faprotax_top_functions.png",
-    "08_FAPROTAX/faprotax_provenance.json"
-  )
-  faprotax_missing <- faprotax_required[!file.exists(file.path(root, faprotax_required))]
-  if (length(faprotax_missing)) {
-    stop("Missing FAPROTAX outputs: ", paste(faprotax_missing, collapse = ", "))
+  stopifnot(manifest$modules$faprotax$status %in% c("completed", "skipped"))
+  if (identical(manifest$modules$faprotax$status, "completed")) {
+    faprotax_missing <- faprotax_required[!file.exists(file.path(root, faprotax_required))]
+    if (length(faprotax_missing)) {
+      stop("Missing FAPROTAX outputs: ", paste(faprotax_missing, collapse = ", "))
+    }
+  } else {
+    skip_file <- file.path(root, "08_FAPROTAX/faprotax_skipped.tsv")
+    if (!file.exists(skip_file)) {
+      stop("FAPROTAX was skipped but '08_FAPROTAX/faprotax_skipped.tsv' is missing.")
+    }
   }
 }
 

@@ -4,6 +4,7 @@ title: "ONT wf-16S Amplicon Post-Processing Pipeline"
 authors:
   - name: "WhyAdr"
 version: 0.2.0
+date-released: "2026-09-07"
 license: MIT
 repository-code: "https://github.com/WhyAdr/ont-wf16S-amplicon-postprocess"
 url: "https://github.com/WhyAdr/ont-wf16S-amplicon-postprocess"
