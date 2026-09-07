@@ -8,6 +8,7 @@ source(file.path("..", "..", "analysis", "utils", "metrics.R"))
 source(file.path("..", "..", "analysis", "utils", "plotting.R"))
 source(file.path("..", "..", "analysis", "02_alpha_diversity.R"))
 source(file.path("..", "..", "analysis", "03_beta_diversity.R"))
+source(file.path("..", "..", "analysis", "04_taxa_composition.R"))
 source(file.path("..", "..", "analysis", "05_ordination.R"))
 source(file.path("..", "..", "analysis", "06_shared_taxa.R"))
 
@@ -204,4 +205,25 @@ test_that("Shared taxa preserves numeric-like sample IDs and arbitrary group lab
   prevalence <- read.delim(file.path(cfg$output$dirs$shared_taxa, "group_prevalence.tsv"),
                            check.names = FALSE)
   expect_true(all(c("0", "Group-one") %in% names(prevalence)))
+})
+
+test_that("One-row composition heatmaps do not attempt row clustering", {
+  root <- tempfile("one_row_heatmap_")
+  dir.create(root)
+  samples <- c("S1", "S2")
+  abundance <- create_temp_abundance(root, n_species = 3, sample_names = samples)
+  metadata <- create_temp_metadata(root, samples, c("Control", "Treated"))
+  cfg <- get_default_config()
+  cfg$mode <- "cohort"
+  cfg$input$abundance_table <- abundance
+  cfg$input$metadata <- metadata
+  cfg$input$params_json <- create_temp_params(root)
+  cfg$composition$top_n_taxa <- 1L
+  cfg$output$base_dir <- file.path(root, "output")
+  cfg$output$dirs <- list(composition = file.path(cfg$output$base_dir, "04_Taxa_Composition"))
+  context <- build_context(cfg)
+  expect_equal(run_taxa_composition(context)$status, "completed")
+  heatmap <- file.path(cfg$output$dirs$composition, "04_heatmap_genus.png")
+  expect_true(file.exists(heatmap))
+  expect_gt(file.info(heatmap)$size, 0)
 })

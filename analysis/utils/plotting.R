@@ -56,3 +56,26 @@ save_plot <- function(filename, plot, width = 7, height = 5, dpi = 150) {
   dir.create(dirname(filename), recursive = TRUE, showWarnings = FALSE)
   ggplot2::ggsave(filename = filename, plot = plot, width = width, height = height, dpi = dpi)
 }
+
+with_png_device <- function(filename, draw, width = 7, height = 5, dpi = 150) {
+  if (!is.function(draw)) stop("'draw' must be a function.", call. = FALSE)
+  dir.create(dirname(filename), recursive = TRUE, showWarnings = FALSE)
+  grDevices::png(filename, width = width, height = height, units = "in", res = dpi)
+  device_id <- grDevices::dev.cur()
+  completed <- FALSE
+  on.exit({
+    open_devices <- grDevices::dev.list()
+    if (!is.null(open_devices) && device_id %in% open_devices) {
+      grDevices::dev.off(which = device_id)
+    }
+    if (!completed && file.exists(filename)) unlink(filename)
+  }, add = TRUE)
+
+  draw()
+  grDevices::dev.off(which = device_id)
+  if (!file.exists(filename) || !isTRUE(file.info(filename)$size > 0)) {
+    stop(sprintf("PNG output was not written or is empty: '%s'.", filename), call. = FALSE)
+  }
+  completed <- TRUE
+  invisible(filename)
+}

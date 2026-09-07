@@ -273,6 +273,12 @@ run_taxa_composition <- function(context) {
       } else {
         mat_top
       }
+      heatmap_range <- range(mat_transformed, finite = TRUE)
+      heatmap_breaks <- if (diff(heatmap_range) == 0) {
+        seq(heatmap_range[1] - 0.5, heatmap_range[2] + 0.5, length.out = 101L)
+      } else {
+        NA_real_
+      }
 
       # Annotate columns with metadata if available
       anno_col <- NA
@@ -283,18 +289,20 @@ run_taxa_composition <- function(context) {
 
       heatmap_path <- file.path(comp_dir, sprintf("04_heatmap_%s.png", heatmap_rank))
 
-      # Save pheatmap
-      png(heatmap_path, width = 8, height = 7, units = "in", res = 150)
-      pheatmap::pheatmap(
-        mat_transformed,
-        annotation_col = if (is.data.frame(anno_col)) anno_col else NA,
-        color = colorRampPalette(c("#f7fbff", "#6baed6", "#08306b"))(100),
-        main = sprintf("Top %d %s Relative Abundance (%s)", nrow(mat_top), heatmap_rank, heatmap_transform),
-        clustering_distance_rows = "euclidean",
-        clustering_distance_cols = "euclidean",
-        fontsize = 9
-      )
-      dev.off()
+      with_png_device(heatmap_path, width = 8, height = 7, draw = function() {
+        pheatmap::pheatmap(
+          mat_transformed,
+          annotation_col = if (is.data.frame(anno_col)) anno_col else NA,
+          color = colorRampPalette(c("#f7fbff", "#6baed6", "#08306b"))(100),
+          breaks = heatmap_breaks,
+          main = sprintf("Top %d %s Relative Abundance (%s)", nrow(mat_top), heatmap_rank, heatmap_transform),
+          clustering_distance_rows = "euclidean",
+          clustering_distance_cols = "euclidean",
+          cluster_rows = nrow(mat_transformed) >= 2L,
+          cluster_cols = ncol(mat_transformed) >= 2L,
+          fontsize = 9
+        )
+      })
       all_outputs <- c(all_outputs, heatmap_path)
     }
   }
