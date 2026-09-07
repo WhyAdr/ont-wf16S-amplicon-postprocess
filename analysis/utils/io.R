@@ -512,9 +512,9 @@ split_assignment_fields <- function(line) {
 
 parse_assignment_length <- function(length_field) {
   if (is.na(length_field) || length_field == "") return(NA_integer_)
-  if (!grepl("^(length=)?[1-9][0-9]*$|^(0|[1-9][0-9]*)\\|[1-9][0-9]*$",
+  if (!grepl("^[0-9]+$|^[0-9]+\\|[1-9][0-9]*$",
              length_field)) return(NA_integer_)
-  value <- sub("^.*\\|", "", sub("^length=", "", length_field))
+  value <- sub("^.*\\|", "", length_field)
   if (nchar(value) > 10L || (nchar(value) == 10L && value > "2147483647")) return(NA_integer_)
   suppressWarnings(as.integer(value))
 }

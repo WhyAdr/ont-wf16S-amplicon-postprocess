@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -16,7 +17,9 @@ from collections import Counter
 
 TOOL_NAME = "ont_wf16s_postprocess"
 MAX_SAFE_INTEGER = 9007199254740991
+MAX_READ_LENGTH = 2147483647
 PLACEHOLDER_NAMES = {"unknown", "unclassified", "uncultured", "unidentified"}
+READ_LENGTH_RE = re.compile(r"^[0-9]+$|^[0-9]+\|[1-9][0-9]*$")
 
 
 def parse_taxid(value, context="TaxID"):
@@ -108,12 +111,11 @@ def read_assignment_taxids(paths):
                 if read_id in seen_read_ids:
                     raise ValueError(f"{path}:{line_number}: duplicate read ID {read_id!r}.")
                 seen_read_ids.add(read_id)
-                if not (length_field.isdigit() and int(length_field) > 0 or
-                        ("|" in length_field and len(length_field.split("|")) == 2 and
-                         length_field.split("|", 1)[0].isdigit() and
-                         length_field.split("|", 1)[1].isdigit() and
-                         int(length_field.split("|", 1)[1]) > 0)):
+                if not READ_LENGTH_RE.fullmatch(length_field):
                     raise ValueError(f"{path}:{line_number}: malformed read length field.")
+                read_length = int(length_field.rsplit("|", 1)[-1])
+                if read_length > MAX_READ_LENGTH:
+                    raise ValueError(f"{path}:{line_number}: read length exceeds {MAX_READ_LENGTH}.")
                 taxid_text = fields[2]
                 if any(field != field.strip() or any(ord(ch) < 32 for ch in field)
                        for field in (fields[1], taxid_text, lineage)):
