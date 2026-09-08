@@ -17,7 +17,8 @@ RUNTIME_PACKAGES <- c(
   "pheatmap",
   "UpSetR",
   "digest",
-  "processx"
+  "processx",
+  "filelock"
 )
 
 MODULE_PACKAGES <- list(

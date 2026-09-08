@@ -2,14 +2,79 @@
 # Atomic output helpers and whole-run publication
 # =============================================================================
 
-atomic_replace <- function(path, writer) {
+utc_timestamp_now <- function() {
+  strftime(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+}
+
+atomic_replace <- function(path, writer, expected_sha256 = NULL) {
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
-  temp <- tempfile(pattern = paste0(".", basename(path), "."), tmpdir = dirname(path))
-  on.exit(if (file.exists(temp)) unlink(temp, force = TRUE), add = TRUE)
+  target_dir <- dirname(path)
+  target_name <- basename(path)
+  temp <- tempfile(pattern = paste0(".", target_name, ".tmp-"), tmpdir = target_dir)
+  backup <- tempfile(pattern = paste0(".", target_name, ".bak-"), tmpdir = target_dir)
+  had_target <- file.exists(path)
+  orig_mode <- if (had_target) file.info(path)$mode else NULL
+
+  on.exit({
+    if (file.exists(temp)) unlink(temp, force = TRUE)
+    if (file.exists(backup)) {
+      if (!file.exists(path)) {
+        file.rename(backup, path)
+      } else {
+        unlink(backup, force = TRUE)
+      }
+    }
+  }, add = TRUE)
+
   writer(temp)
-  if (!file.exists(temp) || dir.exists(temp)) stop(sprintf("Atomic writer did not create '%s'.", path), call. = FALSE)
-  if (file.exists(path) && !unlink(path, force = TRUE)) stop(sprintf("Could not replace '%s'.", path), call. = FALSE)
-  if (!file.rename(temp, path)) stop(sprintf("Could not atomically publish '%s'.", path), call. = FALSE)
+  if (!file.exists(temp) || dir.exists(temp)) {
+    stop(sprintf("Atomic writer did not create '%s'.", path), call. = FALSE)
+  }
+
+  temp_size <- file.info(temp)$size
+  temp_hash <- if (!is.null(expected_sha256)) {
+    digest::digest(temp, file = TRUE, algo = "sha256")
+  } else if (exists("digest_file", mode = "function")) {
+    tryCatch(digest_file(temp), error = function(e) NULL)
+  } else NULL
+
+  if (!is.null(expected_sha256) && !is.null(temp_hash) &&
+      !identical(tolower(temp_hash), tolower(expected_sha256))) {
+    stop(sprintf("Replacement '%s' failed expected SHA-256 verification.", path), call. = FALSE)
+  }
+
+  if (had_target) {
+    if (!file.rename(path, backup)) {
+      stop(sprintf("Could not stage backup for '%s'.", path), call. = FALSE)
+    }
+  }
+
+  if (!file.rename(temp, path)) {
+    if (had_target && file.exists(backup)) file.rename(backup, path)
+    stop(sprintf("Could not publish replacement for '%s'.", path), call. = FALSE)
+  }
+
+  pub_info <- file.info(path)
+  if (is.na(pub_info$size) || pub_info$size != temp_size) {
+    if (had_target && file.exists(backup)) file.rename(backup, path)
+    stop(sprintf("Published file '%s' failed size verification.", path), call. = FALSE)
+  }
+  if (!is.null(temp_hash) && exists("digest_file", mode = "function")) {
+    pub_hash <- tryCatch(digest_file(path), error = function(e) NULL)
+    if (!is.null(pub_hash) && !identical(pub_hash, temp_hash)) {
+      if (had_target && file.exists(backup)) file.rename(backup, path)
+      stop(sprintf("Published file '%s' failed hash verification.", path), call. = FALSE)
+    }
+  }
+
+  if (!is.null(orig_mode) && !is.na(orig_mode)) {
+    tryCatch(Sys.chmod(path, mode = orig_mode), error = function(e) NULL)
+  }
+
+  if (had_target && file.exists(backup)) {
+    unlink(backup, force = TRUE)
+  }
+
   invisible(path)
 }
 
@@ -174,17 +239,159 @@ preserve_unowned_outputs <- function(final_root, stage, prior_manifest) {
   invisible(TRUE)
 }
 
+get_output_lock_path <- function(final_root) {
+  canonical <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
+  parent <- dirname(canonical)
+  root_hash <- digest::digest(canonical, algo = "sha256")
+  file.path(parent, sprintf(".%s.wf16s_output.lock", root_hash))
+}
+
+.wf16s_active_output_locks <- new.env(parent = emptyenv())
+
+acquire_output_lock <- function(final_root, timeout_ms = 10000) {
+  lock_path <- get_output_lock_path(final_root)
+  norm_lock_path <- tolower(normalizePath(lock_path, winslash = "/", mustWork = FALSE))
+  if (exists(norm_lock_path, envir = .wf16s_active_output_locks, inherits = FALSE)) {
+    stop(sprintf("E_OUTPUT_BUSY: output directory '%s' is locked by another process (lock '%s').",
+                 final_root, lock_path), call. = FALSE)
+  }
+  dir.create(dirname(lock_path), recursive = TRUE, showWarnings = FALSE)
+  lock_handle <- tryCatch(filelock::lock(lock_path, timeout = timeout_ms),
+                          error = function(e) NULL)
+  if (is.null(lock_handle)) {
+    stop(sprintf("E_OUTPUT_BUSY: output directory '%s' is locked by another process (lock '%s').",
+                 final_root, lock_path), call. = FALSE)
+  }
+  assign(norm_lock_path, lock_handle, envir = .wf16s_active_output_locks)
+  lock_handle
+}
+
+release_output_lock <- function(lock_handle) {
+  if (!is.null(lock_handle)) {
+    for (name in ls(.wf16s_active_output_locks)) {
+      if (identical(.wf16s_active_output_locks[[name]], lock_handle)) {
+        rm(list = name, envir = .wf16s_active_output_locks)
+        break
+      }
+    }
+    tryCatch(filelock::unlock(lock_handle), error = function(e) NULL)
+  }
+  invisible(TRUE)
+}
+
+get_output_journal_path <- function(final_root) {
+  canonical <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
+  parent <- dirname(canonical)
+  root_hash <- digest::digest(canonical, algo = "sha256")
+  file.path(parent, sprintf(".%s.wf16s_journal.json", root_hash))
+}
+
+write_publication_journal <- function(final_root, stage = NULL, backup = NULL, phase = "prepared") {
+  journal_path <- get_output_journal_path(final_root)
+  payload <- list(
+    final_root = normalizePath(final_root, winslash = "/", mustWork = FALSE),
+    stage = if (!is.null(stage)) normalizePath(stage, winslash = "/", mustWork = FALSE) else NULL,
+    backup = if (!is.null(backup)) normalizePath(backup, winslash = "/", mustWork = FALSE) else NULL,
+    phase = phase,
+    timestamp = utc_timestamp_now(),
+    pid = Sys.getpid()
+  )
+  atomic_write_json(payload, journal_path)
+  invisible(journal_path)
+}
+
+remove_publication_journal <- function(final_root) {
+  journal_path <- get_output_journal_path(final_root)
+  if (file.exists(journal_path)) unlink(journal_path, force = TRUE)
+  invisible(TRUE)
+}
+
+manifest_is_valid_run <- function(dir_path) {
+  if (!dir.exists(dir_path)) return(FALSE)
+  manifest_file <- file.path(dir_path, "run_manifest.json")
+  if (!file.exists(manifest_file)) return(FALSE)
+  manifest <- tryCatch(jsonlite::fromJSON(manifest_file, simplifyVector = FALSE),
+                       error = function(e) NULL)
+  if (is.null(manifest) || !identical(manifest$pipeline, "ont-wf16s-postprocess")) return(FALSE)
+  identical(manifest$run_status, "completed")
+}
+
+recover_publication_journal <- function(final_root) {
+  journal_path <- get_output_journal_path(final_root)
+  if (!file.exists(journal_path)) return(invisible(FALSE))
+
+  journal <- tryCatch(jsonlite::fromJSON(journal_path, simplifyVector = FALSE),
+                      error = function(e) NULL)
+  if (is.null(journal) || is.null(journal$final_root)) {
+    stop(sprintf("E_OUTPUT_RECOVERY_REQUIRED: corrupt publication journal at '%s'.", journal_path),
+         call. = FALSE)
+  }
+
+  canonical_final <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
+  journal_final <- normalizePath(as.character(journal$final_root), winslash = "/", mustWork = FALSE)
+  if (!identical(tolower(canonical_final), tolower(journal_final))) {
+    return(invisible(FALSE))
+  }
+
+  backup <- journal$backup
+  has_final <- dir.exists(final_root)
+  final_valid <- has_final && manifest_is_valid_run(final_root)
+  has_backup <- !is.null(backup) && dir.exists(backup)
+  backup_valid <- has_backup && manifest_is_valid_run(backup)
+
+  if (!has_final && backup_valid) {
+    if (!file.rename(backup, final_root)) {
+      stop(sprintf("E_OUTPUT_RECOVERY_REQUIRED: failed to restore backup '%s' to '%s'.",
+                   backup, final_root), call. = FALSE)
+    }
+    remove_publication_journal(final_root)
+    cat(sprintf("[RECOVERY] Restored prior completed run from crash backup '%s'.\n", backup),
+        file = stderr())
+    return(invisible(TRUE))
+  } else if (final_valid) {
+    if (has_backup) unlink(backup, recursive = TRUE, force = TRUE)
+    remove_publication_journal(final_root)
+    cat(sprintf("[RECOVERY] Resolved prior publication state for '%s'.\n", final_root),
+        file = stderr())
+    return(invisible(TRUE))
+  } else {
+    stop(sprintf("E_OUTPUT_RECOVERY_REQUIRED: incomplete publication transaction at '%s'; manual recovery required.",
+                 final_root), call. = FALSE)
+  }
+}
+
 publish_staged_run <- function(stage, final_root) {
   parent <- dirname(final_root)
   backup <- tempfile(pattern = paste0(".", basename(final_root), ".previous-"), tmpdir = parent)
   had_prior <- dir.exists(final_root)
-  if (had_prior && !file.rename(final_root, backup)) stop("Could not preserve the prior completed run.", call. = FALSE)
+
+  write_publication_journal(final_root, stage = stage, backup = if (had_prior) backup else NULL,
+                            phase = "prepared")
+
+  if (had_prior) {
+    if (!file.rename(final_root, backup)) {
+      stop("Could not preserve the prior completed run.", call. = FALSE)
+    }
+    write_publication_journal(final_root, stage = stage, backup = backup, phase = "prior_moved")
+  }
+
   committed <- FALSE
   on.exit({
-    if (!committed && had_prior && dir.exists(backup) && !dir.exists(final_root)) file.rename(backup, final_root)
+    if (!committed && had_prior && dir.exists(backup) && !dir.exists(final_root)) {
+      file.rename(backup, final_root)
+    }
   }, add = TRUE)
-  if (!file.rename(stage, final_root)) stop("Could not publish staged run.", call. = FALSE)
+
+  if (!file.rename(stage, final_root)) {
+    stop("Could not publish staged run.", call. = FALSE)
+  }
   committed <- TRUE
-  if (had_prior && dir.exists(backup)) unlink(backup, recursive = TRUE, force = TRUE)
+  write_publication_journal(final_root, stage = stage, backup = if (had_prior) backup else NULL,
+                            phase = "stage_published")
+
+  if (had_prior && dir.exists(backup)) {
+    unlink(backup, recursive = TRUE, force = TRUE)
+  }
+  remove_publication_journal(final_root)
   invisible(final_root)
 }

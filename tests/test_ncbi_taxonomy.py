@@ -175,6 +175,108 @@ class TaxonomyResolverTests(unittest.TestCase):
         sources = (self.work / "resolution_sources.tsv").read_text(encoding="utf-8")
         self.assertIn(f"{self.lineage}\t0\tunresolved", sources)
 
+    def test_ordered_ancestry_validation(self):
+        record = {
+            "scientific_name": "Bacillus subtilis",
+            "rank": "species",
+            "lineage": ["Bacteria", "Bacillota", "Bacilli", "Bacillales", "Bacillaceae", "Bacillus"],
+        }
+        # Positive case
+        err = taxonomy.validate_taxonomy_context(
+            record, "Bacillus subtilis", expected_rank="species",
+            ancestor_names=["Bacteria", "Bacillota", "Bacillus"]
+        )
+        self.assertIsNone(err)
+
+        # Reversed order
+        err = taxonomy.validate_taxonomy_context(
+            record, "Bacillus subtilis", expected_rank="species",
+            ancestor_names=["Bacillus", "Bacteria"]
+        )
+        self.assertIsNotNone(err)
+        self.assertIn("out of order or reversed", err)
+
+        # Missing ancestor
+        err = taxonomy.validate_taxonomy_context(
+            record, "Bacillus subtilis", expected_rank="species",
+            ancestor_names=["Archaea"]
+        )
+        self.assertIsNotNone(err)
+        self.assertIn("missing ancestor context", err)
+
+        # Wrong rank
+        err = taxonomy.validate_taxonomy_context(
+            record, "Bacillus subtilis", expected_rank="genus",
+            ancestor_names=["Bacteria"]
+        )
+        self.assertIsNotNone(err)
+        self.assertIn("rank mismatch", err)
+
+        # Wrong name
+        err = taxonomy.validate_taxonomy_context(
+            record, "Escherichia coli", expected_rank="species",
+            ancestor_names=["Bacteria"]
+        )
+        self.assertIsNotNone(err)
+        self.assertIn("does not exactly match", err)
+
+        # Duplicate ancestor ambiguity
+        record_dup = {
+            "scientific_name": "Bacillus subtilis",
+            "rank": "species",
+            "lineage": ["Bacteria", "Bacillus", "Bacillaceae", "Bacillus"],
+        }
+        err = taxonomy.validate_taxonomy_context(
+            record_dup, "Bacillus subtilis", expected_rank="species",
+            ancestor_names=["Bacteria", "Bacillus"]
+        )
+        self.assertIsNotNone(err)
+        self.assertIn("ambiguity", err)
+
+    def test_concurrent_cache_mutation_aborts_refresh(self):
+        parts = self.lineage.split(";")
+        cache_payload = {";".join(parts[:depth]): depth for depth in range(1, 7)}
+        cache_payload[";".join(parts[:7])] = 0
+        cache_payload[self.lineage] = 0
+        self.cache.write_text(json.dumps(cache_payload), encoding="utf-8")
+
+        def mutate_cache(*args, **kwargs):
+            self.cache.write_text(json.dumps({"external_mutation": 9999}), encoding="utf-8")
+            return 777, None, []
+
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "query_exact_scientific_name", side_effect=mutate_cache), \
+             mock.patch("sys.argv", self.args(mode="refresh")):
+            exit_code = taxonomy.main()
+            self.assertEqual(exit_code, 1)
+
+        # External mutation must be preserved, not overwritten by candidate
+        cache_content = json.loads(self.cache.read_text(encoding="utf-8"))
+        self.assertIn("external_mutation", cache_content)
+        self.assertEqual(cache_content["external_mutation"], 9999)
+
+    def test_conflicting_expected_input_rejected(self):
+        args = self.args() + [
+            "--expected-input", f"{self.abundance}\t{'0'*64}",
+            "--expected-input", f"{self.abundance}\t{'1'*64}",
+        ]
+        with mock.patch("sys.argv", args):
+            self.assertEqual(taxonomy.main(), 1)
+
+    def test_cache_lock_timeout_returns_busy(self):
+        parts = self.lineage.split(";")
+        cache_payload = {";".join(parts[:depth]): depth for depth in range(1, 7)}
+        cache_payload[";".join(parts[:7])] = 0
+        self.cache.write_text(json.dumps(cache_payload), encoding="utf-8")
+
+        # Hold the lock externally
+        with taxonomy.acquire_cache_lock(str(self.cache)):
+            # Nested attempt should fail with E_TAXONOMY_CACHE_BUSY
+            with self.assertRaises(SystemExit) as cm:
+                with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2, poll_interval=0.05):
+                    pass
+            self.assertIn("E_TAXONOMY_CACHE_BUSY", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

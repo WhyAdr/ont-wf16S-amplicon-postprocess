@@ -258,13 +258,14 @@ write_manifest_v2 <- function(manifest, path, physical_root = NULL) {
   validate_manifest_v2(manifest, physical_root = physical_root)
   if (exists("atomic_write_json", mode = "function")) {
     atomic_write_json(manifest, path)
+  } else if (exists("atomic_replace", mode = "function")) {
+    atomic_replace(path, function(temp) {
+      jsonlite::write_json(manifest, temp, pretty = TRUE, auto_unbox = TRUE, null = "null")
+    })
   } else {
-    dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
-    temp <- tempfile(pattern = ".manifest-", tmpdir = dirname(path))
-    on.exit(if (file.exists(temp)) unlink(temp, force = TRUE), add = TRUE)
-    jsonlite::write_json(manifest, temp, pretty = TRUE, auto_unbox = TRUE, null = "null")
-    if (file.exists(path)) unlink(path, force = TRUE)
-    if (!file.rename(temp, path)) stop("Could not publish manifest atomically.", call. = FALSE)
+    atomic_replace(path, function(temp) {
+      jsonlite::write_json(manifest, temp, pretty = TRUE, auto_unbox = TRUE, null = "null")
+    })
   }
   parsed <- jsonlite::fromJSON(path, simplifyVector = FALSE)
   validate_manifest_v2(parsed, physical_root = physical_root)

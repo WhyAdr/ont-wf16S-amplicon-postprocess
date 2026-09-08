@@ -63,3 +63,84 @@ test_that("output overlap checks are bidirectional and include discovered bamsta
   expect_error(validate_output_root(cfg, normalizePath("..", winslash = "/"), discovered),
                "E_OUTPUT_UNSAFE")
 })
+
+test_that("atomic_replace preserves original file if writer fails", {
+  tf <- tempfile("atomic_test_")
+  writeLines("initial_content", tf)
+  expect_error(
+    atomic_replace(tf, function(temp) stop("simulated writer failure")),
+    "simulated writer failure"
+  )
+  expect_true(file.exists(tf))
+  expect_equal(readLines(tf), "initial_content")
+})
+
+test_that("atomic_replace preserves original file on hash mismatch", {
+  tf <- tempfile("atomic_hash_test_")
+  writeLines("initial_content", tf)
+  expect_error(
+    atomic_replace(tf, function(temp) writeLines("new_content", temp),
+                   expected_sha256 = paste(rep("0", 64), collapse = "")),
+    "failed expected SHA-256 verification"
+  )
+  expect_true(file.exists(tf))
+  expect_equal(readLines(tf), "initial_content")
+})
+
+test_that("acquire_output_lock enforces exclusivity with E_OUTPUT_BUSY", {
+  root <- tempfile("lock_test_")
+  l1 <- acquire_output_lock(root, timeout_ms = 1000)
+  on.exit(release_output_lock(l1), add = TRUE)
+  expect_error(acquire_output_lock(root, timeout_ms = 50), "E_OUTPUT_BUSY")
+  release_output_lock(l1)
+  l2 <- acquire_output_lock(root, timeout_ms = 1000)
+  release_output_lock(l2)
+})
+
+test_that("recover_publication_journal restores prior completed run when final is missing", {
+  root <- tempfile("journal_rec_")
+  parent <- dirname(root)
+  backup <- tempfile("journal_bak_", tmpdir = parent)
+  write_legacy_output(backup)
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "prior_moved")
+
+  expect_false(dir.exists(root))
+  expect_true(dir.exists(backup))
+
+  recover_publication_journal(root)
+
+  expect_true(dir.exists(root))
+  expect_false(dir.exists(backup))
+  expect_false(file.exists(get_output_journal_path(root)))
+})
+
+test_that("recover_publication_journal cleans up backup when final is already valid", {
+  root <- tempfile("journal_clean_")
+  parent <- dirname(root)
+  backup <- tempfile("journal_bak_", tmpdir = parent)
+  write_legacy_output(root)
+  write_legacy_output(backup)
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published")
+
+  expect_true(dir.exists(root))
+  expect_true(dir.exists(backup))
+
+  recover_publication_journal(root)
+
+  expect_true(dir.exists(root))
+  expect_false(dir.exists(backup))
+  expect_false(file.exists(get_output_journal_path(root)))
+})
+
+test_that("recover_publication_journal fails closed with E_OUTPUT_RECOVERY_REQUIRED", {
+  root <- tempfile("journal_fail_")
+  parent <- dirname(root)
+  backup <- tempfile("journal_bak_", tmpdir = parent)
+  dir.create(backup, recursive = TRUE)
+  # Backup has no valid manifest
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "prior_moved")
+
+  expect_error(recover_publication_journal(root), "E_OUTPUT_RECOVERY_REQUIRED")
+  unlink(backup, recursive = TRUE, force = TRUE)
+  remove_publication_journal(root)
+})

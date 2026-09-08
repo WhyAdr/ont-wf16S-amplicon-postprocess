@@ -2,12 +2,14 @@
 """Resolve NCBI TaxIDs without mutating the source cache in offline mode."""
 
 import argparse
+import contextlib
 import csv
 import gzip
 import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -22,6 +24,88 @@ MAX_READ_LENGTH = 2147483647
 PLACEHOLDER_NAMES = {"unknown", "unclassified", "uncultured", "unidentified"}
 READ_LENGTH_RE = re.compile(r"^[0-9]+$|^[0-9]+\|[1-9][0-9]*$")
 EXPECTED_RANKS = ("superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species")
+
+
+@contextlib.contextmanager
+def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
+    lock_path = cache_path + ".lock"
+    os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+    deadline = time.time() + timeout
+    fd = None
+    acquired = False
+
+    while time.time() < deadline:
+        try:
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
+            candidate_fd = os.open(lock_path, flags, 0o666)
+            if sys.platform == "win32":
+                import msvcrt
+                try:
+                    msvcrt.locking(candidate_fd, msvcrt.LK_NBLCK, 1)
+                    fd = candidate_fd
+                    acquired = True
+                    break
+                except OSError:
+                    os.close(candidate_fd)
+            else:
+                import fcntl
+                try:
+                    fcntl.flock(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fd = candidate_fd
+                    acquired = True
+                    break
+                except (OSError, IOError):
+                    os.close(candidate_fd)
+        except OSError:
+            pass
+        time.sleep(poll_interval)
+
+    if not acquired:
+        owner_info = "unknown"
+        if os.path.exists(lock_path):
+            try:
+                with open(lock_path, "r", encoding="utf-8") as h:
+                    owner_info = h.read().strip()
+            except OSError:
+                pass
+        raise SystemExit(
+            f"[taxonomy] ERROR: E_TAXONOMY_CACHE_BUSY: cache lock '{lock_path}' is held by another process: {owner_info}"
+        )
+
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        owner_payload = json.dumps({
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "start_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+        os.write(fd, owner_payload.encode("utf-8"))
+        yield lock_path
+    finally:
+        if fd is not None:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.ftruncate(fd, 0)
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                if os.path.exists(lock_path):
+                    os.unlink(lock_path)
+            except OSError:
+                pass
 
 
 def parse_taxid(value, context="TaxID"):
@@ -233,12 +317,27 @@ def validate_taxonomy_context(record, name, expected_rank=None, ancestor_names=N
     if expected_rank and record["rank"].casefold() != expected_rank.casefold():
         return (f"NCBI TaxID rank mismatch for {name!r}: expected {expected_rank!r}, "
                 f"found {record['rank']!r}.")
-    lineage_names = {_normalized_taxon_name(value) for value in record["lineage"]}
-    missing = [value for value in (ancestor_names or [])
-               if _normalized_taxon_name(value) not in lineage_names]
+    if not ancestor_names:
+        return None
+    normalized_lineage = [_normalized_taxon_name(val) for val in record.get("lineage", [])]
+    expected_ancestors = [_normalized_taxon_name(val) for val in ancestor_names]
+
+    missing = [anc for anc in expected_ancestors if anc not in normalized_lineage]
     if missing:
         return (f"NCBI TaxID ancestry mismatch for {name!r}; missing ancestor context: "
                 + ", ".join(missing))
+
+    last_idx = -1
+    for anc in expected_ancestors:
+        indices = [i for i, val in enumerate(normalized_lineage) if val == anc]
+        if len(indices) > 1:
+            return (f"NCBI TaxID ancestry ambiguity for {name!r}; ancestor {anc!r} "
+                    f"appears {len(indices)} times in NCBI lineage.")
+        idx = indices[0]
+        if idx <= last_idx:
+            return (f"NCBI TaxID ancestry order mismatch for {name!r}; ancestor {anc!r} "
+                    f"appears out of order or reversed in NCBI lineage.")
+        last_idx = idx
     return None
 
 
@@ -333,137 +432,161 @@ def main():
     try:
         expected_inputs = {}
         for specification in args.expected_input:
-            path, separator, expected_sha256 = specification.partition("\t")
-            if not separator or not path or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
-                raise ValueError("--expected-input must be PATH<TAB>64-hex-SHA256.")
-            expected_inputs[path] = expected_sha256.lower()
+            if "\t" in specification:
+                path, _, expected_sha256 = specification.partition("\t")
+            elif "=" in specification:
+                path, _, expected_sha256 = specification.partition("=")
+            else:
+                raise ValueError("--expected-input must be PATH<TAB>64-hex-SHA256 or PATH=64-hex-SHA256.")
+            if not path or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
+                raise ValueError("--expected-input must specify a non-empty path and 64-hex-SHA256.")
+            normalized_sha = expected_sha256.lower()
+            if path in expected_inputs and expected_inputs[path] != normalized_sha:
+                raise ValueError(f"Conflicting --expected-input for {path!r}: {expected_inputs[path]} vs {normalized_sha}.")
+            expected_inputs[path] = normalized_sha
+
         if not os.path.exists(args.abundance):
             raise ValueError(f"Abundance file not found: {args.abundance}")
         abundance_paths = read_abundance_paths(
             args.abundance, args.tax_column, expected_inputs.get(args.abundance)
         )
-        cache_sha_before = compute_sha256(args.cache)
-        cache = load_cache(args.cache, expected_inputs.get(args.cache))
-        resolution_sources = {
-            taxon_path: "source_cache" for taxon_path, taxid in cache.items() if taxid > 0
-        }
-        assignment_hashes = {path: expected_inputs[path] for path in args.assignments if path in expected_inputs}
-        assignment_map, conflicts = read_assignment_taxids(args.assignments, assignment_hashes)
 
-        for path in abundance_paths:
-            parts = path.split(";")
-            if len(parts) == 8 and cache.get(path, 0) <= 0:
-                assignment_taxid = assignment_map.get(normalize_abundance_path_to_7(path), 0)
-                if assignment_taxid > 0:
-                    cache[path] = assignment_taxid
-                    resolution_sources[path] = "assignment"
+        lock_ctx = (
+            acquire_cache_lock(args.cache)
+            if (args.mode == "refresh" and not args.validate_only)
+            else contextlib.nullcontext()
+        )
+        with lock_ctx:
+            cache_sha_before = compute_sha256(args.cache)
+            cache = load_cache(args.cache, expected_inputs.get(args.cache))
+            resolution_sources = {
+                taxon_path: "source_cache" for taxon_path, taxid in cache.items() if taxid > 0
+            }
+            assignment_hashes = {path: expected_inputs[path] for path in args.assignments if path in expected_inputs}
+            assignment_map, conflicts = read_assignment_taxids(args.assignments, assignment_hashes)
 
-        unresolved = find_unresolved(abundance_paths, cache)
-        query_failures = []
-        ambiguous_queries = []
-        cache_updated = False
-
-        if args.mode == "refresh" and unresolved:
-            email = os.environ.get(args.email_env, "").strip()
-            if not email:
-                raise ValueError(f"Environment variable {args.email_env!r} is required for refresh mode.")
-            if args.validate_only and not args.online_preflight:
-                print(f"[taxonomy] Preflight complete: {len(unresolved)} node(s) require online refresh.")
-                return 0
-            api_key = os.environ.get(args.api_key_env, "").strip() or None
-            delay = 0.12 if api_key else 0.35
-            name_results = {}
-            for item in unresolved:
-                name = item["name"]
-                expected_rank = EXPECTED_RANKS[item["depth"] - 1] if item["depth"] <= len(EXPECTED_RANKS) else None
-                ancestor_names = [part for part in item["path"].split(";")[:-1]
-                                  if part.strip().lower() not in PLACEHOLDER_NAMES]
-                query_key = (name, expected_rank, tuple(ancestor_names))
-                if query_key not in name_results:
-                    name_results[query_key] = query_exact_scientific_name(
-                        name, email, api_key, expected_rank=expected_rank,
-                        ancestor_names=ancestor_names
-                    )
-                    time.sleep(delay)
-                taxid, error, ambiguous_taxids = name_results[query_key]
-                if error:
-                    query_failures.append({"path": item["path"], "name": name, "error": error})
-                elif ambiguous_taxids:
-                    ambiguous_queries.append({
-                        "path": item["path"], "name": name, "taxids": ambiguous_taxids
-                    })
-                elif taxid > 0:
-                    cache[item["path"]] = taxid
-                    resolution_sources[item["path"]] = "ncbi_refresh"
+            for path in abundance_paths:
+                parts = path.split(";")
+                if len(parts) == 8 and cache.get(path, 0) <= 0:
+                    assignment_taxid = assignment_map.get(normalize_abundance_path_to_7(path), 0)
+                    if assignment_taxid > 0:
+                        cache[path] = assignment_taxid
+                        resolution_sources[path] = "assignment"
 
             unresolved = find_unresolved(abundance_paths, cache)
-        candidate_cache = {key: str(value) for key, value in cache.items()}
-        cache_sha_candidate = compute_json_sha256(candidate_cache)
-        if args.validate_only:
-            if args.unresolved_policy == "error" and unresolved:
-                raise ValueError(f"{len(unresolved)} taxonomy nodes remain unresolved.")
-            print(f"[taxonomy] Preflight complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
-            return 0
+            query_failures = []
+            ambiguous_queries = []
+            cache_updated = False
 
-        required_outputs = (args.resolved_cache, args.unresolved_tsv, args.conflicts_tsv,
-                            args.resolution_sources_tsv, args.provenance)
-        if any(not value for value in required_outputs):
-            raise ValueError("Resolver output paths are required unless --validate-only is used.")
+            if args.mode == "refresh" and unresolved:
+                email = os.environ.get(args.email_env, "").strip()
+                if not email:
+                    raise ValueError(f"Environment variable {args.email_env!r} is required for refresh mode.")
+                if args.validate_only and not args.online_preflight:
+                    print(f"[taxonomy] Preflight complete: {len(unresolved)} node(s) require online refresh.")
+                    return 0
+                api_key = os.environ.get(args.api_key_env, "").strip() or None
+                delay = 0.12 if api_key else 0.35
+                name_results = {}
+                for item in unresolved:
+                    name = item["name"]
+                    expected_rank = EXPECTED_RANKS[item["depth"] - 1] if item["depth"] <= len(EXPECTED_RANKS) else None
+                    ancestor_names = [part for part in item["path"].split(";")[:-1]
+                                      if part.strip().lower() not in PLACEHOLDER_NAMES]
+                    query_key = (name, expected_rank, tuple(ancestor_names))
+                    if query_key not in name_results:
+                        name_results[query_key] = query_exact_scientific_name(
+                            name, email, api_key, expected_rank=expected_rank,
+                            ancestor_names=ancestor_names
+                        )
+                        time.sleep(delay)
+                    taxid, error, ambiguous_taxids = name_results[query_key]
+                    if error:
+                        query_failures.append({"path": item["path"], "name": name, "error": error})
+                    elif ambiguous_taxids:
+                        ambiguous_queries.append({
+                            "path": item["path"], "name": name, "taxids": ambiguous_taxids
+                        })
+                    elif taxid > 0:
+                        cache[item["path"]] = taxid
+                        resolution_sources[item["path"]] = "ncbi_refresh"
 
-        atomic_write_json(args.resolved_cache, {key: str(value) for key, value in cache.items()})
-        write_unresolved_tsv(args.unresolved_tsv, unresolved)
-        write_conflicts_tsv(args.conflicts_tsv, conflicts)
-        taxon_nodes = iter_taxon_nodes(abundance_paths)
-        write_resolution_sources_tsv(
-            args.resolution_sources_tsv, taxon_nodes, cache, resolution_sources
-        )
-        source_counts = Counter(
-            resolution_sources.get(item["path"], "unresolved")
-            if cache.get(item["path"], 0) > 0 else "unresolved"
-            for item in taxon_nodes
-        )
-        source_counts = {
-            label: source_counts.get(label, 0)
-            for label in ("source_cache", "assignment", "ncbi_refresh", "unresolved")
-        }
+                unresolved = find_unresolved(abundance_paths, cache)
+            candidate_cache = {key: str(value) for key, value in cache.items()}
+            cache_sha_candidate = compute_json_sha256(candidate_cache)
+            if args.validate_only:
+                if args.unresolved_policy == "error" and unresolved:
+                    raise ValueError(f"{len(unresolved)} taxonomy nodes remain unresolved.")
+                print(f"[taxonomy] Preflight complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
+                return 0
 
-        provenance = {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "mode": args.mode,
-            "tool": TOOL_NAME,
-            "abundance_sha256": compute_sha256(args.abundance),
-            "assignments_sha256": {path: compute_sha256(path) for path in args.assignments},
-            "source_cache_sha256_before": cache_sha_before,
-            "source_cache_sha256_after": compute_sha256(args.cache),
-            "source_cache_sha256_candidate": cache_sha_candidate,
-            "source_cache_sha256_committed": cache_sha_before if args.mode == "cache_only" else None,
-            "resolved_cache_sha256": compute_sha256(args.resolved_cache),
-            "source_cache_updated": cache_updated,
-            "total_lineages": len(abundance_paths),
-            "unresolved_count": len(unresolved),
-            "conflicts_count": len(conflicts),
-            "conflicts": conflicts,
-            "query_failures": query_failures,
-            "ambiguous_queries": ambiguous_queries,
-            "resolution_source_counts": source_counts,
-        }
-        atomic_write_json(args.provenance, provenance)
+            required_outputs = (args.resolved_cache, args.unresolved_tsv, args.conflicts_tsv,
+                                args.resolution_sources_tsv, args.provenance)
+            if any(not value for value in required_outputs):
+                raise ValueError("Resolver output paths are required unless --validate-only is used.")
 
-        if query_failures:
-            print(f"[taxonomy] ERROR: {len(query_failures)} NCBI query failure(s); source cache preserved.", file=sys.stderr)
-            return 1
-        if args.unresolved_policy == "error" and unresolved:
-            print(f"[taxonomy] ERROR: {len(unresolved)} taxonomy nodes remain unresolved.", file=sys.stderr)
-            return 1
-        if args.mode == "refresh":
-            atomic_write_json(args.cache, candidate_cache)
-            cache_updated = True
-            provenance["source_cache_updated"] = True
-            provenance["source_cache_sha256_after"] = compute_sha256(args.cache)
-            provenance["source_cache_sha256_committed"] = provenance["source_cache_sha256_after"]
+            atomic_write_json(args.resolved_cache, {key: str(value) for key, value in cache.items()})
+            write_unresolved_tsv(args.unresolved_tsv, unresolved)
+            write_conflicts_tsv(args.conflicts_tsv, conflicts)
+            taxon_nodes = iter_taxon_nodes(abundance_paths)
+            write_resolution_sources_tsv(
+                args.resolution_sources_tsv, taxon_nodes, cache, resolution_sources
+            )
+            source_counts = Counter(
+                resolution_sources.get(item["path"], "unresolved")
+                if cache.get(item["path"], 0) > 0 else "unresolved"
+                for item in taxon_nodes
+            )
+            source_counts = {
+                label: source_counts.get(label, 0)
+                for label in ("source_cache", "assignment", "ncbi_refresh", "unresolved")
+            }
+
+            provenance = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "mode": args.mode,
+                "tool": TOOL_NAME,
+                "abundance_sha256": compute_sha256(args.abundance),
+                "assignments_sha256": {path: compute_sha256(path) for path in args.assignments},
+                "source_cache_sha256_before": cache_sha_before,
+                "source_cache_sha256_after": compute_sha256(args.cache),
+                "source_cache_sha256_candidate": cache_sha_candidate,
+                "source_cache_sha256_committed": cache_sha_before if args.mode == "cache_only" else None,
+                "resolved_cache_sha256": compute_sha256(args.resolved_cache),
+                "source_cache_updated": cache_updated,
+                "total_lineages": len(abundance_paths),
+                "unresolved_count": len(unresolved),
+                "conflicts_count": len(conflicts),
+                "conflicts": conflicts,
+                "query_failures": query_failures,
+                "ambiguous_queries": ambiguous_queries,
+                "resolution_source_counts": source_counts,
+            }
             atomic_write_json(args.provenance, provenance)
-        print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
-        return 0
+
+            if query_failures:
+                print(f"[taxonomy] ERROR: {len(query_failures)} NCBI query failure(s); source cache preserved.", file=sys.stderr)
+                return 1
+            if args.unresolved_policy == "error" and unresolved:
+                print(f"[taxonomy] ERROR: {len(unresolved)} taxonomy nodes remain unresolved.", file=sys.stderr)
+                return 1
+            if args.mode == "refresh":
+                current_cache_sha = compute_sha256(args.cache)
+                if current_cache_sha != cache_sha_before:
+                    print(
+                        f"[taxonomy] ERROR: E_TAXONOMY_CACHE_CHANGED: source cache '{args.cache}' "
+                        f"was mutated during query execution (expected {cache_sha_before}, found {current_cache_sha}).",
+                        file=sys.stderr,
+                    )
+                    return 1
+                atomic_write_json(args.cache, candidate_cache)
+                cache_updated = True
+                provenance["source_cache_updated"] = True
+                provenance["source_cache_sha256_after"] = compute_sha256(args.cache)
+                provenance["source_cache_sha256_committed"] = provenance["source_cache_sha256_after"]
+                atomic_write_json(args.provenance, provenance)
+            print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
+            return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"[taxonomy] ERROR: {exc}", file=sys.stderr)
         return 1
