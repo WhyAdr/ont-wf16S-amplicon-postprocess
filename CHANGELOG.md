@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.3] - 2026-09-08
+
+### Fixed
+
+- **Manifest Schema v2 Revision 2**: Bump schema revision to `2L` with mandatory `artifacts` array (tracking size, sha256, producer module) and `preserved_unowned_outputs` array.
+- **Physical Output Census**: Enforce exact equality between physical staged files and declared owned plus preserved files before publication (`physical == (owned \ manifest) ∪ preserved`).
+- **Transactional Replace & Crash Recovery**: Replace unsafe rename-over-deleted semantics with atomic temporary replacements and sibling transaction journals with deterministic crash recovery.
+- **Output Concurrency Locking**: Acquire cross-platform output-root locks via `filelock` to eliminate races during parallel runs against identical output directories.
+- **Taxonomy Cache State Machine & Concurrency**: Implement explicit cache state machine (`unchanged`, `candidate_committed`, `restored`) with tempfile backup, SHA-256 pre-verification, cross-platform file locking (`fcntl` / `msvcrt`), and fail-closed race abortion (`E_TAXONOMY_CACHE_CHANGED`).
+- **Private Per-Module Staging**: Replace whole-stage directory copying with isolated per-module staging roots, eliminating quadratic disk I/O and enforcing module output boundaries.
+- **Environment & Preflight Hardening**: Make external-CWD loading self-sufficient via `env_loader.R`, enforce project-library containment for all non-base packages, and include startup files (`.Rprofile`, `renv/activate.R`, `renv/settings.json`) in source provenance.
+- **AST Syntax Checking**: Replace bytecode compilation in preflight with read-only AST syntax parsing.
+
 ## [0.4.2] - 2026-09-07
 
 ### Fixed

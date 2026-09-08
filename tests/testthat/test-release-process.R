@@ -187,7 +187,7 @@ test_that("module failure rollback removes partial writes before publishing a fa
   dir.create(root)
   config <- write_process_config(root)
   output <- file.path(root, "injected failure output")
-  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "qc")
+  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "qc", WF16S_TEST_MODE = "1")
   result <- run_pipeline_process(
     c("--config", config, "--output-dir", output, "--modules", "qc,alpha"), tempdir()
   )
@@ -209,7 +209,7 @@ test_that("keep-going continues after an injected module write and preserves onl
   dir.create(root)
   config <- write_process_config(root)
   output <- file.path(root, "injected keep-going output")
-  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "qc")
+  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "qc", WF16S_TEST_MODE = "1")
   result <- run_pipeline_process(
     c("--config", config, "--output-dir", output, "--modules", "qc,alpha", "--keep-going"),
     tempdir()
@@ -236,7 +236,7 @@ test_that("failed overwrite preserves the previously completed output tree", {
   expect_equal(first$status, 0L, info = paste(first$stderr, first$stdout))
   before <- readBin(file.path(output, "run_manifest.json"), "raw",
                     n = file.info(file.path(output, "run_manifest.json"))$size)
-  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "kreport")
+  withr::local_envvar(WF16S_INJECT_MODULE_FAILURE = "kreport", WF16S_TEST_MODE = "1")
   second <- run_pipeline_process(
     c("--config", config, "--output-dir", output, "--modules", "kreport", "--overwrite"),
     tempdir()

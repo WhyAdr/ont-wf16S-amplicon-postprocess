@@ -32,3 +32,35 @@ test_that("lock status reports the full lock closure and active library paths", 
   expect_true(length(status$library_paths) >= 1L)
   expect_true(project_library %in% unlist(status$library_paths, use.names = FALSE))
 })
+
+test_that("startup files are included in maintained source files", {
+  repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
+  files <- maintained_source_files(repo_root)
+  norm_files <- tolower(normalizePath(files, winslash = "/", mustWork = FALSE))
+  rprofile <- tolower(normalizePath(file.path(repo_root, ".Rprofile"), winslash = "/", mustWork = FALSE))
+  activate <- tolower(normalizePath(file.path(repo_root, "renv", "activate.R"), winslash = "/", mustWork = FALSE))
+  settings <- tolower(normalizePath(file.path(repo_root, "renv", "settings.json"), winslash = "/", mustWork = FALSE))
+  expect_true(rprofile %in% norm_files)
+  expect_true(activate %in% norm_files)
+  expect_true(settings %in% norm_files)
+})
+
+test_that("package resolved outside project library is recorded as library discrepancy", {
+  repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
+  temp_lib <- tempfile("mock_lib_")
+  dir.create(temp_lib, recursive = TRUE)
+  fake_repo <- tempfile("mock_repo_")
+  dir.create(fake_repo, recursive = TRUE)
+  lock_file <- file.path(fake_repo, "renv.lock")
+  writeLines(jsonlite::toJSON(list(
+    R = list(Version = as.character(getRversion())),
+    Packages = list(
+      yaml = list(Package = "yaml", Version = as.character(utils::packageVersion("yaml")))
+    )
+  ), auto_unbox = TRUE), lock_file)
+
+  status <- read_lock_status(fake_repo, c("yaml"))
+  expect_identical(status$lock_status, "mismatch")
+  expect_true(length(status$library_discrepancies) >= 1L)
+  expect_true(any(grepl("package loaded from outside project library", unlist(status$library_discrepancies))))
+})

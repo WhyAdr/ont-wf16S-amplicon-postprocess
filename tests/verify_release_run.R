@@ -41,7 +41,7 @@ array_strings <- function(value, path) {
 stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(identical(manifest$mode, "single"))
 stopifnot(identical(manifest$schema_version, 2L))
-stopifnot(identical(manifest$schema_revision, 1L))
+stopifnot(identical(manifest$schema_revision, 2L))
 stopifnot(identical(manifest$config_schema_version, 1L))
 stopifnot(identical(manifest$pipeline_version, expected_pipeline_version))
 validate_manifest_v2(manifest, physical_root = root)
@@ -68,6 +68,31 @@ invisible(require_json_array(manifest$samples, "samples"))
 invisible(require_json_array(manifest$command, "command"))
 invisible(require_json_array(manifest$warnings, "warnings"))
 invisible(require_json_array(manifest$package_versions, "package_versions"))
+
+# Manifest v2 revision 2 artifacts and preserved unowned outputs verification
+owned_files <- array_strings(manifest$owned_outputs, "owned_outputs")
+preserved_files <- array_strings(manifest$preserved_unowned_outputs, "preserved_unowned_outputs")
+artifacts <- require_json_array(manifest$artifacts, "artifacts")
+artifact_paths <- vapply(artifacts, function(a) as.character(a$relative_path), character(1))
+stopifnot(setequal(tolower(artifact_paths), tolower(setdiff(owned_files, "run_manifest.json"))))
+for (art in artifacts) {
+  stopifnot(nzchar(art$relative_path))
+  stopifnot(is.numeric(art$size_bytes), art$size_bytes >= 0)
+  stopifnot(grepl("^[0-9a-f]{64}$", art$sha256))
+  if (art$relative_path %in% c("resolved_config.yml", "session_info.txt")) {
+    stopifnot(is.null(art$producer_module))
+  } else {
+    stopifnot(art$producer_module %in% ALL_MODULES)
+  }
+}
+
+# Physical file census check: physical files must equal (owned_outputs \ run_manifest.json) ∪ preserved_unowned_outputs
+stopifnot(file.exists(file.path(root, "run_manifest.json")))
+physical_files <- list.files(root, recursive = TRUE, all.files = TRUE, no.. = TRUE)
+physical_files <- physical_files[!dir.exists(file.path(root, physical_files))]
+physical_without_manifest <- setdiff(gsub("\\\\", "/", physical_files), "run_manifest.json")
+expected_physical <- sort(unique(c(setdiff(owned_files, "run_manifest.json"), preserved_files)))
+stopifnot(setequal(tolower(physical_without_manifest), tolower(expected_physical)))
 
 # Non-self-referential check: every maintained module has an explicit record.
 stopifnot(identical(sort(names(manifest$modules)), sort(ALL_MODULES)))
@@ -258,6 +283,9 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
              unexpected_warnings)
     ]
   }
+  if (isTRUE(manifest$cli$allow_dirty)) {
+    unexpected_warnings <- unexpected_warnings[unexpected_warnings != "Dirty-source development run"]
+  }
   stopifnot(length(unexpected_warnings) == 0L)
   for (mod in names(manifest$modules)) {
     module_warnings <- unlist(manifest$modules[[mod]]$warnings, use.names = FALSE)
@@ -290,7 +318,11 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
     "07_Kreport/taxonomy_conflicts.tsv", "07_Kreport/taxonomy_provenance.json"
   )
   if ("faprotax" %in% expected_modules) {
-    required <- c(required, faprotax_required)
+    if (identical(manifest$modules$faprotax$status, "completed")) {
+      required <- c(required, faprotax_required)
+    } else if (identical(manifest$modules$faprotax$status, "skipped")) {
+      required <- c(required, "08_FAPROTAX/faprotax_skipped.tsv")
+    }
   }
   missing <- required[!file.exists(file.path(root, required))]
   if (length(missing)) stop("Missing release outputs: ", paste(missing, collapse = ", "))

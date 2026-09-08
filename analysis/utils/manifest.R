@@ -496,13 +496,14 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
   if (dir.exists(check_root)) {
     physical_files <- list.files(check_root, recursive = TRUE, all.files = TRUE, no.. = TRUE, full.names = FALSE)
     physical_files <- physical_files[!dir.exists(file.path(check_root, physical_files))]
+    physical_without_manifest <- setdiff(physical_files, "run_manifest.json")
     expected_files <- sort(unique(c(setdiff(owned, "run_manifest.json"), preserved)))
 
-    if (length(setdiff(tolower(expected_files), tolower(physical_files))) > 0L) {
-      manifest_fail("owned_outputs", paste("missing expected file:", setdiff(tolower(expected_files), tolower(physical_files))[1]))
+    if (length(setdiff(tolower(expected_files), tolower(physical_without_manifest))) > 0L) {
+      manifest_fail("owned_outputs", paste("missing expected file:", setdiff(tolower(expected_files), tolower(physical_without_manifest))[1]))
     }
-    if (length(setdiff(tolower(physical_files), tolower(expected_files))) > 0L) {
-      manifest_fail("owned_outputs", paste("physical file not declared as owned or preserved:", setdiff(tolower(physical_files), tolower(expected_files))[1]))
+    if (length(setdiff(tolower(physical_without_manifest), tolower(expected_files))) > 0L) {
+      manifest_fail("owned_outputs", paste("physical file not declared as owned or preserved:", setdiff(tolower(physical_without_manifest), tolower(expected_files))[1]))
     }
   }
 

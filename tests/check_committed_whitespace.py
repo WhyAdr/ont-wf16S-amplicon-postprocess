@@ -30,6 +30,10 @@ def empty_tree() -> str:
 
 
 def choose_base() -> str:
+    diff_base = os.environ.get("WF16S_DIFF_BASE")
+    if diff_base and valid_commit(diff_base):
+        return diff_base
+
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     before = os.environ.get("GITHUB_EVENT_BEFORE")
     if event == "push" and valid_commit(before):

@@ -144,3 +144,40 @@ test_that("recover_publication_journal fails closed with E_OUTPUT_RECOVERY_REQUI
   unlink(backup, recursive = TRUE, force = TRUE)
   remove_publication_journal(root)
 })
+
+test_that("prepare, publish, and cleanup module staging work correctly", {
+  root <- tempfile("mod_stage_root_")
+  stage <- file.path(root, "run_stage")
+  dir.create(stage, recursive = TRUE)
+
+  mod_stage <- prepare_module_staging(stage, "qc")
+  expect_true(dir.exists(mod_stage))
+
+  out_dir <- file.path(mod_stage, "01_QC")
+  dir.create(out_dir)
+  test_file <- file.path(out_dir, "qc.tsv")
+  writeLines("qc content", test_file)
+
+  publish_module_staging(mod_stage, stage, test_file)
+  expect_true(file.exists(file.path(stage, "01_QC", "qc.tsv")))
+  expect_false(dir.exists(mod_stage))
+})
+
+test_that("verify_physical_file_census enforces exact file set and detects mismatches", {
+  stage <- tempfile("census_stage_")
+  dir.create(file.path(stage, "01_QC"), recursive = TRUE)
+  writeLines("qc", file.path(stage, "01_QC", "qc.tsv"))
+  writeLines("session", file.path(stage, "session_info.txt"))
+  writeLines("unowned", file.path(stage, "user_note.txt"))
+
+  owned <- c("01_QC/qc.tsv", "session_info.txt", "run_manifest.json")
+  preserved <- c("user_note.txt")
+
+  expect_no_error(verify_physical_file_census(stage, owned, preserved))
+
+  writeLines("extra", file.path(stage, "extra.txt"))
+  expect_error(verify_physical_file_census(stage, owned, preserved), "E_CENSUS_MISMATCH")
+  unlink(file.path(stage, "extra.txt"))
+
+  expect_error(verify_physical_file_census(stage, c(owned, "missing.tsv"), preserved), "E_CENSUS_MISMATCH")
+})

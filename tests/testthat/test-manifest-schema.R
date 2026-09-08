@@ -27,9 +27,10 @@ make_manifest_fixture <- function(samples, modules = c("qc"), warnings = charact
       duration_seconds = 1
     )
   }), registry)
+  pipeline_ver <- trimws(readLines(file.path("..", "..", "VERSION"), n = 1L, warn = FALSE))
   list(
     pipeline = "ont-wf16s-postprocess",
-    pipeline_version = "0.4.2",
+    pipeline_version = pipeline_ver,
     schema_version = 2L,
     schema_revision = 1L,
     config_schema_version = 1L,
@@ -171,9 +172,10 @@ make_manifest_revision2_fixture <- function(samples = "S1", modules = c("qc")) {
   dummy_fp <- function(path) list(path = path, size_bytes = 10L, mtime_utc = "2026-09-07T00:00:00Z",
                                   sha256 = paste(rep("c", 64L), collapse = ""))
 
+  pipeline_ver <- trimws(readLines(file.path("..", "..", "VERSION"), n = 1L, warn = FALSE))
   list(
     pipeline = "ont-wf16s-postprocess",
-    pipeline_version = "0.4.3",
+    pipeline_version = pipeline_ver,
     schema_version = 2L,
     schema_revision = 2L,
     config_schema_version = 1L,
