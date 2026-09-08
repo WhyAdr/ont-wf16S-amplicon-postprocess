@@ -359,10 +359,23 @@ verify_physical_file_census <- function(stage, owned_outputs, preserved_unowned_
   invisible(TRUE)
 }
 
+canonicalize_root_path <- function(path) {
+  path <- gsub("\\\\", "/", path)
+  parent <- dirname(path)
+  if (dir.exists(parent)) {
+    norm_parent <- normalizePath(parent, winslash = "/", mustWork = TRUE)
+    file.path(norm_parent, basename(path))
+  } else if (file.exists(path) || dir.exists(path)) {
+    normalizePath(path, winslash = "/", mustWork = TRUE)
+  } else {
+    normalizePath(path, winslash = "/", mustWork = FALSE)
+  }
+}
+
 get_output_lock_path <- function(final_root) {
-  canonical <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
+  canonical <- canonicalize_root_path(final_root)
   parent <- dirname(canonical)
-  root_hash <- digest::digest(canonical, algo = "sha256")
+  root_hash <- digest::digest(tolower(canonical), algo = "sha256")
   file.path(parent, sprintf(".%s.wf16s_output.lock", root_hash))
 }
 
@@ -370,7 +383,7 @@ get_output_lock_path <- function(final_root) {
 
 acquire_output_lock <- function(final_root, timeout_ms = 10000) {
   lock_path <- get_output_lock_path(final_root)
-  norm_lock_path <- tolower(normalizePath(lock_path, winslash = "/", mustWork = FALSE))
+  norm_lock_path <- tolower(canonicalize_root_path(lock_path))
   if (exists(norm_lock_path, envir = .wf16s_active_output_locks, inherits = FALSE)) {
     stop(sprintf("E_OUTPUT_BUSY: output directory '%s' is locked by another process (lock '%s').",
                  final_root, lock_path), call. = FALSE)
@@ -402,12 +415,12 @@ release_output_lock <- function(lock_handle) {
 .wf16s_active_taxonomy_locks <- new.env(parent = emptyenv())
 
 get_taxonomy_lock_path <- function(cache_path) {
-  paste0(normalizePath(cache_path, winslash = "/", mustWork = FALSE), ".lock")
+  paste0(canonicalize_root_path(cache_path), ".lock")
 }
 
 acquire_taxonomy_lock <- function(cache_path, timeout_ms = 10000) {
   lock_path <- get_taxonomy_lock_path(cache_path)
-  norm_lock_path <- tolower(normalizePath(lock_path, winslash = "/", mustWork = FALSE))
+  norm_lock_path <- tolower(canonicalize_root_path(lock_path))
   if (exists(norm_lock_path, envir = .wf16s_active_taxonomy_locks, inherits = FALSE)) {
     stop(sprintf("E_TAXONOMY_CACHE_BUSY: taxonomy cache '%s' is already locked in this process.",
                  cache_path), call. = FALSE)
