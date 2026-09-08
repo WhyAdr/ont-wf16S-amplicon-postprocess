@@ -1,0 +1,5 @@
+dataset	total_reads	baseline_classified	baseline_classified_pct	baseline_unclassified	baseline_unclassified_pct	raw_unmapped	mapped_taxid0	mapped_taxid0_pct_of_unclassified	identity_only	reference_coverage_only	identity_and_reference_coverage	identity_implicated	reference_coverage_implicated	median_classified_length	median_mapped_taxid0_length	median_classified_quality	median_mapped_taxid0_quality
+BAER	74442	49206	66.0998	25236	33.9002	61	25175	99.7583	11774	8650	4751	16525	13401	1521.0000	1499.0000	20.5000	18.7600
+BANAE	52474	30492	58.1088	21982	41.8912	74	21908	99.6634	10940	6250	4718	15658	10968	1517.0000	1495.0000	20.4100	18.8300
+BLEA	60694	28996	47.7741	31698	52.2259	50	31648	99.8423	14742	9881	7025	21767	16906	1515.0000	1510.0000	20.2900	18.8900
+BGRN	124483	107605	86.4415	16878	13.5585	78	16800	99.5379	5052	10231	1517	6569	11748	1514.0000	1501.0000	20.4900	18.1500

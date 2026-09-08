@@ -1,0 +1,83 @@
+{
+  "method": "Read-ID join of wf-16s assignments, bamstats, and alignment tables",
+  "interpretation": "Sensitivity reconstruction using the recorded best alignment; not a native wf-16s rerun",
+  "threshold_grid": {
+    "min_percent_identity": "integer values 80 through 90 inclusive",
+    "min_ref_coverage": "integer values 80 through 90 inclusive",
+    "comparison": "greater than or equal to cutoff"
+  },
+  "runs": [
+    {
+      "dataset": "BAER",
+      "run_directory": "wf-16s_BAER-NCBI",
+      "classifier": "minimap2",
+      "database_set": "ncbi_16s_18s",
+      "baseline_min_percent_identity": 90.0,
+      "baseline_min_ref_coverage": 90.0,
+      "min_len": 1300,
+      "max_len": 1700,
+      "min_read_qual": 10,
+      "input_files": {
+        "wf-16s_BAER-NCBI\\output\\params.json": "9395d180475416b9c871ce4527959b0ecc04a5ad1d38694801ca5496ed136792",
+        "wf-16s_BAER-NCBI\\output\\abundance_table_species.tsv": "c0fd360fec8bd4f3bb9f4292fb7e69e72b1d19f24048a7e89c9b2a0b184b5dcc",
+        "wf-16s_BAER-NCBI\\output\\reads_assignments\\B-AER_NCBI_lineages.minimap2.assignments.tsv": "17fc8725e0f77f8e8fa545e35414083354f7d5985c7091fc31a821faa56dd924",
+        "wf-16s_BAER-NCBI\\output\\bams\\B-AER_NCBI.bamstats_results\\bamstats.readstats.tsv.gz": "83863728ba817b49807733e7253576754fc4a084b9fc7a07d4109e241fa98916",
+        "wf-16s_BAER-NCBI\\output\\alignment_tables\\B-AER_NCBI-alignment-stats.tsv": "55cf23a43743ed29596cbffb4edb43dae37741e72bc3b16426cd415a68416fae"
+      }
+    },
+    {
+      "dataset": "BANAE",
+      "run_directory": "wf-16s_BANAE-NCBI",
+      "classifier": "minimap2",
+      "database_set": "ncbi_16s_18s",
+      "baseline_min_percent_identity": 90.0,
+      "baseline_min_ref_coverage": 90.0,
+      "min_len": 1300,
+      "max_len": 1700,
+      "min_read_qual": 10,
+      "input_files": {
+        "wf-16s_BANAE-NCBI\\output\\params.json": "3bbfc4b626dc3bbf3c1b364bf9bd0585257cf89fff3d10363c79c8122018382d",
+        "wf-16s_BANAE-NCBI\\output\\abundance_table_species.tsv": "a70266c814a69560f89afdb212e5fa9561527d43f18ee81b57df575103953828",
+        "wf-16s_BANAE-NCBI\\output\\reads_assignments\\B-ANAE_NCBI_lineages.minimap2.assignments.tsv": "54f9c2308e922d14f0020104feb9f078ec00208c5456589ed9138bc45ffc3453",
+        "wf-16s_BANAE-NCBI\\output\\bams\\B-ANAE_NCBI.bamstats_results\\bamstats.readstats.tsv.gz": "6056a2e39a9968efe088e30c69fa7336721dc635bdc08fc39a9aa272c6afc975",
+        "wf-16s_BANAE-NCBI\\output\\alignment_tables\\B-ANAE_NCBI-alignment-stats.tsv": "74df34650fcfeb262d8c51eff389db5c599b6992dd5abaa6daf56ae7dc284f11"
+      }
+    },
+    {
+      "dataset": "BLEA",
+      "run_directory": "wf-16s_BLEA-NCBI",
+      "classifier": "minimap2",
+      "database_set": "ncbi_16s_18s",
+      "baseline_min_percent_identity": 90.0,
+      "baseline_min_ref_coverage": 90.0,
+      "min_len": 1300,
+      "max_len": 1700,
+      "min_read_qual": 10,
+      "input_files": {
+        "wf-16s_BLEA-NCBI\\output\\params.json": "7ee77d5045ed10ec23f07434778d610ca398375952e2c4349fc20276671019ab",
+        "wf-16s_BLEA-NCBI\\output\\abundance_table_species.tsv": "5b5e552c9abb9cdcd94245b6107fc2d7a0462db0c7f553d5ec367633fd0a2ea1",
+        "wf-16s_BLEA-NCBI\\output\\reads_assignments\\B-LEA_NCBI_lineages.minimap2.assignments.tsv": "1ec076112f54aae06b52bdfa2194cee795273ef77341957a84a7ecee1c6e957e",
+        "wf-16s_BLEA-NCBI\\output\\bams\\B-LEA_NCBI.bamstats_results\\bamstats.readstats.tsv.gz": "b256e8213f00f6a3cc7240454a623225585d0742b7abebbd9c978bc692ba082f",
+        "wf-16s_BLEA-NCBI\\output\\alignment_tables\\B-LEA_NCBI-alignment-stats.tsv": "d20c5c2003479092f58e07efdf91c0917cc3be800e3e7af61450bf365c3303eb"
+      }
+    },
+    {
+      "dataset": "BGRN",
+      "run_directory": "wf-16s_BGRN-NCBI",
+      "classifier": "minimap2",
+      "database_set": "ncbi_16s_18s",
+      "baseline_min_percent_identity": 90.0,
+      "baseline_min_ref_coverage": 90.0,
+      "min_len": 1300,
+      "max_len": 1700,
+      "min_read_qual": 10,
+      "input_files": {
+        "wf-16s_BGRN-NCBI\\output\\params.json": "3643893029a5350d9318f05acecdfbee8e01ea016453ff377bfb52a34586164e",
+        "wf-16s_BGRN-NCBI\\output\\abundance_table_species.tsv": "06f185326ae1e02cff5ae5ec229dd7cc65c7e15d2bf2a1516c1f0494a9fc53c8",
+        "wf-16s_BGRN-NCBI\\output\\reads_assignments\\B-GRN_NCBI_lineages.minimap2.assignments.tsv": "017317130fbdf1da5c438df57d01a0bac1b4d22381efd02f5ed4d639a3b94a50",
+        "wf-16s_BGRN-NCBI\\output\\bams\\B-GRN_NCBI.bamstats_results\\bamstats.readstats.tsv.gz": "9e079206ad393c9dcaa1bfb602e3f25e2a295ee2c3982d108df7578397381996",
+        "wf-16s_BGRN-NCBI\\output\\alignment_tables\\B-GRN_NCBI-alignment-stats.tsv": "659d3b8e3d001e1dff98be5e4e601422330846dfcac479e2de421137f6827604"
+      }
+    }
+  ]
+}
