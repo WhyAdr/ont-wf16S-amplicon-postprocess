@@ -384,12 +384,21 @@ read_abundance_table <- function(path, tax_col = "tax", aggregate_cols = c("tota
     if (any(vals != floor(vals)) || any(vals > 9007199254740991)) {
       stop(sprintf("Column '%s' contains non-integer count values.", sc), call. = FALSE)
     }
+    sc_sum <- sum(vals)
+    if (sc_sum > 9007199254740991) {
+      stop(sprintf("Column '%s' sample total exceeds max safe integer (9007199254740991).", sc), call. = FALSE)
+    }
+  }
+
+  actual_row_sums <- rowSums(as.matrix(raw_df[, all_sample_cols, drop = FALSE]))
+  if (any(actual_row_sums > 9007199254740991)) {
+    stop("Abundance table row sum exceeds max safe integer (9007199254740991).", call. = FALSE)
   }
 
   # Validate aggregate columns (e.g. 'total') if present
   for (ac in aggregate_cols) {
     if (ac %in% all_cols) {
-      actual_sum <- rowSums(as.matrix(raw_df[, all_sample_cols, drop = FALSE]))
+      actual_sum <- actual_row_sums
       stated_total <- suppressWarnings(as.numeric(raw_df[[ac]]))
       if (anyNA(stated_total) || any(!is.finite(stated_total)) || any(stated_total < 0) ||
           any(stated_total != floor(stated_total)) || any(stated_total > 9007199254740991)) {
@@ -702,20 +711,20 @@ read_assignments_file <- function(path, sample_id, expected_total = NULL, expect
   # Reconcile against abundance expectations
   if (!is.null(expected_total) && n_total != expected_total) {
     stop(sprintf(
-      "Reconciliation error for sample '%s': assignment rows (%d) != abundance total reads (%d)",
-      sample_id, n_total, expected_total
+      "Reconciliation error for sample '%s': assignment rows (%.0f) != abundance total reads (%.0f)",
+      sample_id, as.numeric(n_total), as.numeric(expected_total)
     ), call. = FALSE)
   }
   if (!is.null(expected_classified) && n_eff_class != expected_classified) {
     stop(sprintf(
-      "Reconciliation error for sample '%s': effective classified reads (%d) != abundance classified reads (%d)",
-      sample_id, n_eff_class, expected_classified
+      "Reconciliation error for sample '%s': effective classified reads (%.0f) != abundance classified reads (%.0f)",
+      sample_id, as.numeric(n_eff_class), as.numeric(expected_classified)
     ), call. = FALSE)
   }
   if (!is.null(expected_unclassified) && n_eff_unclass != expected_unclassified) {
     stop(sprintf(
-      "Reconciliation error for sample '%s': effective unclassified reads (%d) != abundance unclassified reads (%d)",
-      sample_id, n_eff_unclass, expected_unclassified
+      "Reconciliation error for sample '%s': effective unclassified reads (%.0f) != abundance unclassified reads (%.0f)",
+      sample_id, as.numeric(n_eff_unclass), as.numeric(expected_unclassified)
     ), call. = FALSE)
   }
 

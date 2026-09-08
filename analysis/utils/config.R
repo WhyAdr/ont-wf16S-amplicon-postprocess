@@ -113,8 +113,21 @@ validate_config <- function(cfg) {
   if (!is.null(cfg$qc$target_max_length)) {
     assert_scalar_number(cfg$qc$target_max_length, "qc.target_max_length", lower = 1, integer = TRUE)
   }
+  if (!is.null(cfg$qc$target_min_length) && !is.null(cfg$qc$target_max_length) &&
+      cfg$qc$target_min_length >= cfg$qc$target_max_length) {
+    stop("'qc.target_min_length' must be smaller than 'qc.target_max_length'.", call. = FALSE)
+  }
   if (cfg$qc$display_min_length >= cfg$qc$display_max_length) {
     stop("'qc.display_min_length' must be smaller than 'qc.display_max_length'.", call. = FALSE)
+  }
+  if (!is.null(cfg$resource_budgets)) {
+    if (!is.list(cfg$resource_budgets)) stop("'resource_budgets' must be a mapping.", call. = FALSE)
+    for (key in c("max_distance_cells", "max_permutation_cells", "max_rarefaction_rows")) {
+      if (!is.null(cfg$resource_budgets[[key]])) {
+        assert_scalar_number(cfg$resource_budgets[[key]], paste0("resource_budgets.", key),
+                             lower = 1, integer = TRUE)
+      }
+    }
   }
   assert_scalar_number(cfg$alpha$rarefaction_points, "alpha.rarefaction_points", lower = 2, upper = 1000, integer = TRUE)
   assert_scalar_number(cfg$alpha$resample_depth, "alpha.resample_depth", lower = 1, upper = 9007199254740991, integer = TRUE)
@@ -256,6 +269,11 @@ get_default_config <- function() {
       minimum_count = 1L,
       group_prevalence = 0.5
     ),
+    resource_budgets = list(
+      max_distance_cells = 10000000L,
+      max_permutation_cells = 10000000L,
+      max_rarefaction_rows = 10000000L
+    ),
     taxonomy = list(
       cache = "output_AAy/taxonomy_cache.json",
       network_mode = "cache_only",
@@ -334,6 +352,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     overwrite = isTRUE(cli_opts$overwrite),
     allow_unlocked = isTRUE(cli_opts$allow_unlocked) || isTRUE(cli_opts[["allow-unlocked"]]),
     allow_dirty = isTRUE(cli_opts$allow_dirty) || isTRUE(cli_opts[["allow-dirty"]]),
+    allow_large_workload = isTRUE(cli_opts$allow_large_workload) || isTRUE(cli_opts[["allow-large-workload"]]),
     online_preflight = isTRUE(cli_opts$online_preflight) || isTRUE(cli_opts[["online-preflight"]]),
     refresh_taxonomy = cli_refresh,
     krona = isTRUE(cfg$krona$enabled),

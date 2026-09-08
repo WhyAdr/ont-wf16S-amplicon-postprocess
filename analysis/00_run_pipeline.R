@@ -30,20 +30,8 @@ main <- function() {
     stop(sprintf("[FATAL] %s: %s", label, conditionMessage(error)), call. = FALSE)
   }
 
-  if (!requireNamespace("renv", quietly = TRUE)) {
-    fatal("Environment activation", simpleError("E_RENV_ACTIVATION: package 'renv' is required."))
-  }
-  tryCatch(renv::activate(project = repo_root),
-           error = function(e) fatal("Environment activation", e))
-  project_library <- tryCatch(
-    normalizePath(renv::paths$library(project = repo_root), winslash = "/", mustWork = FALSE),
-    error = function(e) NA_character_
-  )
-  if (is.na(project_library) || !dir.exists(project_library)) {
-    fatal("Environment activation", simpleError(
-      sprintf("E_RENV_ACTIVATION: project library is unavailable: '%s'", project_library)))
-  }
-  .libPaths(unique(c(project_library, .libPaths())))
+  source(file.path(script_dir, "utils", "env_loader.R"))
+  load_pipeline_environment(repo_root = repo_root, fatal_fn = fatal)
 
   source(file.path(script_dir, "utils", "dependencies.R"))
   check_dependencies()
@@ -103,8 +91,8 @@ check_module_dependencies(requested_modules)
                            error = function(e) fatal("Preflight error", e))
 tryCatch(assert_inputs_unchanged(initial_inventory), error = function(e) fatal("Preflight error", e))
 context$input_inventory <- full_inventory
-tryCatch(run_module_preflight(context, requested_modules),
-         error = function(e) fatal("Module preflight error", e))
+preflight_warnings <- tryCatch(run_module_preflight(context, requested_modules),
+                              error = function(e) fatal("Module preflight error", e))
 tryCatch(assert_inputs_unchanged(full_inventory), error = function(e) fatal("Preflight error", e))
 
 if (isTRUE(cfg$cli$validate_only)) {
@@ -112,9 +100,15 @@ if (isTRUE(cfg$cli$validate_only)) {
     status = "validated", pipeline_version = pipeline_version, mode = context$mode,
     samples = unname(context$samples), requested_modules = unname(requested_modules),
     total_reads = sum(context$sample_stats$TotalReads), lock_status = lock_info$lock_status,
-    git_dirty = source_info$git_dirty, input_fingerprints = full_inventory
+    git_dirty = source_info$git_dirty, input_fingerprints = full_inventory,
+    warnings = json_array(preflight_warnings)
   )
   cat(jsonlite::toJSON(summary, pretty = TRUE, auto_unbox = TRUE, null = "null"), "\n")
+  if (length(preflight_warnings) > 0L) {
+    for (pw in preflight_warnings) {
+      cat(sprintf("[WARNING] PREFLIGHT: %s\n", pw), file = stderr())
+    }
+  }
   cat("Validation check PASSED. Zero filesystem mutations performed.\n")
   return(invisible(0L))
 }
@@ -187,16 +181,22 @@ module_results <- stats::setNames(lapply(names(module_registry), function(name) 
     module_snapshots <- c(module_snapshots, module_snapshot)
     cat(sprintf(">>> Executing module [%s]...\n", module_name))
   started <- Sys.time()
-  warnings <- character(0)
+  captured_warnings <- character(0)
   result <- tryCatch(withCallingHandlers(module_registry[[module_name]](context), warning = function(w) {
-    warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")
+    captured_warnings <<- c(captured_warnings, conditionMessage(w)); invokeRestart("muffleWarning")
   }), error = function(e) list(status = "failed", error = conditionMessage(e), outputs = character(0)))
   result <- tryCatch(validate_module_result(result, module_name, stage), error = function(e) {
     list(status = "failed", error = paste("Module result contract violation:", conditionMessage(e)),
          outputs = character(0))
   })
   injected_failure <- Sys.getenv("WF16S_INJECT_MODULE_FAILURE", unset = "")
-  if (identical(injected_failure, module_name)) {
+  test_mode <- Sys.getenv("WF16S_TEST_MODE", unset = "")
+  if (nzchar(injected_failure) && !identical(test_mode, "1")) {
+    fatal("Execution error", simpleError(
+      "WF16S_INJECT_MODULE_FAILURE is only permitted when WF16S_TEST_MODE=1."
+    ))
+  }
+  if (identical(test_mode, "1") && identical(injected_failure, module_name)) {
     # Test-only failure injection exercises rollback after a module has already
     # written files; it is intentionally not exposed as a public CLI option.
     result <- list(status = "failed", error = sprintf(
@@ -207,7 +207,15 @@ module_results <- stats::setNames(lapply(names(module_registry), function(name) 
   result$start_time <- utc_timestamp(started)
   result$end_time <- utc_timestamp(ended)
   result$duration_seconds <- as.numeric(difftime(ended, started, units = "secs"))
-  result$warnings <- unique(warnings)
+  returned_warnings <- result$warnings %||% character(0)
+  if (!is.character(returned_warnings) || anyNA(returned_warnings)) {
+    result$status <- "failed"
+    result$error <- "Module returned invalid warnings: must be a character vector with no NA values."
+    result$outputs <- character(0)
+    result$warnings <- captured_warnings
+  } else {
+    result$warnings <- unique(c(returned_warnings, captured_warnings))
+  }
   module_results[[module_name]] <- result
     input_check <- tryCatch({
       assert_inputs_unchanged(full_inventory,

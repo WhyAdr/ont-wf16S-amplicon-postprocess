@@ -55,6 +55,32 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
   minimum_count <- cfg$beta$minimum_count %||% 1L
   strata_col <- cfg$beta$strata_column
 
+  n_samples <- length(samples)
+  allow_large <- isTRUE(cfg$allow_large_workload) || isTRUE(cfg$cli$allow_large_workload)
+  budgets <- cfg$resource_budgets %||% list(
+    max_distance_cells = 1e6,
+    max_permutation_cells = 1e7,
+    max_rarefaction_cells = 5e7
+  )
+  if (!allow_large) {
+    if (as.numeric(n_samples) * as.numeric(n_samples) > as.numeric(budgets$max_distance_cells %||% 1e6)) {
+      stop(sprintf("E_RESOURCE_LIMIT_EXCEEDED: Distance matrix workload %d samples (%s cells) exceeds budget. Use --allow-large-workload to override.",
+                   n_samples, format(as.numeric(n_samples) * as.numeric(n_samples), scientific = FALSE)), call. = FALSE)
+    }
+    if (as.numeric(n_samples) * as.numeric(n_perm) > as.numeric(budgets$max_permutation_cells %||% 1e7)) {
+      stop(sprintf("E_RESOURCE_LIMIT_EXCEEDED: Permutation workload %d samples x %d permutations exceeds budget. Use --allow-large-workload to override.",
+                   n_samples, n_perm), call. = FALSE)
+    }
+    if (isTRUE(cfg$beta$resampling$enabled)) {
+      n_taxa <- nrow(otu_table)
+      resamp_iter <- cfg$beta$resampling$iterations %||% 0L
+      if (as.numeric(n_taxa) * as.numeric(resamp_iter) > as.numeric(budgets$max_rarefaction_cells %||% 5e7)) {
+        stop(sprintf("E_RESOURCE_LIMIT_EXCEEDED: Resampling workload %d taxa x %d iterations exceeds budget. Use --allow-large-workload to override.",
+                     n_taxa, resamp_iter), call. = FALSE)
+      }
+    }
+  }
+
   dist_list <- list()
 
   for (d_name in distances_cfg) {
@@ -263,6 +289,7 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
 
   permanova_file <- file.path(beta_dir, "permanova.tsv")
   betadisper_file <- file.path(beta_dir, "betadisper.tsv")
+  permutation_matrix <- NULL
 
   # Gating: At least 2 groups with at least 2 samples per group
   group_counts <- table(meta$Group)
@@ -304,6 +331,7 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
     perm_df$DesignStatus <- "admissible_label_changing"
     perm_df$Warnings <- paste(unique(warning_messages), collapse = " | ")
     perm_df <- perm_df[, c("Term", setdiff(colnames(perm_df), "Term"))]
+    beta_warnings <- unique(c(beta_warnings, warning_messages))
 
     write.table(perm_df, permanova_file, sep = "\t", row.names = FALSE, quote = FALSE)
     all_outputs <- c(all_outputs, permanova_file)
@@ -340,7 +368,7 @@ run_beta <- function(context, procrustes_fn = vegan::procrustes) {
       Seed = seed,
       RequestedPermutations = n_perm,
       StrataColumn = strata_col %||% NA_character_,
-      DesignStatus = if (exists("permutation_matrix") && !nrow(permutation_matrix)) "no_label_changing_permutation" else "prerequisites_not_met",
+      DesignStatus = if (!is.null(permutation_matrix) && is.matrix(permutation_matrix) && nrow(permutation_matrix) == 0L) "no_label_changing_permutation" else "prerequisites_not_met",
       Reason = sprintf(
         "PERMANOVA requires non-zero distances, residual degrees of freedom, and at least 2 groups with >= 2 samples each. Found: %s",
         paste(sprintf("%s (n=%d)", names(group_counts), as.integer(group_counts)), collapse = ", ")

@@ -82,6 +82,13 @@ get_cli_parser <- function() {
       default = FALSE,
       dest = "online_preflight",
       help = "Permit network credential/connectivity checks during taxonomy refresh preflight"
+    ),
+    optparse::make_option(
+      c("--allow-large-workload"),
+      action = "store_true",
+      default = FALSE,
+      dest = "allow_large_workload",
+      help = "Development only: allow analytical workloads that exceed default resource budgets"
     )
   )
 

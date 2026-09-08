@@ -483,8 +483,11 @@ def main():
                 if not email:
                     raise ValueError(f"Environment variable {args.email_env!r} is required for refresh mode.")
                 if args.validate_only and not args.online_preflight:
-                    print(f"[taxonomy] Preflight complete: {len(unresolved)} node(s) require online refresh.")
-                    return 0
+                    print(
+                        f"[taxonomy] ERROR: E_ONLINE_PREFLIGHT_REQUIRED: {len(unresolved)} node(s) require online refresh, but --online-preflight was not specified.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 api_key = os.environ.get(args.api_key_env, "").strip() or None
                 delay = 0.12 if api_key else 0.35
                 name_results = {}

@@ -19,28 +19,37 @@ script_dir <- if (length(file_arg)) {
 } else {
   normalizePath("analysis", winslash = "/", mustWork = TRUE)
 }
+source(file.path(script_dir, "utils", "env_loader.R"))
 source(file.path(script_dir, "utils", "dependencies.R"))
+repo_root <- find_pipeline_repo_root()
 include_modules <- any(c("--all", "--modules", "--faprotax") %in% args)
 REQUIRED_PACKAGES <- get_required_packages(include_tests = TRUE, include_modules = include_modules)
 
 if (do_restore) {
-  project_root <- normalizePath(dirname(script_dir), winslash = "/", mustWork = TRUE)
-  lockfile <- file.path(project_root, "renv.lock")
+  lockfile <- file.path(repo_root, "renv.lock")
   if (!file.exists(lockfile)) {
     stop(sprintf("Cannot restore locked environment: '%s' does not exist.", lockfile), call. = FALSE)
+  }
+  activate_script <- file.path(repo_root, "renv", "activate.R")
+  if (file.exists(activate_script)) {
+    source(activate_script, local = FALSE)
   }
   if (!requireNamespace("renv", quietly = TRUE)) {
     stop("Cannot restore locked environment: package 'renv' is unavailable.", call. = FALSE)
   }
-  renv::activate(project = project_root)
-  renv::restore(project = project_root, lockfile = lockfile, prompt = FALSE)
-  status <- renv::status(project = project_root, lockfile = lockfile)
+  renv::activate(project = repo_root)
+  renv::restore(project = repo_root, lockfile = lockfile, prompt = FALSE)
+  status <- renv::status(project = repo_root, lockfile = lockfile)
   if (!isTRUE(status$synchronized)) {
     stop("renv restore completed but the project remains out of sync.", call. = FALSE)
   }
   cat("Locked renv environment restored and synchronized.\n")
   quit(status = 0)
 }
+
+tryCatch(load_pipeline_environment(repo_root = repo_root, fatal_fn = function(lbl, err) {
+  cat(sprintf("[NOTE] %s: %s\n", lbl, conditionMessage(err)))
+}), error = function(e) NULL)
 
 installed <- rownames(installed.packages())
 missing_pkgs <- setdiff(REQUIRED_PACKAGES, installed)

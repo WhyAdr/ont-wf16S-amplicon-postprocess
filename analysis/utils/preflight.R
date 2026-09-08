@@ -111,6 +111,17 @@ read_lock_status <- function(repo_root, packages) {
   package_diff <- character(0)
   lock_packages <- sort(unique(c(names(lock$Packages %||% list()), packages)))
   package_locations <- vector("list", length(lock_packages))
+  base_pkgs <- c("base", "compiler", "datasets", "graphics", "grDevices", "grid",
+                 "methods", "parallel", "splines", "stats", "stats4", "tcltk",
+                 "tools", "utils")
+  norm_proj_lib <- if (!is.null(project_library)) normalizePath(project_library, winslash = "/", mustWork = FALSE) else NULL
+  library_diff <- character(0)
+  if (is.null(project_library) || !any(tolower(normalizePath(library_paths, winslash = "/", mustWork = FALSE)) ==
+                                       tolower(norm_proj_lib))) {
+    library_diff <- c(library_diff, sprintf("active .libPaths() does not include project library '%s'",
+                                            project_library %||% "<unknown>"))
+  }
+
   for (index in seq_along(lock_packages)) {
     package <- lock_packages[[index]]
     lock_record <- lock$Packages[[package]]
@@ -127,13 +138,16 @@ read_lock_status <- function(repo_root, packages) {
     if (!versions_match) {
       package_diff <- c(package_diff, sprintf("%s: expected %s, found %s", package, expected, actual))
     }
+    if (!package %in% base_pkgs && !is.null(location) && !is.null(norm_proj_lib)) {
+      norm_loc <- normalizePath(location, winslash = "/", mustWork = FALSE)
+      in_proj_lib <- startsWith(tolower(norm_loc), paste0(tolower(norm_proj_lib), "/")) ||
+                     tolower(norm_loc) == tolower(norm_proj_lib)
+      if (!in_proj_lib) {
+        library_diff <- c(library_diff, sprintf("%s: package loaded from outside project library: '%s'",
+                                                package, location))
+      }
+    }
     package_locations[[index]] <- list(package = package, version = actual, path = location)
-  }
-  library_diff <- character(0)
-  if (is.null(project_library) || !any(tolower(normalizePath(library_paths, winslash = "/", mustWork = FALSE)) ==
-                                       tolower(project_library))) {
-    library_diff <- sprintf("active .libPaths() does not include project library '%s'",
-                            project_library %||% "<unknown>")
   }
   synchronized <- length(r_diff) == 0L && length(package_diff) == 0L && length(library_diff) == 0L
   list(
@@ -153,15 +167,17 @@ read_lock_status <- function(repo_root, packages) {
 }
 
 source_file_allowed <- function(path) {
-  basename(path) %in% c("VERSION", "renv.lock") |
+  basename(path) %in% c("VERSION", "renv.lock", ".Rprofile", "activate.R", "settings.json") |
     grepl("[.](R|r|py|json|ya?ml)$", path, perl = TRUE)
 }
 
 maintained_source_files <- function(repo_root) {
   root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  git_scoped_paths <- c("analysis", "config.example.yml", "VERSION", "renv.lock",
+                        ".Rprofile", "renv/activate.R", "renv/settings.json")
   tracked <- tryCatch({
     result <- processx::run("git", c("-c", paste0("safe.directory=", root), "-C", root,
-      "ls-files", "--", "analysis", "config.example.yml", "VERSION", "renv.lock"),
+      "ls-files", "--", git_scoped_paths),
       error_on_status = FALSE)
     if (result$status != 0L) character(0) else {
       relative <- strsplit(trimws(result$stdout), "\\r?\\n", perl = TRUE)[[1]]
@@ -170,7 +186,8 @@ maintained_source_files <- function(repo_root) {
   }, error = function(e) character(0))
   candidates <- if (length(tracked)) tracked else c(
     list.files(file.path(root, "analysis"), recursive = TRUE, full.names = TRUE),
-    file.path(root, c("config.example.yml", "VERSION", "renv.lock"))
+    file.path(root, c("config.example.yml", "VERSION", "renv.lock",
+                      ".Rprofile", "renv/activate.R", "renv/settings.json"))
   )
   candidates <- candidates[file.exists(candidates) & !dir.exists(candidates) & source_file_allowed(candidates)]
   sort(normalizePath(candidates, winslash = "/", mustWork = TRUE))
@@ -184,14 +201,16 @@ source_provenance <- function(repo_root) {
   git_commit <- NULL
   git_dirty <- NULL
   try({
+    git_scoped_paths <- c("analysis", "config.example.yml", "VERSION", "renv.lock",
+                          ".Rprofile", "renv/activate.R", "renv/settings.json")
     commit <- processx::run("git", c("-c", paste0("safe.directory=", repo_root), "-C", repo_root,
       "rev-parse", "HEAD"), error_on_status = FALSE)
     if (commit$status == 0L) git_commit <- trimws(commit$stdout)
     dirty <- processx::run("git", c("-c", paste0("safe.directory=", repo_root), "-C", repo_root,
-      "diff", "--quiet", "--", "analysis", "config.example.yml", "VERSION", "renv.lock"),
+      "diff", "--quiet", "--", git_scoped_paths),
       error_on_status = FALSE)
     status <- processx::run("git", c("-c", paste0("safe.directory=", repo_root), "-C", repo_root,
-      "status", "--porcelain", "--untracked-files=all", "--", "analysis", "config.example.yml", "VERSION", "renv.lock"),
+      "status", "--porcelain", "--untracked-files=all", "--", git_scoped_paths),
       error_on_status = FALSE)
     git_dirty <- !identical(dirty$status, 0L) || nzchar(trimws(status$stdout))
   }, silent = TRUE)
@@ -231,6 +250,7 @@ validate_output_root <- function(cfg, repo_root, extra_paths = character(0)) {
 
 run_module_preflight <- function(context, modules) {
   cfg <- context$config
+  warnings <- character(0)
   if ("qc" %in% modules) {
     for (sample_id in names(context$assignment_data)) {
       bamstats <- context$bamstats[[sample_id]]
@@ -244,7 +264,7 @@ run_module_preflight <- function(context, modules) {
   if ("kreport" %in% modules) {
     python <- tryCatch(find_python(), error = function(e) preflight_error("E_KREPORT_PREFLIGHT", e$message))
     script <- file.path(cfg$pipeline_root, "analysis", "utils", "ncbi_taxonomy.py")
-    compile <- processx::run(python, c("-m", "py_compile", script), error_on_status = FALSE)
+    compile <- processx::run(python, c("-c", "import ast, sys; p = sys.argv[1]; ast.parse(open(p, 'rb').read(), filename=p)", script), error_on_status = FALSE)
     if (compile$status != 0L) preflight_error("E_KREPORT_PREFLIGHT", trimws(compile$stderr))
     args <- c(script, "--validate-only", "--abundance", cfg$input$abundance_table,
       "--tax-column", cfg$input$tax_column, "--cache", cfg$taxonomy$cache,
@@ -265,11 +285,21 @@ run_module_preflight <- function(context, modules) {
       args <- c(args, as.vector(rbind("--expected-input", expected_specs)))
     }
     probe <- processx::run(python, args, error_on_status = FALSE)
-    if (probe$status != 0L) preflight_error("E_KREPORT_PREFLIGHT", trimws(paste(probe$stderr, probe$stdout)))
+    if (probe$status != 0L) {
+      err_text <- trimws(paste(probe$stderr, probe$stdout))
+      code <- if (grepl("E_ONLINE_PREFLIGHT_REQUIRED", err_text)) "E_ONLINE_PREFLIGHT_REQUIRED" else "E_KREPORT_PREFLIGHT"
+      preflight_error(code, err_text)
+    }
   }
-  if (isTRUE(cfg$krona$enabled) && isTRUE(cfg$krona$render_html) &&
-      is.na(find_krona_executable(cfg$krona$executable))) {
-    preflight_error("E_KRONA_PREFLIGHT", sprintf("Krona executable '%s' was not found", cfg$krona$executable))
+  if (isTRUE(cfg$krona$enabled) && isTRUE(cfg$krona$render_html)) {
+    krona_exe <- cfg$krona$executable %||% "ktImportText"
+    if (nzchar(krona_exe) && dir.exists(krona_exe)) {
+      preflight_error("E_KRONA_PREFLIGHT", sprintf("Krona executable '%s' is a directory, not a file.", krona_exe))
+    }
+    resolved_krona <- find_krona_executable(krona_exe)
+    if (is.na(resolved_krona)) {
+      warnings <- c(warnings, sprintf("Krona executable '%s' was not found; Krona HTML rendering will be skipped (TSV-only).", krona_exe))
+    }
   }
-  invisible(TRUE)
+  invisible(warnings)
 }
