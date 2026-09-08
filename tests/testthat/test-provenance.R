@@ -8,6 +8,31 @@ source(file.path("..", "..", "analysis", "utils", "io.R"))
 source(file.path("..", "..", "analysis", "utils", "dependencies.R"))
 source(file.path("..", "..", "analysis", "utils", "preflight.R"))
 
+test_that("provenance path identity preserves Unix case distinctions", {
+  expect_false(preflight_paths_are_same("/cache/pkg", "/cache/Pkg", os_type = "unix"))
+  expect_true(preflight_paths_are_same("C:/cache/pkg", "C:/cache/Pkg", os_type = "windows"))
+  expect_false(preflight_path_is_same_or_descendant("/cache/Pkg", "/cache/pkg", os_type = "unix"))
+  expect_true(preflight_path_is_same_or_descendant("C:/cache/Pkg", "C:/cache/pkg", os_type = "windows"))
+})
+
+test_that("renv-cache locations must resolve from the matching project entry", {
+  cache <- "/renv/cache"
+  project <- "/project/renv/library"
+  loaded <- "/renv/cache/yaml/2.3.12/hash/yaml"
+  expect_true(package_location_is_project_bound(
+    loaded, project, cache, resolved_project_entry = loaded, os_type = "unix"
+  ))
+  expect_false(package_location_is_project_bound(
+    loaded, project, cache,
+    resolved_project_entry = "/renv/cache/yaml/2.3.11/other/yaml",
+    os_type = "unix"
+  ))
+  expect_false(package_location_is_project_bound(
+    "/external/yaml", project, cache,
+    resolved_project_entry = "/external/yaml", os_type = "unix"
+  ))
+})
+
 test_that("source digest ignores generated Python bytecode", {
   repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
   pycache <- file.path(repo_root, "analysis", "utils", "__pycache__")

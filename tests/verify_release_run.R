@@ -295,11 +295,16 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
              unexpected_warnings)
     ]
   }
-  if (as.integer(manifest$taxonomy$conflicts_count %||% 0L) > 0L) {
-    unexpected_warnings <- unexpected_warnings[
-      !grepl("lineage-to-TaxID conflict[(]s[)] used the documented modal-count/minimum-TaxID tie-break",
-             unexpected_warnings)
-    ]
+  conflict_count <- as.integer(manifest$taxonomy$conflicts_count %||% 0L)
+  expected_conflict_warning <- sprintf(
+    "%d lineage-to-TaxID conflict(s) used the documented modal-count/minimum-TaxID tie-break; review taxonomy_conflicts.tsv.",
+    conflict_count
+  )
+  if (conflict_count > 0L) {
+    if (sum(unexpected_warnings == expected_conflict_warning) != 1L) {
+      stop("Expected exactly one canonical taxonomy-conflict run warning.")
+    }
+    unexpected_warnings <- unexpected_warnings[unexpected_warnings != expected_conflict_warning]
   }
   if (length(unexpected_warnings) > 0L) {
     stop("Unexpected run warning(s): ", paste(unexpected_warnings, collapse = "; "))
@@ -312,11 +317,11 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
                module_warnings)
       ]
     }
-    if (identical(mod, "kreport") && as.integer(manifest$taxonomy$conflicts_count %||% 0L) > 0L) {
-      module_warnings <- module_warnings[
-        !grepl("lineage-to-TaxID conflict[(]s[)] used the documented modal-count/minimum-TaxID tie-break",
-               module_warnings)
-      ]
+    if (identical(mod, "kreport") && conflict_count > 0L) {
+      if (sum(module_warnings == expected_conflict_warning) != 1L) {
+        stop("Expected exactly one canonical taxonomy-conflict kreport warning.")
+      }
+      module_warnings <- module_warnings[module_warnings != expected_conflict_warning]
     }
     if (length(module_warnings) > 0L) {
       stop(sprintf("Unexpected module warning(s) in '%s': %s", mod, paste(module_warnings, collapse = "; ")))
@@ -326,8 +331,10 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   stopifnot(identical(as.integer(manifest$taxonomy$conflicts_count), 26L))
 
   source_counts <- unlist(manifest$taxonomy$resolution_source_counts)
-  stopifnot(all(c("source_cache", "assignment", "ncbi_refresh", "unresolved") %in%
-                  names(source_counts)))
+  expected_source_count_names <- c(
+    "source_cache", "assignment", "assignment_conflict", "ncbi_refresh", "unresolved"
+  )
+  stopifnot(all(expected_source_count_names %in% names(source_counts)))
   stopifnot(as.integer(source_counts[["unresolved"]]) == 46L)
 
   required <- c(
@@ -367,6 +374,24 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   stopifnot(identical(
     sort(unique(resolution$ResolutionSource)),
     sort(expected_sources)
+  ))
+  conflict_resolution <- resolution[resolution$ResolutionSource == "assignment_conflict", , drop = FALSE]
+  to_assignment_lineage <- function(path) {
+    ranks <- strsplit(path, ";", fixed = TRUE)[[1]]
+    if (length(ranks) == 8L) ranks <- ranks[-2L]
+    paste(ranks, collapse = "|")
+  }
+  used_conflict_lineages <- vapply(
+    conflict_resolution$TaxonPath, to_assignment_lineage, character(1)
+  )
+  winner_index <- match(used_conflict_lineages, conflicts$Lineage)
+  stopifnot(nrow(conflict_resolution) == as.integer(source_counts[["assignment_conflict"]]))
+  stopifnot(!anyDuplicated(conflict_resolution$TaxonPath))
+  stopifnot(!anyNA(winner_index))
+  stopifnot(all(conflict_resolution$Status == "Conflicted"))
+  stopifnot(identical(
+    as.character(conflict_resolution$TaxID),
+    as.character(conflicts$WinnerTaxID[winner_index])
   ))
 
   stopifnot(identical(accounting$SampleID, "AmbarAyunda_minimap2_16S"))

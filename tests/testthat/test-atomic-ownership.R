@@ -198,6 +198,15 @@ test_that("acquire_output_lock enforces exclusivity with E_OUTPUT_BUSY", {
   release_output_lock(l2)
 })
 
+test_that("filesystem identity folds case only on Windows", {
+  upper <- "C:/case-sensitive/Output"
+  lower <- "C:/case-sensitive/output"
+  expect_false(paths_are_same(upper, lower, os_type = "unix"))
+  expect_true(paths_are_same(upper, lower, os_type = "windows"))
+  expect_false(path_is_descendant("/tmp/Stage/file.tsv", "/tmp/stage", os_type = "unix"))
+  expect_true(path_is_descendant("C:/tmp/Stage/file.tsv", "C:/tmp/stage", os_type = "windows"))
+})
+
 test_that("taxonomy journal recovery is content-addressed and fail-closed", {
   root <- tempfile("taxonomy_txn_")
   dir.create(root)

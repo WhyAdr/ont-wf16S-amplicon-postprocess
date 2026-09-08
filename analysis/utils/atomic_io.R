@@ -182,14 +182,14 @@ validate_prior_output <- function(final_root, overwrite) {
     stop(sprintf("E_OUTPUT_UNOWNED: non-empty output directory lacks a valid prior manifest: '%s'", final_root), call. = FALSE)
   }
   prior <- tryCatch(jsonlite::fromJSON(manifest_path, simplifyVector = FALSE), error = function(e) NULL)
-  root <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
+  root <- canonicalize_root_path(final_root)
   prior_root <- if (!is.null(prior$output_root)) {
-    normalizePath(as.character(prior$output_root), winslash = "/", mustWork = FALSE)
+    canonicalize_root_path(as.character(prior$output_root))
   } else {
     NA_character_
   }
   if (is.null(prior) || !identical(prior$pipeline, "ont-wf16s-postprocess") ||
-      is.na(prior_root) || !identical(tolower(prior_root), tolower(root))) {
+      is.na(prior_root) || !paths_are_same(prior_root, root)) {
     stop(sprintf("E_OUTPUT_UNOWNED: prior manifest does not prove ownership of '%s'", final_root), call. = FALSE)
   }
   if (!prior$run_status %in% c("completed", "failed")) {
@@ -197,9 +197,7 @@ validate_prior_output <- function(final_root, overwrite) {
   }
 
   path_is_within <- function(path) {
-    normalized <- normalizePath(path, winslash = "/", mustWork = FALSE)
-    identical(tolower(normalized), tolower(root)) ||
-      startsWith(tolower(normalized), paste0(tolower(root), "/"))
+    path_is_same_or_descendant(path, root)
   }
   relative_owned_path <- function(path) {
     candidate <- if (is_absolute_path(path)) path else file.path(root, path)
@@ -207,7 +205,7 @@ validate_prior_output <- function(final_root, overwrite) {
       stop(sprintf("E_OUTPUT_UNOWNED: prior manifest declares path outside output root: '%s'", path),
            call. = FALSE)
     }
-    normalized <- normalizePath(candidate, winslash = "/", mustWork = FALSE)
+    normalized <- canonicalize_root_path(candidate)
     substring(normalized, nchar(root) + 2L)
   }
   prior_files <- list.files(final_root, recursive = TRUE, all.files = TRUE, no.. = TRUE,
@@ -282,11 +280,11 @@ prepare_module_staging <- function(stage, module_name) {
 }
 
 publish_module_staging <- function(module_stage, run_stage, declared_outputs) {
-  norm_mod <- normalizePath(module_stage, winslash = "/", mustWork = FALSE)
-  norm_stage <- normalizePath(run_stage, winslash = "/", mustWork = FALSE)
+  norm_mod <- canonicalize_root_path(module_stage)
+  norm_stage <- canonicalize_root_path(run_stage)
   move_plan <- lapply(declared_outputs, function(src_path) {
-    norm_src <- normalizePath(src_path, winslash = "/", mustWork = FALSE)
-    if (!startsWith(tolower(norm_src), paste0(tolower(norm_mod), "/"))) {
+    norm_src <- canonicalize_root_path(src_path)
+    if (!path_is_descendant(norm_src, norm_mod)) {
       stop(sprintf("Declared module output '%s' is not within module stage '%s'.", src_path, module_stage),
            call. = FALSE)
     }
@@ -372,10 +370,29 @@ canonicalize_root_path <- function(path) {
   }
 }
 
+path_identity_key <- function(path, os_type = .Platform$OS.type) {
+  if (identical(os_type, "windows")) tolower(path) else path
+}
+
+paths_are_same <- function(left, right, os_type = .Platform$OS.type) {
+  identical(path_identity_key(left, os_type), path_identity_key(right, os_type))
+}
+
+path_is_descendant <- function(path, root, os_type = .Platform$OS.type) {
+  path_key <- path_identity_key(canonicalize_root_path(path), os_type)
+  root_key <- path_identity_key(canonicalize_root_path(root), os_type)
+  startsWith(path_key, paste0(root_key, "/"))
+}
+
+path_is_same_or_descendant <- function(path, root, os_type = .Platform$OS.type) {
+  paths_are_same(canonicalize_root_path(path), canonicalize_root_path(root), os_type) ||
+    path_is_descendant(path, root, os_type)
+}
+
 get_output_lock_path <- function(final_root) {
   canonical <- canonicalize_root_path(final_root)
   parent <- dirname(canonical)
-  root_hash <- digest::digest(tolower(canonical), algo = "sha256")
+  root_hash <- digest::digest(path_identity_key(canonical), algo = "sha256")
   file.path(parent, sprintf(".%s.wf16s_output.lock", root_hash))
 }
 
@@ -383,7 +400,7 @@ get_output_lock_path <- function(final_root) {
 
 acquire_output_lock <- function(final_root, timeout_ms = 10000) {
   lock_path <- get_output_lock_path(final_root)
-  norm_lock_path <- tolower(canonicalize_root_path(lock_path))
+  norm_lock_path <- path_identity_key(canonicalize_root_path(lock_path))
   if (exists(norm_lock_path, envir = .wf16s_active_output_locks, inherits = FALSE)) {
     stop(sprintf("E_OUTPUT_BUSY: output directory '%s' is locked by another process (lock '%s').",
                  final_root, lock_path), call. = FALSE)
@@ -420,7 +437,7 @@ get_taxonomy_lock_path <- function(cache_path) {
 
 acquire_taxonomy_lock <- function(cache_path, timeout_ms = 10000) {
   lock_path <- get_taxonomy_lock_path(cache_path)
-  norm_lock_path <- tolower(canonicalize_root_path(lock_path))
+  norm_lock_path <- path_identity_key(canonicalize_root_path(lock_path))
   if (exists(norm_lock_path, envir = .wf16s_active_taxonomy_locks, inherits = FALSE)) {
     stop(sprintf("E_TAXONOMY_CACHE_BUSY: taxonomy cache '%s' is already locked in this process.",
                  cache_path), call. = FALSE)
@@ -500,8 +517,8 @@ recover_taxonomy_journal <- function(cache_path) {
   recorded_cache <- normalizePath(as.character(journal$cache_path), winslash = "/",
                                   mustWork = FALSE)
   backup <- normalizePath(as.character(journal$backup), winslash = "/", mustWork = FALSE)
-  if (!identical(tolower(canonical_cache), tolower(recorded_cache)) ||
-      !identical(tolower(dirname(canonical_cache)), tolower(dirname(backup))) ||
+  if (!paths_are_same(canonical_cache, recorded_cache) ||
+      !paths_are_same(dirname(canonical_cache), dirname(backup)) ||
       !grepl("^[0-9a-f]{64}$", journal$original_sha256) ||
       !grepl("^[0-9a-f]{64}$", journal$candidate_sha256 %||% "")) {
     stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: invalid taxonomy journal at '%s'.",
@@ -558,16 +575,16 @@ recover_taxonomy_journal <- function(cache_path) {
 }
 
 get_output_journal_path <- function(final_root) {
-  canonical <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
+  canonical <- canonicalize_root_path(final_root)
   parent <- dirname(canonical)
-  root_hash <- digest::digest(canonical, algo = "sha256")
+  root_hash <- digest::digest(path_identity_key(canonical), algo = "sha256")
   file.path(parent, sprintf(".%s.wf16s_journal.json", root_hash))
 }
 
 write_publication_journal <- function(final_root, stage = NULL, backup = NULL, phase = "prepared") {
   journal_path <- get_output_journal_path(final_root)
   payload <- list(
-    final_root = normalizePath(final_root, winslash = "/", mustWork = FALSE),
+    final_root = canonicalize_root_path(final_root),
     stage = if (!is.null(stage)) normalizePath(stage, winslash = "/", mustWork = FALSE) else NULL,
     backup = if (!is.null(backup)) normalizePath(backup, winslash = "/", mustWork = FALSE) else NULL,
     phase = phase,
@@ -632,9 +649,9 @@ recover_publication_journal <- function(final_root) {
          call. = FALSE)
   }
 
-  canonical_final <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
-  journal_final <- normalizePath(as.character(journal$final_root), winslash = "/", mustWork = FALSE)
-  if (!identical(tolower(canonical_final), tolower(journal_final))) {
+  canonical_final <- canonicalize_root_path(final_root)
+  journal_final <- canonicalize_root_path(as.character(journal$final_root))
+  if (!paths_are_same(canonical_final, journal_final)) {
     return(invisible(FALSE))
   }
 

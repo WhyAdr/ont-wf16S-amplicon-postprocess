@@ -10,6 +10,34 @@ utc_timestamp <- function(value) {
   format(as.POSIXct(value, tz = "UTC"), "%Y-%m-%dT%H:%M:%OS6Z", tz = "UTC")
 }
 
+preflight_path_key <- function(path, os_type = .Platform$OS.type) {
+  normalized <- gsub("\\\\", "/", path)
+  if (identical(os_type, "windows")) tolower(normalized) else normalized
+}
+
+preflight_paths_are_same <- function(left, right, os_type = .Platform$OS.type) {
+  identical(preflight_path_key(left, os_type), preflight_path_key(right, os_type))
+}
+
+preflight_path_is_same_or_descendant <- function(path, root, os_type = .Platform$OS.type) {
+  path_key <- preflight_path_key(path, os_type)
+  root_key <- preflight_path_key(root, os_type)
+  identical(path_key, root_key) || startsWith(path_key, paste0(root_key, "/"))
+}
+
+package_location_is_project_bound <- function(location, project_library, renv_cache = NULL,
+                                               resolved_project_entry = NULL,
+                                               os_type = .Platform$OS.type) {
+  in_project_tree <- preflight_path_is_same_or_descendant(
+    location, project_library, os_type
+  )
+  via_project_cache_entry <- !is.null(renv_cache) &&
+    preflight_path_is_same_or_descendant(location, renv_cache, os_type) &&
+    !is.null(resolved_project_entry) &&
+    preflight_paths_are_same(location, resolved_project_entry, os_type)
+  in_project_tree || via_project_cache_entry
+}
+
 canonical_existing_path <- function(path, label) {
   if (is.null(path) || length(path) != 1L || is.na(path) || !file.exists(path) || dir.exists(path)) {
     preflight_error("E_INPUT_MISSING", sprintf("%s is not an existing regular file: '%s'", label, path))
@@ -128,8 +156,10 @@ read_lock_status <- function(repo_root, packages) {
   renv_cache <- tryCatch(renv::paths$cache(), error = function(e) NULL)
   norm_cache <- if (!is.null(renv_cache)) normalizePath(renv_cache, winslash = "/", mustWork = FALSE) else NULL
   library_diff <- character(0)
-  if (is.null(project_library) || !any(tolower(normalizePath(library_paths, winslash = "/", mustWork = FALSE)) ==
-                                       tolower(norm_proj_lib))) {
+  if (is.null(project_library) || !any(vapply(
+    normalizePath(library_paths, winslash = "/", mustWork = FALSE),
+    preflight_paths_are_same, logical(1), right = norm_proj_lib
+  ))) {
     library_diff <- c(library_diff, sprintf("active .libPaths() does not include project library '%s'",
                                             project_library %||% "<unknown>"))
   }
@@ -153,17 +183,16 @@ read_lock_status <- function(repo_root, packages) {
     is_base <- package %in% base_pkgs || identical(lock_record$Priority, "recommended") || identical(lock_record$Priority, "base")
     if (!is_base && !is.null(location) && !is.null(norm_proj_lib)) {
       norm_loc <- normalizePath(location, winslash = "/", mustWork = FALSE)
-      raw_loc <- gsub("\\\\", "/", location)
-      raw_proj_lib <- gsub("\\\\", "/", project_library)
-      in_proj_dir <- startsWith(tolower(norm_loc), paste0(tolower(norm_proj_lib), "/")) ||
-                     tolower(norm_loc) == tolower(norm_proj_lib) ||
-                     startsWith(tolower(raw_loc), paste0(tolower(raw_proj_lib), "/")) ||
-                     tolower(raw_loc) == tolower(raw_proj_lib)
-      in_renv_cache <- !is.null(norm_cache) && (
-        startsWith(tolower(norm_loc), paste0(tolower(norm_cache), "/")) ||
-        tolower(norm_loc) == tolower(norm_cache)
-      ) && file.exists(file.path(project_library, package))
-      if (!in_proj_dir && !in_renv_cache) {
+      project_entry <- file.path(project_library, package)
+      resolved_project_entry <- if (dir.exists(project_entry)) {
+        normalizePath(project_entry, winslash = "/", mustWork = TRUE)
+      } else {
+        NULL
+      }
+      location_is_bound <- package_location_is_project_bound(
+        norm_loc, norm_proj_lib, norm_cache, resolved_project_entry
+      )
+      if (!location_is_bound) {
         library_diff <- c(library_diff, sprintf("%s: package loaded from outside project library: '%s'",
                                                 package, location))
       }

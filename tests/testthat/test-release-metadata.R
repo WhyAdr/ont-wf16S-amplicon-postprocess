@@ -23,14 +23,17 @@ test_that("Current release metadata agrees with VERSION", {
     readme, gregexpr("Version [0-9]+[.][0-9]+[.][0-9]+", readme, perl = TRUE)
   ))
   readme_versions <- sub("^Version ", "", readme_mentions)
-  changelog_version <- sub("^## \\[([^]]+)\\].*$", "\\1",
-                           grep("^## \\[", changelog, value = TRUE)[1])
+  changelog_versions <- sub("^## \\[([^]]+)\\].*$", "\\1",
+                            grep("^## \\[", changelog, value = TRUE))
+  release_versions <- changelog_versions[changelog_versions != "Unreleased"]
 
   expect_identical(citation_version, version)
   expect_identical(readme_header_version, version)
   expect_length(readme_versions, 4L)
   expect_true(all(readme_versions == version))
-  expect_identical(changelog_version, version)
+  expect_true(changelog_versions[1] %in% c("Unreleased", version))
+  expect_lte(sum(changelog_versions == "Unreleased"), 1L)
+  expect_identical(release_versions[1], version)
 })
 
 test_that("renv lock records the complete declared R environment", {

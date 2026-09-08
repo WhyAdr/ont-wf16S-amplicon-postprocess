@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Preserve case-sensitive filesystem identity for locks and transaction journals on Unix while retaining Windows alias canonicalization.
+- Require a loaded renv-cache package to resolve from the matching project-library entry before treating the environment as synchronized.
+- Bind expected conflict warnings and every conflicted resolution row to the exact release fixture provenance.
+
 ## [0.4.3] - 2026-09-08
 
 ### Fixed

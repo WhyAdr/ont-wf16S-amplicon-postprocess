@@ -429,7 +429,12 @@ test_that("Real Ambar Ayunda fixture satisfies all Section 2.2 invariants", {
   # and values, so the streamed reader remains equivalent for the fixture.
   digest_path <- tempfile("assignments_typed_", fileext = ".rds")
   saveRDS(reads, digest_path, version = 2)
-  expect_true(unname(tools::md5sum(digest_path)) %in% c("5f3b6f3227754fd0a739e2c5b4626caa", "58a09628ccfbcb106b352ab247c08613"))
+  expected_digest <- if (.Platform$OS.type == "windows") {
+    "5f3b6f3227754fd0a739e2c5b4626caa"
+  } else {
+    "58a09628ccfbcb106b352ab247c08613"
+  }
+  expect_identical(unname(tools::md5sum(digest_path)), expected_digest)
 })
 
 test_that("Metadata validation aligns samples and detects discrepancies", {
