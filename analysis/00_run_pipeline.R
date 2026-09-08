@@ -114,41 +114,88 @@ if (isTRUE(cfg$cli$validate_only)) {
 }
 
 final_root <- normalizePath(cfg$output$base_dir, winslash = "/", mustWork = FALSE)
+
+# Acquire exclusive output lock before reading/staging prior output
+output_lock <- tryCatch(acquire_output_lock(final_root),
+                        error = function(e) fatal("Output lock error", e))
+on.exit({
+  release_output_lock(output_lock)
+}, add = TRUE)
+
+# Recover publication journal if a previous run crashed mid-publication
+tryCatch(recover_publication_journal(final_root),
+         error = function(e) fatal("Output recovery error", e))
+
 prior_manifest <- tryCatch(validate_prior_output(final_root, cfg$cli$overwrite),
                            error = function(e) fatal("Output validation error", e))
 
 taxonomy_cache_path <- cfg$taxonomy$cache
-taxonomy_cache_original <- if (identical(cfg$taxonomy$network_mode, "refresh")) {
-  readBin(taxonomy_cache_path, "raw", n = file.info(taxonomy_cache_path)$size)
-} else {
-  NULL
+taxonomy_cache_state <- "unchanged" # "unchanged", "candidate_committed", "restored"
+taxonomy_cache_backup_file <- NULL
+taxonomy_cache_original_sha256 <- full_inventory$taxonomy_cache$sha256
+taxonomy_cache_original_size <- full_inventory$taxonomy_cache$size_bytes
+
+if (identical(cfg$taxonomy$network_mode, "refresh") && !is.null(taxonomy_cache_path) && file.exists(taxonomy_cache_path)) {
+  taxonomy_cache_backup_file <- tempfile(pattern = "wf16s_tax_backup_")
+  if (!file.copy(taxonomy_cache_path, taxonomy_cache_backup_file, overwrite = TRUE)) {
+    fatal("Taxonomy backup error", simpleError(sprintf("Could not create backup of '%s'.", taxonomy_cache_path)))
+  }
 }
-taxonomy_cache_committed <- !identical(cfg$taxonomy$network_mode, "refresh")
-  restore_taxonomy_cache <- function() {
-  if (!identical(cfg$taxonomy$network_mode, "refresh") || is.null(taxonomy_cache_original)) return(invisible(TRUE))
-  atomic_replace(taxonomy_cache_path, function(temp) writeBin(taxonomy_cache_original, temp))
-    invisible(TRUE)
+
+restore_taxonomy_cache <- function() {
+  if (!identical(cfg$taxonomy$network_mode, "refresh") || is.null(taxonomy_cache_backup_file) || !file.exists(taxonomy_cache_backup_file)) {
+    return(invisible(TRUE))
   }
-  taxonomy_cache_expected_hash <- function() {
-    if (!identical(cfg$taxonomy$network_mode, "refresh")) return(NULL)
-    provenance_path <- file.path(stage, "07_Kreport", "taxonomy_provenance.json")
-    if (!file.exists(provenance_path)) return(full_inventory$taxonomy_cache$sha256)
-    provenance <- tryCatch(jsonlite::fromJSON(provenance_path, simplifyVector = FALSE),
-                           error = function(e) list())
-    provenance$source_cache_sha256_committed %||% full_inventory$taxonomy_cache$sha256
+  if (file.exists(taxonomy_cache_path)) {
+    cur_info <- file.info(taxonomy_cache_path)
+    if (identical(as.numeric(cur_info$size), as.numeric(taxonomy_cache_original_size))) {
+      cur_hash <- compute_file_hash(taxonomy_cache_path)
+      if (identical(cur_hash, taxonomy_cache_original_sha256)) {
+        taxonomy_cache_state <<- "restored"
+        return(invisible(TRUE))
+      }
+    }
   }
+  atomic_replace(taxonomy_cache_path, function(temp) {
+    if (!file.copy(taxonomy_cache_backup_file, temp, overwrite = TRUE)) {
+      stop(sprintf("Failed to copy taxonomy backup from '%s'.", taxonomy_cache_backup_file), call. = FALSE)
+    }
+  })
+  restored_hash <- compute_file_hash(taxonomy_cache_path)
+  if (!identical(restored_hash, taxonomy_cache_original_sha256)) {
+    stop("Taxonomy cache restoration failed SHA-256 verification.", call. = FALSE)
+  }
+  taxonomy_cache_state <<- "restored"
+  invisible(TRUE)
+}
+
+taxonomy_cache_expected_hash <- function() {
+  if (!identical(cfg$taxonomy$network_mode, "refresh")) return(NULL)
+  provenance_path <- file.path(stage, "07_Kreport", "taxonomy_provenance.json")
+  if (!file.exists(provenance_path)) return(full_inventory$taxonomy_cache$sha256)
+  provenance <- tryCatch(jsonlite::fromJSON(provenance_path, simplifyVector = FALSE),
+                         error = function(e) list())
+  provenance$source_cache_sha256_committed %||% full_inventory$taxonomy_cache$sha256
+}
 
 stage <- prepare_run_staging(final_root)
 stage_active <- TRUE
+current_module_stage <- NULL
 on.exit({
-  if (!taxonomy_cache_committed) restore_taxonomy_cache()
-  if (exists("module_snapshots", inherits = FALSE) && length(module_snapshots)) {
-    unlink(module_snapshots, recursive = TRUE, force = TRUE)
+  if (identical(taxonomy_cache_state, "candidate_committed")) {
+    tryCatch(restore_taxonomy_cache(), error = function(e) NULL)
+  }
+  if (!is.null(taxonomy_cache_backup_file) && file.exists(taxonomy_cache_backup_file)) {
+    unlink(taxonomy_cache_backup_file, force = TRUE)
+  }
+  if (!is.null(current_module_stage) && dir.exists(current_module_stage)) {
+    cleanup_module_staging(current_module_stage)
   }
   if (stage_active && dir.exists(stage)) unlink(stage, recursive = TRUE, force = TRUE)
 }, add = TRUE)
-tryCatch(preserve_unowned_outputs(final_root, stage, prior_manifest),
-         error = function(e) fatal("Output staging error", e))
+
+preserved_unowned_outputs <- tryCatch(preserve_unowned_outputs(final_root, stage, prior_manifest),
+                                      error = function(e) fatal("Output staging error", e))
 
 rebase_output <- function(cfg, root) {
   cfg$output$base_dir <- root
@@ -171,24 +218,30 @@ cat(sprintf("ONT wf-16s post-processing %s | %s | %d sample(s)\n",
 start_time <- Sys.time()
 module_results <- stats::setNames(lapply(names(module_registry), function(name) {
   new_not_run_module_record(sprintf("Module '%s' was not requested.", name))
-  }), names(module_registry))
-  any_failed <- FALSE
-  module_snapshots <- character(0)
+}), names(module_registry))
+any_failed <- FALSE
 
-  for (module_name in requested_modules) {
-    module_snapshot <- tryCatch(snapshot_staging_directory(stage),
-                                error = function(e) fatal("Module staging snapshot failed", e))
-    module_snapshots <- c(module_snapshots, module_snapshot)
-    cat(sprintf(">>> Executing module [%s]...\n", module_name))
+for (module_name in requested_modules) {
+  cat(sprintf(">>> Executing module [%s]...\n", module_name))
+  module_stage <- tryCatch(prepare_module_staging(stage, module_name),
+                           error = function(e) fatal(sprintf("Module [%s] staging preparation failed", module_name), e))
+  current_module_stage <- module_stage
+
+  module_cfg <- rebase_output(cfg, module_stage)
+  module_context <- context
+  module_context$config <- module_cfg
+
   started <- Sys.time()
   captured_warnings <- character(0)
-  result <- tryCatch(withCallingHandlers(module_registry[[module_name]](context), warning = function(w) {
+  result <- tryCatch(withCallingHandlers(module_registry[[module_name]](module_context), warning = function(w) {
     captured_warnings <<- c(captured_warnings, conditionMessage(w)); invokeRestart("muffleWarning")
   }), error = function(e) list(status = "failed", error = conditionMessage(e), outputs = character(0)))
-  result <- tryCatch(validate_module_result(result, module_name, stage), error = function(e) {
+
+  result <- tryCatch(validate_module_result(result, module_name, module_stage), error = function(e) {
     list(status = "failed", error = paste("Module result contract violation:", conditionMessage(e)),
          outputs = character(0))
   })
+
   injected_failure <- Sys.getenv("WF16S_INJECT_MODULE_FAILURE", unset = "")
   test_mode <- Sys.getenv("WF16S_TEST_MODE", unset = "")
   if (nzchar(injected_failure) && !identical(test_mode, "1")) {
@@ -197,8 +250,6 @@ module_results <- stats::setNames(lapply(names(module_registry), function(name) 
     ))
   }
   if (identical(test_mode, "1") && identical(injected_failure, module_name)) {
-    # Test-only failure injection exercises rollback after a module has already
-    # written files; it is intentionally not exposed as a public CLI option.
     result <- list(status = "failed", error = sprintf(
       "Injected failure after module '%s' wrote its outputs.", module_name),
       outputs = character(0))
@@ -216,24 +267,30 @@ module_results <- stats::setNames(lapply(names(module_registry), function(name) 
   } else {
     result$warnings <- unique(c(returned_warnings, captured_warnings))
   }
-  module_results[[module_name]] <- result
-    input_check <- tryCatch({
-      assert_inputs_unchanged(full_inventory,
-        allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh"),
-        taxonomy_cache_expected_sha256 = taxonomy_cache_expected_hash())
-      NULL
-    }, error = function(e) e)
-    if (!is.null(input_check)) {
-      result$status <- "failed"
-      result$error <- conditionMessage(input_check)
-      result$outputs <- character(0)
-      module_results[[module_name]] <- result
-    }
-    if (identical(result$status, "failed")) {
-      tryCatch(restore_staging_directory(stage, module_snapshot),
-               error = function(e) fatal("Module staging rollback failed", e))
-      any_failed <- TRUE
-      cat(sprintf("ERROR in module [%s]: %s\n", module_name, result$error), file = stderr())
+
+  if (identical(module_name, "kreport") && identical(result$status, "completed") &&
+      identical(cfg$taxonomy$network_mode, "refresh")) {
+    taxonomy_cache_state <- "candidate_committed"
+  }
+
+  input_check <- tryCatch({
+    assert_inputs_unchanged(full_inventory,
+      allow_taxonomy_cache_change = identical(taxonomy_cache_state, "candidate_committed"),
+      taxonomy_cache_expected_sha256 = taxonomy_cache_expected_hash())
+    NULL
+  }, error = function(e) e)
+  if (!is.null(input_check)) {
+    result$status <- "failed"
+    result$error <- conditionMessage(input_check)
+    result$outputs <- character(0)
+  }
+
+  if (identical(result$status, "failed")) {
+    cleanup_module_staging(module_stage)
+    current_module_stage <- NULL
+    module_results[[module_name]] <- result
+    any_failed <- TRUE
+    cat(sprintf("ERROR in module [%s]: %s\n", module_name, result$error), file = stderr())
     if (!isTRUE(cfg$cli$keep_going)) {
       later <- requested_modules[match(module_name, requested_modules):length(requested_modules)]
       later <- setdiff(later, module_name)
@@ -241,15 +298,20 @@ module_results <- stats::setNames(lapply(names(module_registry), function(name) 
         "Pipeline stopped after failure in module '%s'.", module_name))
       break
     }
+  } else {
+    tryCatch({
+      publish_module_staging(module_stage, stage, result$outputs)
+    }, error = function(e) fatal(sprintf("Publishing module [%s] outputs to stage failed", module_name), e))
+    current_module_stage <- NULL
+    to_stage <- function(path) sub(paste0("^", gsub("([][{}()+*^$|\\?.])", "\\\\\\1", module_stage)), stage, path)
+    result$outputs <- to_stage(result$outputs)
+    module_results[[module_name]] <- result
   }
-  unlink(module_snapshot, recursive = TRUE, force = TRUE)
-  module_snapshots <- setdiff(module_snapshots, module_snapshot)
 }
 
-if (any_failed && !taxonomy_cache_committed) {
+if (any_failed && identical(cfg$taxonomy$network_mode, "refresh")) {
   tryCatch({
     restore_taxonomy_cache()
-    taxonomy_cache_committed <- TRUE
   }, error = function(e) fatal("Taxonomy source-cache rollback failed", e))
 }
 
@@ -288,16 +350,43 @@ python <- tryCatch(find_python(), error = function(e) NA_character_)
 python_version <- if (!is.na(python)) trimws(paste(unlist(processx::run(python, "--version",
   error_on_status = FALSE)[c("stdout", "stderr")]), collapse = " ")) else NA_character_
 
-owned <- unique(c("resolved_config.yml", "session_info.txt", unlist(lapply(module_results, function(x) {
-  paths <- x$outputs %||% character(0)
-  ifelse(startsWith(tolower(paths), paste0(tolower(final_root), "/")),
-         substring(paths, nchar(final_root) + 2L), paths)
-}), use.names = FALSE)))
+# Map relative paths and producer modules
+module_output_relpaths <- list()
+for (name in names(module_results)) {
+  paths <- module_results[[name]]$outputs %||% character(0)
+  for (p in paths) {
+    rel <- substring(p, nchar(final_root) + 2L)
+    module_output_relpaths[[rel]] <- name
+  }
+}
+
+owned <- sort(unique(c("resolved_config.yml", "session_info.txt", names(module_output_relpaths))))
+owned_with_manifest <- sort(c(owned, "run_manifest.json"))
+
+# Verify physical stage census before building artifacts array and manifest
+tryCatch(verify_physical_file_census(stage, owned_with_manifest, preserved_unowned_outputs),
+         error = function(e) fatal("Physical stage census error", e))
+
+# Build artifacts array for all owned files excluding run_manifest.json
+artifacts_list <- lapply(sort(owned), function(rel_path) {
+  phys_path <- file.path(stage, rel_path)
+  if (!file.exists(phys_path)) {
+    fatal("Manifest artifact error", simpleError(sprintf("Owned output '%s' missing from stage.", rel_path)))
+  }
+  producer <- module_output_relpaths[[rel_path]] %||% NULL
+  list(
+    relative_path = rel_path,
+    size_bytes = as.numeric(file.info(phys_path)$size),
+    sha256 = compute_file_hash(phys_path),
+    producer_module = producer
+  )
+})
+
 manifest <- list(
   pipeline = "ont-wf16s-postprocess", pipeline_version = pipeline_version,
   git_commit = source_info$git_commit, git_dirty = source_info$git_dirty,
   source_digest_sha256 = source_info$source_digest_sha256,
-  schema_version = 2L, schema_revision = 1L, config_schema_version = cfg$schema_version,
+  schema_version = 2L, schema_revision = 2L, config_schema_version = cfg$schema_version,
   run_status = if (any_failed) "failed" else "completed",
   start_time = utc_timestamp(start_time), end_time = utc_timestamp(end_time),
   duration_seconds = as.numeric(difftime(end_time, start_time, units = "secs")),
@@ -307,7 +396,9 @@ manifest <- list(
   cli = utils::modifyList(cfg$cli, list(modules = json_array(requested_modules))),
   inputs = full_inventory, upstream_contract = context$upstream_contract,
   modules = lapply(module_results, manifest_module_record),
-  owned_outputs = json_array(sort(c(owned, "run_manifest.json"))),
+  owned_outputs = json_array(owned_with_manifest),
+  preserved_unowned_outputs = json_array(sort(preserved_unowned_outputs)),
+  artifacts = json_array(artifacts_list),
   warnings = json_array(unique(c(context$warnings, if (!lock_info$locked) "Unlocked development run" else character(0),
     if (isTRUE(source_info$git_dirty)) "Dirty-source development run" else character(0),
     unlist(lapply(module_results, function(x) x$warnings %||% character(0)), use.names = FALSE)))),
@@ -321,12 +412,15 @@ manifest <- list(
     package = package, version = deps[[package]]
   )))
 )
+
 tryCatch(write_manifest_v2(manifest, cfg$output$manifest_file, physical_root = stage),
          error = function(e) fatal("Manifest publication failed", e))
 tryCatch(assert_inputs_unchanged(full_inventory,
-  allow_taxonomy_cache_change = identical(cfg$taxonomy$network_mode, "refresh") && !any_failed,
-  taxonomy_cache_expected_sha256 = taxonomy_cache_expected_hash()),
+  allow_taxonomy_cache_change = identical(taxonomy_cache_state, "candidate_committed"),
+  taxonomy_cache_expected_sha256 = taxonomy_cache_expected_hash(),
+  allow_taxonomy_mtime_change = identical(taxonomy_cache_state, "restored")),
   error = function(e) fatal("Pre-publication input check failed", e))
+
 if (any_failed && !is.null(prior_manifest)) {
   unlink(stage, recursive = TRUE, force = TRUE)
   stage_active <- FALSE
@@ -335,7 +429,6 @@ if (any_failed && !is.null(prior_manifest)) {
 tryCatch(publish_staged_run(stage, final_root),
          error = function(e) fatal("Output publication failed", e))
 stage_active <- FALSE
-if (!any_failed) taxonomy_cache_committed <- TRUE
 if (any_failed) {
   stop(sprintf("[FATAL] Failed run manifest published: %s", file.path(final_root, "run_manifest.json")),
        call. = FALSE)

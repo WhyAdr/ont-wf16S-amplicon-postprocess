@@ -126,3 +126,129 @@ test_that("Krona provenance sample records retain array shape", {
     expect_true(is_json_array(parsed$samples))
   }
 })
+
+make_manifest_revision2_fixture <- function(samples = "S1", modules = c("qc")) {
+  output_root <- tempfile("manifest_rev2_fixture_root_")
+  dir.create(output_root)
+  cfg_file <- file.path(output_root, "resolved_config.yml")
+  sess_file <- file.path(output_root, "session_info.txt")
+  writeLines("resolved", cfg_file)
+  writeLines("session", sess_file)
+  qc_dir <- file.path(output_root, "01_QC")
+  dir.create(qc_dir)
+  qc_out <- file.path(qc_dir, "read_qc_summary.tsv")
+  writeLines("read_qc", qc_out)
+
+  compute_hash <- function(path) digest::digest(file = path, algo = "sha256")
+
+  registry <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "kreport", "faprotax")
+  records <- stats::setNames(lapply(registry, function(module_name) {
+    if (!(module_name %in% modules)) {
+      return(manifest_module_record(new_not_run_module_record(sprintf(
+        "Module '%s' was not requested.", module_name))))
+    }
+    list(
+      status = "completed",
+      outputs = json_array(qc_out),
+      warnings = json_array(character(0)),
+      error = NULL,
+      reason = NULL,
+      start_time = "2026-09-07T00:00:00Z",
+      end_time = "2026-09-07T00:00:01Z",
+      duration_seconds = 1
+    )
+  }), registry)
+
+  artifacts <- list(
+    list(relative_path = "01_QC/read_qc_summary.tsv", size_bytes = as.numeric(file.info(qc_out)$size),
+         sha256 = compute_hash(qc_out), producer_module = "qc"),
+    list(relative_path = "resolved_config.yml", size_bytes = as.numeric(file.info(cfg_file)$size),
+         sha256 = compute_hash(cfg_file), producer_module = NULL),
+    list(relative_path = "session_info.txt", size_bytes = as.numeric(file.info(sess_file)$size),
+         sha256 = compute_hash(sess_file), producer_module = NULL)
+  )
+
+  dummy_fp <- function(path) list(path = path, size_bytes = 10L, mtime_utc = "2026-09-07T00:00:00Z",
+                                  sha256 = paste(rep("c", 64L), collapse = ""))
+
+  list(
+    pipeline = "ont-wf16s-postprocess",
+    pipeline_version = "0.4.3",
+    schema_version = 2L,
+    schema_revision = 2L,
+    config_schema_version = 1L,
+    run_status = "completed",
+    start_time = "2026-09-07T00:00:00Z",
+    end_time = "2026-09-07T00:00:01Z",
+    duration_seconds = 1,
+    project_name = "fixture",
+    mode = "single",
+    seed = 42L,
+    config_file = "fixture.yml",
+    git_commit = paste(rep("a", 40L), collapse = ""),
+    git_dirty = FALSE,
+    source_digest_sha256 = paste(rep("b", 64L), collapse = ""),
+    output_root = normalizePath(output_root, winslash = "/"),
+    samples = json_array(samples),
+    command = json_array(c("Rscript", "analysis/00_run_pipeline.R")),
+    cli = list(validate_only = FALSE, keep_going = FALSE, overwrite = FALSE,
+               allow_unlocked = FALSE, allow_dirty = FALSE, online_preflight = FALSE,
+               refresh_taxonomy = FALSE, krona = FALSE, modules = json_array(modules)),
+    inputs = list(
+      abundance_table = dummy_fp("abundance.tsv"),
+      params_json = dummy_fp("params.json"),
+      taxonomy_cache = dummy_fp("taxonomy.json"),
+      assignments = json_array(list()),
+      bamstats = json_array(list())
+    ),
+    owned_outputs = json_array(c("01_QC/read_qc_summary.tsv", "resolved_config.yml", "run_manifest.json", "session_info.txt")),
+    preserved_unowned_outputs = json_array(character(0)),
+    artifacts = json_array(artifacts),
+    modules = records,
+    warnings = json_array(character(0)),
+    environment = list(
+      locked = TRUE,
+      lock_status = "synchronized",
+      lockfile = "renv.lock",
+      lockfile_sha256 = paste(rep("a", 64L), collapse = ""),
+      r_discrepancies = json_array(character(0)),
+      package_discrepancies = json_array(character(0)),
+      library_discrepancies = json_array(character(0)),
+      library_paths = json_array(c("C:/R/library")),
+      project_library = "C:/R/library",
+      package_locations = json_array(list(list(package = "yaml", version = "2.3.10", path = "C:/R/library/yaml")))
+    ),
+    package_versions = json_array(list(list(package = "yaml", version = "2.3.10")))
+  )
+}
+
+test_that("manifest v2 revision 2 validates correctly and rejects invalid states", {
+  manifest <- make_manifest_revision2_fixture()
+  expect_no_error(validate_manifest_v2(manifest))
+
+  # Unsupported revision
+  manifest_bad_rev <- manifest
+  manifest_bad_rev$schema_revision <- 3L
+  expect_error(validate_manifest_v2(manifest_bad_rev), "unsupported schema revision")
+
+  # Census mismatch: unowned file in physical stage
+  rogue_file <- file.path(manifest$output_root, "rogue.txt")
+  writeLines("rogue", rogue_file)
+  expect_error(validate_manifest_v2(manifest), "physical file not declared")
+  unlink(rogue_file)
+
+  # Artifact hash mismatch
+  manifest_bad_hash <- manifest
+  manifest_bad_hash$artifacts[[1]]$sha256 <- paste(rep("0", 64L), collapse = "")
+  expect_error(validate_manifest_v2(manifest_bad_hash), "artifact sha256 mismatch")
+
+  # Unknown producer module
+  manifest_bad_prod <- manifest
+  manifest_bad_prod$artifacts[[1]]$producer_module <- "unknown_module"
+  expect_error(validate_manifest_v2(manifest_bad_prod), "unknown producer module")
+
+  # Overlapping preserved and owned outputs
+  manifest_overlap <- manifest
+  manifest_overlap$preserved_unowned_outputs <- json_array("01_QC/read_qc_summary.tsv")
+  expect_error(validate_manifest_v2(manifest_overlap), "cannot overlap")
+})

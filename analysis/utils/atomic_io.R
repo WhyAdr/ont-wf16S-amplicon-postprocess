@@ -186,7 +186,8 @@ validate_prior_output <- function(final_root, overwrite) {
                             full.names = FALSE)
   prior_files <- prior_files[!dir.exists(file.path(final_root, prior_files))]
   current_contract <- identical(prior$schema_version, 2L) &&
-    identical(prior$schema_revision, 1L) && !is.null(prior$owned_outputs) &&
+    (identical(prior$schema_revision, 1L) || identical(prior$schema_revision, 2L)) &&
+    !is.null(prior$owned_outputs) &&
     is.list(prior$environment) && !is.null(prior$environment$library_paths) &&
     !is.null(prior$environment$package_locations)
   if (current_contract) {
@@ -223,18 +224,89 @@ validate_prior_output <- function(final_root, overwrite) {
 }
 
 preserve_unowned_outputs <- function(final_root, stage, prior_manifest) {
-  if (is.null(prior_manifest) || !dir.exists(final_root)) return(invisible(TRUE))
+  if (is.null(prior_manifest) || !dir.exists(final_root)) return(character(0))
   owned <- unique(c("run_manifest.json", "resolved_config.yml", "session_info.txt",
                     unlist(prior_manifest$owned_outputs %||% list(), use.names = FALSE)))
   files <- list.files(final_root, recursive = TRUE, all.files = TRUE, full.names = FALSE)
   files <- files[!dir.exists(file.path(final_root, files))]
-  unowned <- setdiff(files, owned)
+  unowned <- sort(setdiff(files, owned))
   for (relative in unowned) {
     target <- file.path(stage, relative)
     dir.create(dirname(target), recursive = TRUE, showWarnings = FALSE)
     if (!file.copy(file.path(final_root, relative), target, overwrite = FALSE)) {
       stop(sprintf("Could not preserve unowned output '%s'.", relative), call. = FALSE)
     }
+  }
+  unowned
+}
+
+prepare_module_staging <- function(stage, module_name) {
+  parent <- dirname(stage)
+  module_stage <- tempfile(pattern = paste0(".", basename(stage), ".", module_name, "-"), tmpdir = parent)
+  if (!dir.create(module_stage, recursive = TRUE, showWarnings = FALSE)) {
+    stop(sprintf("Could not create private module staging root '%s'.", module_stage), call. = FALSE)
+  }
+  normalizePath(module_stage, winslash = "/", mustWork = TRUE)
+}
+
+publish_module_staging <- function(module_stage, run_stage, declared_outputs) {
+  norm_mod <- normalizePath(module_stage, winslash = "/", mustWork = FALSE)
+  norm_stage <- normalizePath(run_stage, winslash = "/", mustWork = FALSE)
+  for (src_path in declared_outputs) {
+    norm_src <- normalizePath(src_path, winslash = "/", mustWork = FALSE)
+    if (!startsWith(tolower(norm_src), paste0(tolower(norm_mod), "/"))) {
+      stop(sprintf("Declared module output '%s' is not within module stage '%s'.", src_path, module_stage),
+           call. = FALSE)
+    }
+    rel_path <- substring(norm_src, nchar(norm_mod) + 2L)
+    dest_path <- file.path(norm_stage, rel_path)
+    dir.create(dirname(dest_path), recursive = TRUE, showWarnings = FALSE)
+    if (!file.rename(norm_src, dest_path)) {
+      if (!file.copy(norm_src, dest_path, overwrite = TRUE) || !unlink(norm_src, force = TRUE)) {
+        stop(sprintf("Could not move module output '%s' to run stage.", rel_path), call. = FALSE)
+      }
+    }
+  }
+  unlink(module_stage, recursive = TRUE, force = TRUE)
+  invisible(TRUE)
+}
+
+cleanup_module_staging <- function(module_stage) {
+  if (!is.null(module_stage) && dir.exists(module_stage)) {
+    unlink(module_stage, recursive = TRUE, force = TRUE)
+  }
+  invisible(TRUE)
+}
+
+census_physical_files <- function(root_dir) {
+  if (!dir.exists(root_dir)) return(character(0))
+  all_paths <- list.files(root_dir, recursive = TRUE, all.files = TRUE, no.. = TRUE, full.names = FALSE)
+  is_file <- vapply(file.path(root_dir, all_paths), function(p) !dir.exists(p), logical(1))
+  sort(all_paths[is_file])
+}
+
+verify_physical_file_census <- function(stage, owned_outputs, preserved_unowned_outputs) {
+  physical <- census_physical_files(stage)
+  expected_set <- sort(unique(c(setdiff(owned_outputs, "run_manifest.json"), preserved_unowned_outputs)))
+  physical_set <- sort(unique(physical))
+
+  if (anyDuplicated(tolower(physical_set))) {
+    stop("Physical staged files contain case-folded collisions.", call. = FALSE)
+  }
+  if (anyDuplicated(tolower(expected_set))) {
+    stop("Expected output census contains case-folded collisions.", call. = FALSE)
+  }
+
+  missing_from_physical <- setdiff(expected_set, physical_set)
+  extra_in_physical <- setdiff(physical_set, expected_set)
+
+  if (length(missing_from_physical) > 0L) {
+    stop(sprintf("E_CENSUS_MISMATCH: expected outputs missing from physical stage: %s",
+                 paste(missing_from_physical, collapse = ", ")), call. = FALSE)
+  }
+  if (length(extra_in_physical) > 0L) {
+    stop(sprintf("E_CENSUS_MISMATCH: unowned physical files found in stage: %s",
+                 paste(extra_in_physical, collapse = ", ")), call. = FALSE)
   }
   invisible(TRUE)
 }

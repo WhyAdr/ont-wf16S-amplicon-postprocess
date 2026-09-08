@@ -60,7 +60,8 @@ inventory_inputs <- function(cfg, bamstats = NULL) {
 }
 
 assert_inputs_unchanged <- function(inventory, allow_taxonomy_cache_change = FALSE,
-                                     taxonomy_cache_expected_sha256 = NULL) {
+                                     taxonomy_cache_expected_sha256 = NULL,
+                                     allow_taxonomy_mtime_change = FALSE) {
   flatten <- c(
     inventory[c("abundance_table", "params_json", "metadata", "taxonomy_cache")],
     inventory$assignments,
@@ -76,6 +77,12 @@ assert_inputs_unchanged <- function(inventory, allow_taxonomy_cache_change = FAL
       if (!identical(actual$sha256, expected_hash)) {
         preflight_error("E_INPUT_CHANGED", sprintf("taxonomy cache did not match the expected transition: '%s'",
                                                      expected$path))
+      }
+      next
+    }
+    if (taxonomy_record && isTRUE(allow_taxonomy_mtime_change)) {
+      if (!identical(expected[c("path", "size_bytes", "sha256")], actual[c("path", "size_bytes", "sha256")])) {
+        preflight_error("E_INPUT_CHANGED", sprintf("taxonomy cache changed after restoration: '%s'", expected$path))
       }
       next
     }
@@ -113,7 +120,9 @@ read_lock_status <- function(repo_root, packages) {
   package_locations <- vector("list", length(lock_packages))
   base_pkgs <- c("base", "compiler", "datasets", "graphics", "grDevices", "grid",
                  "methods", "parallel", "splines", "stats", "stats4", "tcltk",
-                 "tools", "utils")
+                 "tools", "utils", "boot", "class", "cluster", "codetools",
+                 "foreign", "KernSmooth", "lattice", "MASS", "Matrix", "mgcv",
+                 "nlme", "nnet", "rpart", "spatial", "survival")
   norm_proj_lib <- if (!is.null(project_library)) normalizePath(project_library, winslash = "/", mustWork = FALSE) else NULL
   library_diff <- character(0)
   if (is.null(project_library) || !any(tolower(normalizePath(library_paths, winslash = "/", mustWork = FALSE)) ==
@@ -138,7 +147,8 @@ read_lock_status <- function(repo_root, packages) {
     if (!versions_match) {
       package_diff <- c(package_diff, sprintf("%s: expected %s, found %s", package, expected, actual))
     }
-    if (!package %in% base_pkgs && !is.null(location) && !is.null(norm_proj_lib)) {
+    is_base <- package %in% base_pkgs || identical(lock_record$Priority, "recommended") || identical(lock_record$Priority, "base")
+    if (!is_base && !is.null(location) && !is.null(norm_proj_lib)) {
       norm_loc <- normalizePath(location, winslash = "/", mustWork = FALSE)
       in_proj_lib <- startsWith(tolower(norm_loc), paste0(tolower(norm_proj_lib), "/")) ||
                      tolower(norm_loc) == tolower(norm_proj_lib)
