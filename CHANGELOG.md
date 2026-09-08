@@ -18,6 +18,7 @@ All notable changes to this project are documented in this file.
 - **Environment Activation Idempotence**: Avoid redundant `renv::load()` calls when the canonical project library is already active, keeping subprocess validation deterministic on Windows while retaining bootstrap for external environments.
 - **Failure Retry & Recovery Validation**: Permit explicit overwrite of a failed current-contract run, reject unowned staging collisions before mutation, and require a complete schema-v2 manifest, artifact hashes, and physical census before trusting a crash-recovery candidate.
 - **Release CI Assertions**: Map each GitHub event to an explicit diff base and unit-test root, multi-commit push, new-branch, and pull-request range selection.
+- **Cross-Platform Release Restore**: Install the Ubuntu GLPK runtime required by the locked `igraph` binary and force the byte-strict `VERSION` file to LF on Windows checkouts.
 - **Exact Release Identity**: Require release-verification outputs to come from the current exact Git commit, a clean source tree, a synchronized lock, and no development escape hatches.
 - **AST Syntax Checking**: Replace bytecode compilation in preflight with read-only AST syntax parsing.
 

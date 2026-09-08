@@ -36,6 +36,13 @@ jobs:
           r-version: ${{ matrix.r }}
           use-public-rspm: true
 
+      - name: Install Linux runtime libraries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libglpk40
+
       - name: Restore locked R environment
         shell: bash
         run: |
@@ -105,6 +112,13 @@ jobs:
         with:
           r-version: '4.5.3'
           use-public-rspm: true
+
+      - name: Install Linux runtime libraries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes libglpk40
 
       - name: Restore locked R environment
         shell: bash

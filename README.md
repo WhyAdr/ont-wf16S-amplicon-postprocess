@@ -246,6 +246,10 @@ single-sample demonstration. Give cohort projects their own abundance table,
 metadata, assignment mapping, and a fresh output directory.
 
 ### 1. Audit Dependencies
+
+On Linux, the locked `igraph` binary also requires the GLPK runtime library
+(`libglpk40` on the Ubuntu release runner).
+
 ```bash
 # Check core installed packages (exits non-zero if missing)
 Rscript analysis/install_packages.R
