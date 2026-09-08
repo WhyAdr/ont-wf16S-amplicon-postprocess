@@ -360,9 +360,13 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   stopifnot(nrow(conflicts) == 26L)
 
   resolution <- read.delim(file.path(root, "07_Kreport/taxonomy_resolution.tsv"), check.names = FALSE)
+  expected_sources <- c("assignment", "source_cache", "unresolved")
+  if (nrow(conflicts) > 0L) {
+    expected_sources <- c(expected_sources, "assignment_conflict")
+  }
   stopifnot(identical(
     sort(unique(resolution$ResolutionSource)),
-    sort(c("assignment", "source_cache", "unresolved"))
+    sort(expected_sources)
   ))
 
   stopifnot(identical(accounting$SampleID, "AmbarAyunda_minimap2_16S"))
