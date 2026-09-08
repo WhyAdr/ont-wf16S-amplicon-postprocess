@@ -125,6 +125,8 @@ read_lock_status <- function(repo_root, packages) {
                  "foreign", "KernSmooth", "lattice", "MASS", "Matrix", "mgcv",
                  "nlme", "nnet", "rpart", "spatial", "survival")
   norm_proj_lib <- if (!is.null(project_library)) normalizePath(project_library, winslash = "/", mustWork = FALSE) else NULL
+  renv_cache <- tryCatch(renv::paths$cache(), error = function(e) NULL)
+  norm_cache <- if (!is.null(renv_cache)) normalizePath(renv_cache, winslash = "/", mustWork = FALSE) else NULL
   library_diff <- character(0)
   if (is.null(project_library) || !any(tolower(normalizePath(library_paths, winslash = "/", mustWork = FALSE)) ==
                                        tolower(norm_proj_lib))) {
@@ -151,9 +153,17 @@ read_lock_status <- function(repo_root, packages) {
     is_base <- package %in% base_pkgs || identical(lock_record$Priority, "recommended") || identical(lock_record$Priority, "base")
     if (!is_base && !is.null(location) && !is.null(norm_proj_lib)) {
       norm_loc <- normalizePath(location, winslash = "/", mustWork = FALSE)
-      in_proj_lib <- startsWith(tolower(norm_loc), paste0(tolower(norm_proj_lib), "/")) ||
-                     tolower(norm_loc) == tolower(norm_proj_lib)
-      if (!in_proj_lib) {
+      raw_loc <- gsub("\\\\", "/", location)
+      raw_proj_lib <- gsub("\\\\", "/", project_library)
+      in_proj_dir <- startsWith(tolower(norm_loc), paste0(tolower(norm_proj_lib), "/")) ||
+                     tolower(norm_loc) == tolower(norm_proj_lib) ||
+                     startsWith(tolower(raw_loc), paste0(tolower(raw_proj_lib), "/")) ||
+                     tolower(raw_loc) == tolower(raw_proj_lib)
+      in_renv_cache <- !is.null(norm_cache) && (
+        startsWith(tolower(norm_loc), paste0(tolower(norm_cache), "/")) ||
+        tolower(norm_loc) == tolower(norm_cache)
+      ) && file.exists(file.path(project_library, package))
+      if (!in_proj_dir && !in_renv_cache) {
         library_diff <- c(library_diff, sprintf("%s: package loaded from outside project library: '%s'",
                                                 package, location))
       }

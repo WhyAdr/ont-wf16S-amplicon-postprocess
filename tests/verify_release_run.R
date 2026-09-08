@@ -295,7 +295,15 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
              unexpected_warnings)
     ]
   }
-  stopifnot(length(unexpected_warnings) == 0L)
+  if (as.integer(manifest$taxonomy$conflicts_count %||% 0L) > 0L) {
+    unexpected_warnings <- unexpected_warnings[
+      !grepl("lineage-to-TaxID conflict[(]s[)] used the documented modal-count/minimum-TaxID tie-break",
+             unexpected_warnings)
+    ]
+  }
+  if (length(unexpected_warnings) > 0L) {
+    stop("Unexpected run warning(s): ", paste(unexpected_warnings, collapse = "; "))
+  }
   for (mod in names(manifest$modules)) {
     module_warnings <- unlist(manifest$modules[[mod]]$warnings, use.names = FALSE)
     if (isTRUE(manifest$cli$krona) && identical(mod, "kreport")) {
@@ -304,7 +312,15 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
                module_warnings)
       ]
     }
-    stopifnot(length(module_warnings) == 0L)
+    if (identical(mod, "kreport") && as.integer(manifest$taxonomy$conflicts_count %||% 0L) > 0L) {
+      module_warnings <- module_warnings[
+        !grepl("lineage-to-TaxID conflict[(]s[)] used the documented modal-count/minimum-TaxID tie-break",
+               module_warnings)
+      ]
+    }
+    if (length(module_warnings) > 0L) {
+      stop(sprintf("Unexpected module warning(s) in '%s': %s", mod, paste(module_warnings, collapse = "; ")))
+    }
   }
   stopifnot(identical(as.integer(manifest$taxonomy$unresolved_count), 46L))
   stopifnot(identical(as.integer(manifest$taxonomy$conflicts_count), 26L))
