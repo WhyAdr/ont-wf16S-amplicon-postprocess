@@ -14,14 +14,31 @@ atomic_replace <- function(path, writer, expected_sha256 = NULL) {
   backup <- tempfile(pattern = paste0(".", target_name, ".bak-"), tmpdir = target_dir)
   had_target <- file.exists(path)
   orig_mode <- if (had_target) file.info(path)$mode else NULL
+  replacement_verified <- FALSE
+
+  restore_backup <- function() {
+    if (!had_target || !file.exists(backup)) return(invisible(TRUE))
+    if (file.exists(path) && unlink(path, force = TRUE) != 0L) {
+      stop(sprintf("Could not remove failed replacement for '%s'; backup retained at '%s'.",
+                   path, backup), call. = FALSE)
+    }
+    if (!file.rename(backup, path)) {
+      stop(sprintf("Could not restore backup for '%s'; backup retained at '%s'.",
+                   path, backup), call. = FALSE)
+    }
+    invisible(TRUE)
+  }
 
   on.exit({
     if (file.exists(temp)) unlink(temp, force = TRUE)
     if (file.exists(backup)) {
-      if (!file.exists(path)) {
-        file.rename(backup, path)
-      } else {
-        unlink(backup, force = TRUE)
+      if (!replacement_verified) {
+        tryCatch(restore_backup(), error = function(e) {
+          warning(conditionMessage(e), call. = FALSE)
+        })
+      } else if (unlink(backup, force = TRUE) != 0L || file.exists(backup)) {
+        warning(sprintf("Verified replacement retained an undeleted backup at '%s'.", backup),
+                call. = FALSE)
       }
     }
   }, add = TRUE)
@@ -32,11 +49,14 @@ atomic_replace <- function(path, writer, expected_sha256 = NULL) {
   }
 
   temp_size <- file.info(temp)$size
-  temp_hash <- if (!is.null(expected_sha256)) {
-    digest::digest(temp, file = TRUE, algo = "sha256")
-  } else if (exists("digest_file", mode = "function")) {
-    tryCatch(digest_file(temp), error = function(e) NULL)
-  } else NULL
+  hash_file <- function(candidate) {
+    if (exists("compute_file_hash", mode = "function")) {
+      compute_file_hash(candidate)
+    } else {
+      digest::digest(candidate, file = TRUE, algo = "sha256")
+    }
+  }
+  temp_hash <- hash_file(temp)
 
   if (!is.null(expected_sha256) && !is.null(temp_hash) &&
       !identical(tolower(temp_hash), tolower(expected_sha256))) {
@@ -50,29 +70,37 @@ atomic_replace <- function(path, writer, expected_sha256 = NULL) {
   }
 
   if (!file.rename(temp, path)) {
-    if (had_target && file.exists(backup)) file.rename(backup, path)
+    if (had_target && file.exists(backup)) restore_backup()
     stop(sprintf("Could not publish replacement for '%s'.", path), call. = FALSE)
+  }
+
+  if (identical(Sys.getenv("WF16S_TEST_MODE"), "1") &&
+      identical(Sys.getenv("WF16S_INJECT_ATOMIC_POST_PUBLISH_CORRUPTION"), basename(path))) {
+    writeBin(charToRaw("injected-corruption"), path)
   }
 
   pub_info <- file.info(path)
   if (is.na(pub_info$size) || pub_info$size != temp_size) {
-    if (had_target && file.exists(backup)) file.rename(backup, path)
+    if (had_target && file.exists(backup)) restore_backup()
     stop(sprintf("Published file '%s' failed size verification.", path), call. = FALSE)
   }
-  if (!is.null(temp_hash) && exists("digest_file", mode = "function")) {
-    pub_hash <- tryCatch(digest_file(path), error = function(e) NULL)
-    if (!is.null(pub_hash) && !identical(pub_hash, temp_hash)) {
-      if (had_target && file.exists(backup)) file.rename(backup, path)
-      stop(sprintf("Published file '%s' failed hash verification.", path), call. = FALSE)
-    }
+  pub_hash <- hash_file(path)
+  if (!identical(pub_hash, temp_hash)) {
+    if (had_target && file.exists(backup)) restore_backup()
+    stop(sprintf("Published file '%s' failed hash verification.", path), call. = FALSE)
   }
 
   if (!is.null(orig_mode) && !is.na(orig_mode)) {
     tryCatch(Sys.chmod(path, mode = orig_mode), error = function(e) NULL)
   }
 
+  replacement_verified <- TRUE
+
   if (had_target && file.exists(backup)) {
-    unlink(backup, force = TRUE)
+    if (unlink(backup, force = TRUE) != 0L || file.exists(backup)) {
+      stop(sprintf("Verified replacement for '%s' could not remove backup '%s'.", path, backup),
+           call. = FALSE)
+    }
   }
 
   invisible(path)
@@ -164,8 +192,8 @@ validate_prior_output <- function(final_root, overwrite) {
       is.na(prior_root) || !identical(tolower(prior_root), tolower(root))) {
     stop(sprintf("E_OUTPUT_UNOWNED: prior manifest does not prove ownership of '%s'", final_root), call. = FALSE)
   }
-  if (!identical(prior$run_status, "completed")) {
-    stop(sprintf("E_OUTPUT_UNOWNED: prior output '%s' is not a completed run.", final_root), call. = FALSE)
+  if (!prior$run_status %in% c("completed", "failed")) {
+    stop(sprintf("E_OUTPUT_UNOWNED: prior output '%s' has an invalid run state.", final_root), call. = FALSE)
   }
 
   path_is_within <- function(path) {
@@ -197,6 +225,10 @@ validate_prior_output <- function(final_root, overwrite) {
     owned <- as.character(unlist(prior$owned_outputs, use.names = FALSE))
     owned <- unique(vapply(owned, relative_owned_path, character(1)))
   } else {
+    if (!identical(prior$run_status, "completed")) {
+      stop("E_OUTPUT_UNOWNED: failed prior runs must use the current strict manifest contract.",
+           call. = FALSE)
+    }
     # v0.4.0 and earlier manifests had no ownership inventory. Derive one only
     # when every physical file is explicitly listed by a legacy module record.
     if (is.null(prior$modules) || !is.list(prior$modules)) {
@@ -252,7 +284,7 @@ prepare_module_staging <- function(stage, module_name) {
 publish_module_staging <- function(module_stage, run_stage, declared_outputs) {
   norm_mod <- normalizePath(module_stage, winslash = "/", mustWork = FALSE)
   norm_stage <- normalizePath(run_stage, winslash = "/", mustWork = FALSE)
-  for (src_path in declared_outputs) {
+  move_plan <- lapply(declared_outputs, function(src_path) {
     norm_src <- normalizePath(src_path, winslash = "/", mustWork = FALSE)
     if (!startsWith(tolower(norm_src), paste0(tolower(norm_mod), "/"))) {
       stop(sprintf("Declared module output '%s' is not within module stage '%s'.", src_path, module_stage),
@@ -260,9 +292,25 @@ publish_module_staging <- function(module_stage, run_stage, declared_outputs) {
     }
     rel_path <- substring(norm_src, nchar(norm_mod) + 2L)
     dest_path <- file.path(norm_stage, rel_path)
+    list(src = norm_src, relative = rel_path, destination = dest_path)
+  })
+  relative_paths <- vapply(move_plan, function(item) item$relative, character(1))
+  if (anyDuplicated(tolower(relative_paths))) {
+    stop("E_OUTPUT_COLLISION: module declared duplicate case-folded output paths.", call. = FALSE)
+  }
+  collisions <- relative_paths[vapply(move_plan, function(item) file.exists(item$destination) ||
+                                        dir.exists(item$destination), logical(1))]
+  if (length(collisions)) {
+    stop(sprintf("E_OUTPUT_COLLISION: module output would overwrite an existing staged path: %s",
+                 paste(collisions, collapse = ", ")), call. = FALSE)
+  }
+  for (item in move_plan) {
+    norm_src <- item$src
+    rel_path <- item$relative
+    dest_path <- item$destination
     dir.create(dirname(dest_path), recursive = TRUE, showWarnings = FALSE)
     if (!file.rename(norm_src, dest_path)) {
-      if (!file.copy(norm_src, dest_path, overwrite = TRUE) || !unlink(norm_src, force = TRUE)) {
+      if (!file.copy(norm_src, dest_path, overwrite = FALSE) || unlink(norm_src, force = TRUE) != 0L) {
         stop(sprintf("Could not move module output '%s' to run stage.", rel_path), call. = FALSE)
       }
     }
@@ -351,6 +399,151 @@ release_output_lock <- function(lock_handle) {
   invisible(TRUE)
 }
 
+.wf16s_active_taxonomy_locks <- new.env(parent = emptyenv())
+
+get_taxonomy_lock_path <- function(cache_path) {
+  paste0(normalizePath(cache_path, winslash = "/", mustWork = FALSE), ".lock")
+}
+
+acquire_taxonomy_lock <- function(cache_path, timeout_ms = 10000) {
+  lock_path <- get_taxonomy_lock_path(cache_path)
+  norm_lock_path <- tolower(normalizePath(lock_path, winslash = "/", mustWork = FALSE))
+  if (exists(norm_lock_path, envir = .wf16s_active_taxonomy_locks, inherits = FALSE)) {
+    stop(sprintf("E_TAXONOMY_CACHE_BUSY: taxonomy cache '%s' is already locked in this process.",
+                 cache_path), call. = FALSE)
+  }
+  lock_handle <- tryCatch(filelock::lock(lock_path, timeout = timeout_ms), error = function(e) NULL)
+  if (is.null(lock_handle)) {
+    stop(sprintf("E_TAXONOMY_CACHE_BUSY: taxonomy cache '%s' is locked by another process.",
+                 cache_path), call. = FALSE)
+  }
+  assign(norm_lock_path, lock_handle, envir = .wf16s_active_taxonomy_locks)
+  lock_handle
+}
+
+release_taxonomy_lock <- function(lock_handle) {
+  if (!is.null(lock_handle)) {
+    for (name in ls(.wf16s_active_taxonomy_locks)) {
+      if (identical(.wf16s_active_taxonomy_locks[[name]], lock_handle)) {
+        rm(list = name, envir = .wf16s_active_taxonomy_locks)
+        break
+      }
+    }
+    tryCatch(filelock::unlock(lock_handle), error = function(e) NULL)
+  }
+  invisible(TRUE)
+}
+
+get_taxonomy_journal_path <- function(cache_path) {
+  paste0(normalizePath(cache_path, winslash = "/", mustWork = FALSE),
+         ".wf16s_transaction.json")
+}
+
+write_taxonomy_journal <- function(cache_path, backup, output_root, original_sha256,
+                                   candidate_sha256, phase) {
+  payload <- list(
+    cache_path = normalizePath(cache_path, winslash = "/", mustWork = FALSE),
+    backup = normalizePath(backup, winslash = "/", mustWork = FALSE),
+    output_root = normalizePath(output_root, winslash = "/", mustWork = FALSE),
+    original_sha256 = original_sha256,
+    candidate_sha256 = candidate_sha256,
+    phase = phase,
+    timestamp = utc_timestamp_now(),
+    pid = Sys.getpid()
+  )
+  atomic_write_json(payload, get_taxonomy_journal_path(cache_path))
+  invisible(payload)
+}
+
+remove_file_checked <- function(path, context) {
+  if (!file.exists(path)) return(invisible(TRUE))
+  status <- unlink(path, force = TRUE)
+  if (status != 0L || file.exists(path)) {
+    stop(sprintf("E_OUTPUT_CLEANUP_FAILED: could not remove %s '%s'.", context, path),
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+cleanup_taxonomy_journal <- function(cache_path, backup = NULL) {
+  remove_file_checked(get_taxonomy_journal_path(cache_path), "taxonomy transaction journal")
+  if (!is.null(backup)) remove_file_checked(backup, "taxonomy-cache backup")
+  invisible(TRUE)
+}
+
+recover_taxonomy_journal <- function(cache_path) {
+  journal_path <- get_taxonomy_journal_path(cache_path)
+  if (!file.exists(journal_path)) return(invisible(FALSE))
+  journal <- tryCatch(jsonlite::fromJSON(journal_path, simplifyVector = FALSE),
+                      error = function(e) NULL)
+  required <- c("cache_path", "backup", "output_root", "original_sha256",
+                "candidate_sha256", "phase")
+  if (is.null(journal) || length(setdiff(required, names(journal))) ||
+      !journal$phase %in% c("prepared", "candidate_committed")) {
+    stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: corrupt taxonomy journal at '%s'.",
+                 journal_path), call. = FALSE)
+  }
+  canonical_cache <- normalizePath(cache_path, winslash = "/", mustWork = FALSE)
+  recorded_cache <- normalizePath(as.character(journal$cache_path), winslash = "/",
+                                  mustWork = FALSE)
+  backup <- normalizePath(as.character(journal$backup), winslash = "/", mustWork = FALSE)
+  if (!identical(tolower(canonical_cache), tolower(recorded_cache)) ||
+      !identical(tolower(dirname(canonical_cache)), tolower(dirname(backup))) ||
+      !grepl("^[0-9a-f]{64}$", journal$original_sha256) ||
+      !grepl("^[0-9a-f]{64}$", journal$candidate_sha256 %||% "")) {
+    stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: invalid taxonomy journal at '%s'.",
+                 journal_path), call. = FALSE)
+  }
+  if (!file.exists(cache_path) || !file.exists(backup) ||
+      !identical(compute_file_hash(backup), journal$original_sha256)) {
+    stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: taxonomy recovery material is missing or invalid at '%s'.",
+                 journal_path), call. = FALSE)
+  }
+  current_sha256 <- compute_file_hash(cache_path)
+  final_valid <- manifest_is_valid_run(journal$output_root)
+  candidate_file <- file.path(journal$output_root, "07_Kreport",
+                              "resolved_taxonomy_cache.json")
+  final_has_candidate <- final_valid && file.exists(candidate_file) &&
+    identical(compute_file_hash(candidate_file), journal$candidate_sha256)
+  if (identical(current_sha256, journal$original_sha256)) {
+    if (final_valid && !final_has_candidate) {
+      stop(sprintf(
+        "E_TAXONOMY_RECOVERY_REQUIRED: completed output lacks the recorded taxonomy candidate for '%s'.",
+        cache_path), call. = FALSE)
+    }
+    if (final_has_candidate) {
+      atomic_replace(cache_path, function(temp) {
+        if (!file.copy(candidate_file, temp, overwrite = TRUE)) {
+          stop(sprintf("Could not restore committed taxonomy candidate from '%s'.",
+                       candidate_file), call. = FALSE)
+        }
+      }, expected_sha256 = journal$candidate_sha256)
+    }
+    cleanup_taxonomy_journal(cache_path, backup)
+    return(invisible(TRUE))
+  }
+  if (!identical(current_sha256, journal$candidate_sha256)) {
+    stop(sprintf("E_TAXONOMY_CACHE_CHANGED: taxonomy cache '%s' changed outside the recorded transaction; journal retained.",
+                 cache_path), call. = FALSE)
+  }
+  if (final_valid && !final_has_candidate) {
+    stop(sprintf(
+      "E_TAXONOMY_RECOVERY_REQUIRED: completed output lacks the recorded taxonomy candidate for '%s'.",
+      cache_path), call. = FALSE)
+  }
+  if (final_has_candidate) {
+    cleanup_taxonomy_journal(cache_path, backup)
+    return(invisible(TRUE))
+  }
+  atomic_replace(cache_path, function(temp) {
+    if (!file.copy(backup, temp, overwrite = TRUE)) {
+      stop(sprintf("Could not copy taxonomy recovery backup '%s'.", backup), call. = FALSE)
+    }
+  }, expected_sha256 = journal$original_sha256)
+  cleanup_taxonomy_journal(cache_path, backup)
+  invisible(TRUE)
+}
+
 get_output_journal_path <- function(final_root) {
   canonical <- normalizePath(final_root, winslash = "/", mustWork = FALSE)
   parent <- dirname(canonical)
@@ -374,7 +567,15 @@ write_publication_journal <- function(final_root, stage = NULL, backup = NULL, p
 
 remove_publication_journal <- function(final_root) {
   journal_path <- get_output_journal_path(final_root)
-  if (file.exists(journal_path)) unlink(journal_path, force = TRUE)
+  if (file.exists(journal_path)) {
+    status <- unlink(journal_path, force = TRUE)
+    if (status != 0L || file.exists(journal_path)) {
+      stop(sprintf(
+        "E_OUTPUT_CLEANUP_FAILED: could not remove publication journal '%s'.",
+        journal_path
+      ), call. = FALSE)
+    }
+  }
   invisible(TRUE)
 }
 
@@ -384,8 +585,27 @@ manifest_is_valid_run <- function(dir_path) {
   if (!file.exists(manifest_file)) return(FALSE)
   manifest <- tryCatch(jsonlite::fromJSON(manifest_file, simplifyVector = FALSE),
                        error = function(e) NULL)
-  if (is.null(manifest) || !identical(manifest$pipeline, "ont-wf16s-postprocess")) return(FALSE)
-  identical(manifest$run_status, "completed")
+  valid_identity <- !is.null(manifest) &&
+    identical(manifest$pipeline, "ont-wf16s-postprocess") &&
+    identical(manifest$run_status, "completed") &&
+    identical(manifest$schema_version, 2L) &&
+    length(manifest$schema_revision) == 1L &&
+    isTRUE(manifest$schema_revision %in% c(1L, 2L))
+  if (!isTRUE(valid_identity)) return(FALSE)
+  isTRUE(tryCatch({
+    validate_manifest_v2(manifest, physical_root = dir_path)
+    TRUE
+  }, error = function(e) FALSE))
+}
+
+remove_tree_checked <- function(path, context) {
+  if (!dir.exists(path)) return(invisible(TRUE))
+  status <- unlink(path, recursive = TRUE, force = TRUE)
+  if (status != 0L || dir.exists(path)) {
+    stop(sprintf("E_OUTPUT_CLEANUP_FAILED: could not remove %s '%s'; publication journal retained.",
+                 context, path), call. = FALSE)
+  }
+  invisible(TRUE)
 }
 
 recover_publication_journal <- function(final_root) {
@@ -421,7 +641,7 @@ recover_publication_journal <- function(final_root) {
         file = stderr())
     return(invisible(TRUE))
   } else if (final_valid) {
-    if (has_backup) unlink(backup, recursive = TRUE, force = TRUE)
+    if (has_backup) remove_tree_checked(backup, "crash backup")
     remove_publication_journal(final_root)
     cat(sprintf("[RECOVERY] Resolved prior publication state for '%s'.\n", final_root),
         file = stderr())
@@ -440,19 +660,27 @@ publish_staged_run <- function(stage, final_root) {
   write_publication_journal(final_root, stage = stage, backup = if (had_prior) backup else NULL,
                             phase = "prepared")
 
+  committed <- FALSE
+  on.exit({
+    if (!committed && had_prior && dir.exists(backup) && !dir.exists(final_root)) {
+      if (!file.rename(backup, final_root)) {
+        warning(sprintf(
+          "E_OUTPUT_RECOVERY_REQUIRED: failed to restore backup '%s' to '%s'; publication journal retained.",
+          backup, final_root
+        ), call. = FALSE)
+      } else {
+        tryCatch(remove_publication_journal(final_root),
+                 error = function(e) warning(conditionMessage(e), call. = FALSE))
+      }
+    }
+  }, add = TRUE)
+
   if (had_prior) {
     if (!file.rename(final_root, backup)) {
       stop("Could not preserve the prior completed run.", call. = FALSE)
     }
     write_publication_journal(final_root, stage = stage, backup = backup, phase = "prior_moved")
   }
-
-  committed <- FALSE
-  on.exit({
-    if (!committed && had_prior && dir.exists(backup) && !dir.exists(final_root)) {
-      file.rename(backup, final_root)
-    }
-  }, add = TRUE)
 
   if (!file.rename(stage, final_root)) {
     stop("Could not publish staged run.", call. = FALSE)
@@ -462,7 +690,7 @@ publish_staged_run <- function(stage, final_root) {
                             phase = "stage_published")
 
   if (had_prior && dir.exists(backup)) {
-    unlink(backup, recursive = TRUE, force = TRUE)
+    remove_tree_checked(backup, "prior-run backup")
   }
   remove_publication_journal(final_root)
   invisible(final_root)

@@ -30,6 +30,7 @@ fingerprint_file <- function(path, label = "input") {
 
 inventory_inputs <- function(cfg, bamstats = NULL) {
   records <- list(
+    config_file = fingerprint_file(cfg$config_file, "config_file"),
     abundance_table = fingerprint_file(cfg$input$abundance_table, "input.abundance_table"),
     params_json = fingerprint_file(cfg$input$params_json, "input.params_json")
   )
@@ -63,7 +64,7 @@ assert_inputs_unchanged <- function(inventory, allow_taxonomy_cache_change = FAL
                                      taxonomy_cache_expected_sha256 = NULL,
                                      allow_taxonomy_mtime_change = FALSE) {
   flatten <- c(
-    inventory[c("abundance_table", "params_json", "metadata", "taxonomy_cache")],
+    inventory[c("config_file", "abundance_table", "params_json", "metadata", "taxonomy_cache")],
     inventory$assignments,
     inventory$bamstats
   )
@@ -157,7 +158,27 @@ read_lock_status <- function(repo_root, packages) {
                                                 package, location))
       }
     }
-    package_locations[[index]] <- list(package = package, version = actual, path = location)
+    description_path <- if (!is.null(location)) file.path(location, "DESCRIPTION") else NULL
+    description_sha256 <- if (!is.null(description_path) && file.exists(description_path) &&
+                              !dir.exists(description_path)) {
+      compute_file_hash(description_path)
+    } else {
+      NULL
+    }
+    # These fields record lock metadata only.  Version/library checks above do not
+    # prove that installed package contents equal the lockfile source artifact.
+    lock_identity <- lapply(c("Source", "Repository", "RemoteType", "RemoteHost", "RemoteRepo",
+                              "RemoteRef", "RemoteSha", "Hash"), function(field) {
+      value <- lock_record[[field]] %||% NULL
+      if (is.null(value) || length(value) != 1L || is.na(value)) NULL else as.character(value)
+    })
+    names(lock_identity) <- c("lock_source", "lock_repository", "lock_remote_type", "lock_remote_host",
+                              "lock_remote_repo", "lock_remote_ref", "lock_remote_sha", "lock_hash")
+    package_locations[[index]] <- c(
+      list(package = package, version = actual, path = location,
+           description_sha256 = description_sha256),
+      lock_identity
+    )
   }
   synchronized <- length(r_diff) == 0L && length(package_diff) == 0L && length(library_diff) == 0L
   list(

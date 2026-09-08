@@ -36,7 +36,8 @@ run_pipeline_process <- function(args, wd) {
     c(runner, "--allow-dirty", "--allow-unlocked", args),
     wd = wd,
     error_on_status = FALSE,
-    echo = FALSE
+    echo = FALSE,
+    timeout = 120000
   )
 }
 
@@ -202,6 +203,34 @@ test_that("module failure rollback removes partial writes before publishing a fa
   physical <- list.files(output, recursive = TRUE, all.files = TRUE, full.names = FALSE)
   physical <- physical[!dir.exists(file.path(output, physical))]
   expect_setequal(physical, c("resolved_config.yml", "session_info.txt", "run_manifest.json"))
+})
+
+test_that("failed first-run output retries only with --overwrite", {
+  root <- tempfile("failed_first_run_retry_")
+  dir.create(root)
+  config <- write_process_config(root)
+  output <- file.path(root, "retry output")
+  failed <- withr::with_envvar(c(
+    WF16S_INJECT_MODULE_FAILURE = "qc", WF16S_TEST_MODE = "1"
+  ), run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "qc"), tempdir()
+  ))
+  expect_gt(failed$status, 0L)
+  expect_identical(jsonlite::fromJSON(file.path(output, "run_manifest.json"), simplifyVector = FALSE)$run_status,
+                   "failed")
+
+  without_overwrite <- run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "qc"), tempdir()
+  )
+  expect_gt(without_overwrite$status, 0L)
+  expect_match(without_overwrite$stderr, "non-empty; pass --overwrite")
+
+  retried <- run_pipeline_process(
+    c("--config", config, "--output-dir", output, "--modules", "qc", "--overwrite"), tempdir()
+  )
+  expect_equal(retried$status, 0L, info = paste(retried$stderr, retried$stdout))
+  expect_identical(jsonlite::fromJSON(file.path(output, "run_manifest.json"), simplifyVector = FALSE)$run_status,
+                   "completed")
 })
 
 test_that("keep-going continues after an injected module write and preserves only declared outputs", {

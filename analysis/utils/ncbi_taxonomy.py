@@ -101,11 +101,9 @@ def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
                 os.close(fd)
             except OSError:
                 pass
-            try:
-                if os.path.exists(lock_path):
-                    os.unlink(lock_path)
-            except OSError:
-                pass
+            # Keep a stable lock inode. Unlinking after unlock is unsafe on POSIX:
+            # a waiter can acquire the old inode while a third process creates and
+            # locks a new file at the same pathname.
 
 
 def parse_taxid(value, context="TaxID"):
@@ -427,6 +425,8 @@ def main():
     parser.add_argument("--provenance")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--online-preflight", action="store_true")
+    parser.add_argument("--defer-cache-commit", action="store_true")
+    parser.add_argument("--cache-lock-held", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -453,7 +453,7 @@ def main():
 
         lock_ctx = (
             acquire_cache_lock(args.cache)
-            if (args.mode == "refresh" and not args.validate_only)
+            if (args.mode == "refresh" and not args.validate_only and not args.cache_lock_held)
             else contextlib.nullcontext()
         )
         with lock_ctx:
@@ -464,6 +464,7 @@ def main():
             }
             assignment_hashes = {path: expected_inputs[path] for path in args.assignments if path in expected_inputs}
             assignment_map, conflicts = read_assignment_taxids(args.assignments, assignment_hashes)
+            conflict_lineages = {item["lineage"] for item in conflicts}
 
             for path in abundance_paths:
                 parts = path.split(";")
@@ -471,7 +472,11 @@ def main():
                     assignment_taxid = assignment_map.get(normalize_abundance_path_to_7(path), 0)
                     if assignment_taxid > 0:
                         cache[path] = assignment_taxid
-                        resolution_sources[path] = "assignment"
+                        resolution_sources[path] = (
+                            "assignment_conflict"
+                            if normalize_abundance_path_to_7(path) in conflict_lineages
+                            else "assignment"
+                        )
 
             unresolved = find_unresolved(abundance_paths, cache)
             query_failures = []
@@ -542,7 +547,10 @@ def main():
             )
             source_counts = {
                 label: source_counts.get(label, 0)
-                for label in ("source_cache", "assignment", "ncbi_refresh", "unresolved")
+                for label in (
+                    "source_cache", "assignment", "assignment_conflict",
+                    "ncbi_refresh", "unresolved"
+                )
             }
 
             provenance = {
@@ -554,9 +562,13 @@ def main():
                 "source_cache_sha256_before": cache_sha_before,
                 "source_cache_sha256_after": compute_sha256(args.cache),
                 "source_cache_sha256_candidate": cache_sha_candidate,
-                "source_cache_sha256_committed": cache_sha_before if args.mode == "cache_only" else None,
+                "source_cache_sha256_committed": cache_sha_before
+                if (args.mode == "cache_only" or args.defer_cache_commit) else None,
                 "resolved_cache_sha256": compute_sha256(args.resolved_cache),
                 "source_cache_updated": cache_updated,
+                "source_cache_commit_deferred": bool(
+                    args.mode == "refresh" and args.defer_cache_commit
+                ),
                 "total_lineages": len(abundance_paths),
                 "unresolved_count": len(unresolved),
                 "conflicts_count": len(conflicts),
@@ -582,12 +594,13 @@ def main():
                         file=sys.stderr,
                     )
                     return 1
-                atomic_write_json(args.cache, candidate_cache)
-                cache_updated = True
-                provenance["source_cache_updated"] = True
-                provenance["source_cache_sha256_after"] = compute_sha256(args.cache)
-                provenance["source_cache_sha256_committed"] = provenance["source_cache_sha256_after"]
-                atomic_write_json(args.provenance, provenance)
+                if not args.defer_cache_commit:
+                    atomic_write_json(args.cache, candidate_cache)
+                    cache_updated = True
+                    provenance["source_cache_updated"] = True
+                    provenance["source_cache_sha256_after"] = compute_sha256(args.cache)
+                    provenance["source_cache_sha256_committed"] = provenance["source_cache_sha256_after"]
+                    atomic_write_json(args.provenance, provenance)
             print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
             return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:

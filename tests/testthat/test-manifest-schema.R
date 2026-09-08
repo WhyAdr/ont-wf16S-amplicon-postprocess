@@ -197,6 +197,7 @@ make_manifest_revision2_fixture <- function(samples = "S1", modules = c("qc")) {
                allow_unlocked = FALSE, allow_dirty = FALSE, online_preflight = FALSE,
                refresh_taxonomy = FALSE, krona = FALSE, modules = json_array(modules)),
     inputs = list(
+      config_file = dummy_fp("fixture.yml"),
       abundance_table = dummy_fp("abundance.tsv"),
       params_json = dummy_fp("params.json"),
       taxonomy_cache = dummy_fp("taxonomy.json"),
@@ -218,7 +219,13 @@ make_manifest_revision2_fixture <- function(samples = "S1", modules = c("qc")) {
       library_discrepancies = json_array(character(0)),
       library_paths = json_array(c("C:/R/library")),
       project_library = "C:/R/library",
-      package_locations = json_array(list(list(package = "yaml", version = "2.3.10", path = "C:/R/library/yaml")))
+      package_locations = json_array(list(list(
+        package = "yaml", version = "2.3.10", path = "C:/R/library/yaml",
+        description_sha256 = paste(rep("d", 64L), collapse = ""),
+        lock_source = "Repository", lock_repository = "CRAN", lock_remote_type = NULL,
+        lock_remote_host = NULL, lock_remote_repo = NULL, lock_remote_ref = NULL,
+        lock_remote_sha = NULL, lock_hash = "fixture-lock-hash"
+      )))
     ),
     package_versions = json_array(list(list(package = "yaml", version = "2.3.10")))
   )
@@ -253,4 +260,16 @@ test_that("manifest v2 revision 2 validates correctly and rejects invalid states
   manifest_overlap <- manifest
   manifest_overlap$preserved_unowned_outputs <- json_array("01_QC/read_qc_summary.tsv")
   expect_error(validate_manifest_v2(manifest_overlap), "cannot overlap")
+
+  manifest_missing_config <- manifest
+  manifest_missing_config$inputs$config_file <- NULL
+  expect_error(validate_manifest_v2(manifest_missing_config), "inputs.config_file.*field is required")
+
+  manifest_bad_description_hash <- manifest
+  manifest_bad_description_hash$environment$package_locations[[1]]$description_sha256 <- "not-a-hash"
+  expect_error(validate_manifest_v2(manifest_bad_description_hash), "description_sha256.*SHA-256")
+
+  manifest_bad_lock_identity <- manifest
+  manifest_bad_lock_identity$environment$package_locations[[1]]$lock_source <- ""
+  expect_error(validate_manifest_v2(manifest_bad_lock_identity), "lock_source.*non-empty")
 })

@@ -46,6 +46,9 @@ run_kreport <- function(context) {
     "--resolution-sources-tsv", resolution_sources_tsv,
     "--provenance", prov_json
   )
+  if (identical(network_mode, "refresh")) {
+    cmd_args <- c(cmd_args, "--defer-cache-commit", "--cache-lock-held")
+  }
   assignment_paths <- unname(unlist(context$assignments, use.names = FALSE))
   if (length(assignment_paths) > 0L) {
     cmd_args <- c(cmd_args, as.vector(rbind("--assignments", assignment_paths)))
@@ -93,6 +96,16 @@ run_kreport <- function(context) {
     stop("Invalid taxonomy resolution-source output from resolver.", call. = FALSE)
   }
   resolution_sources <- setNames(source_df$ResolutionSource, source_df$TaxonPath)
+  conflict_df <- read.delim(conflicts_tsv, check.names = FALSE, stringsAsFactors = FALSE)
+  if (!identical(names(conflict_df), c("Lineage", "WinnerTaxID", "TaxIDCountsJSON")) ||
+      anyDuplicated(conflict_df$Lineage)) {
+    stop("Invalid taxonomy conflict output from resolver.", call. = FALSE)
+  }
+  if (nrow(conflict_df) > 0L) {
+    warning(sprintf(
+      "%d lineage-to-TaxID conflict(s) used the documented modal-count/minimum-TaxID tie-break; review taxonomy_conflicts.tsv.",
+      nrow(conflict_df)), call. = FALSE)
+  }
 
   krona_cfg <- cfg$krona %||% list(
     enabled = FALSE,
@@ -187,6 +200,7 @@ run_kreport <- function(context) {
         stop(sprintf("Resolver returned a noncanonical TaxID for '%s'.", p), call. = FALSE)
       }
 
+      resolution_source <- unname(resolution_sources[[p]] %||% "unresolved")
       resolution_rows[[length(resolution_rows) + 1L]] <- data.frame(
         SampleID = s,
         Depth = nodes_sorted$depth[i],
@@ -194,8 +208,14 @@ run_kreport <- function(context) {
         NodeName = nodes_sorted$name[i],
         TaxonPath = p,
         TaxID = tid,
-        Status = if (tid != "0") "Resolved" else "Unresolved",
-        ResolutionSource = unname(resolution_sources[[p]] %||% "unresolved"),
+        Status = if (identical(resolution_source, "assignment_conflict")) {
+          "Conflicted"
+        } else if (tid != "0") {
+          "Resolved"
+        } else {
+          "Unresolved"
+        },
+        ResolutionSource = resolution_source,
         stringsAsFactors = FALSE
       )
     }

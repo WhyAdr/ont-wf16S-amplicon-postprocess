@@ -31,6 +31,28 @@ test_that("lock status reports the full lock closure and active library paths", 
   expect_true(length(status$package_locations) >= length(RUNTIME_PACKAGES))
   expect_true(length(status$library_paths) >= 1L)
   expect_true(project_library %in% unlist(status$library_paths, use.names = FALSE))
+  location <- status$package_locations[[1]]
+  expect_true(all(c("description_sha256", "lock_source", "lock_repository", "lock_remote_type",
+                    "lock_remote_host", "lock_remote_repo", "lock_remote_ref", "lock_remote_sha",
+                    "lock_hash") %in% names(location)))
+  if (!is.null(location$description_sha256)) expect_match(location$description_sha256, "^[0-9a-f]{64}$")
+})
+
+test_that("input inventory fingerprints the supplied configuration file", {
+  config_file <- tempfile(fileext = ".yml")
+  writeLines("project_name: provenance_fixture", config_file)
+  cfg <- get_default_config()
+  cfg$config_file <- normalizePath(config_file, winslash = "/", mustWork = TRUE)
+  cfg$input$abundance_table <- config_file
+  cfg$input$params_json <- config_file
+  cfg$taxonomy$cache <- config_file
+  cfg$input$assignments <- list()
+
+  inventory <- inventory_inputs(cfg)
+  expect_identical(inventory$config_file$path, cfg$config_file)
+  expect_match(inventory$config_file$sha256, "^[0-9a-f]{64}$")
+  writeLines("project_name: changed_fixture", config_file)
+  expect_error(assert_inputs_unchanged(inventory), "E_INPUT_CHANGED")
 })
 
 test_that("startup files are included in maintained source files", {

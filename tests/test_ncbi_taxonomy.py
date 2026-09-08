@@ -85,6 +85,20 @@ class TaxonomyResolverTests(unittest.TestCase):
         after = hashlib.sha256(self.cache.read_bytes()).hexdigest()
         self.assertEqual(before, after)
 
+    def test_deferred_refresh_writes_candidate_without_mutating_source_cache(self):
+        before = hashlib.sha256(self.cache.read_bytes()).hexdigest()
+        args = self.args(mode="refresh") + ["--defer-cache-commit", "--cache-lock-held"]
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch("sys.argv", args):
+            self.assertEqual(taxonomy.main(), 0)
+        self.assertEqual(hashlib.sha256(self.cache.read_bytes()).hexdigest(), before)
+        resolved = json.loads((self.work / "resolved.json").read_text(encoding="utf-8"))
+        self.assertEqual(resolved[self.lineage], "1423")
+        provenance = json.loads((self.work / "provenance.json").read_text(encoding="utf-8"))
+        self.assertTrue(provenance["source_cache_commit_deferred"])
+        self.assertFalse(provenance["source_cache_updated"])
+        self.assertEqual(provenance["source_cache_sha256_committed"], before)
+
     def test_assignment_tie_break_is_deterministic(self):
         self.assignment.write_text(
             "C\tread1\t200\t1500\tBacteria|Example\n"
@@ -94,6 +108,22 @@ class TaxonomyResolverTests(unittest.TestCase):
         resolved, conflicts = taxonomy.read_assignment_taxids([self.assignment])
         self.assertEqual(resolved["Bacteria|Example"], 100)
         self.assertEqual(conflicts[0]["winner_taxid"], 100)
+
+    def test_assignment_conflict_is_explicit_in_resolution_provenance(self):
+        assignment_lineage = "|".join(
+            [self.lineage.split(";")[0]] + self.lineage.split(";")[2:]
+        )
+        self.assignment.write_text(
+            f"C\tread1\t200\t1500\t{assignment_lineage}\n"
+            f"C\tread2\t100\t1500\t{assignment_lineage}\n",
+            encoding="utf-8",
+        )
+        with mock.patch("sys.argv", self.args()):
+            self.assertEqual(taxonomy.main(), 0)
+        sources = (self.work / "resolution_sources.tsv").read_text(encoding="utf-8")
+        self.assertIn(f"{self.lineage}\t100\tassignment_conflict", sources)
+        provenance = json.loads((self.work / "provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(provenance["resolution_source_counts"]["assignment_conflict"], 1)
 
     def test_assignment_read_ids_reset_between_files(self):
         second = self.work / "assignment-second.tsv"
@@ -276,6 +306,12 @@ class TaxonomyResolverTests(unittest.TestCase):
                 with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2, poll_interval=0.05):
                     pass
             self.assertIn("E_TAXONOMY_CACHE_BUSY", str(cm.exception))
+
+        lock_path = pathlib.Path(f"{self.cache}.lock")
+        self.assertTrue(lock_path.is_file())
+        self.assertEqual(lock_path.read_bytes(), b"")
+        with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
+            self.assertTrue(lock_path.is_file())
 
 
 if __name__ == "__main__":

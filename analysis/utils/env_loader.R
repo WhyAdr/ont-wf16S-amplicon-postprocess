@@ -49,15 +49,6 @@ load_pipeline_environment <- function(repo_root = NULL, fatal_fn = stop) {
     ))
   }
 
-  tryCatch({
-    renv::load(project = repo_root)
-  }, error = function(e) {
-    fatal_fn("Environment activation", simpleError(sprintf(
-      "E_RENV_NOT_RESTORED: failed to load project environment at '%s': %s",
-      repo_root, conditionMessage(e)
-    )))
-  })
-
   project_library <- tryCatch(
     normalizePath(renv::paths$library(project = repo_root), winslash = "/", mustWork = FALSE),
     error = function(e) NA_character_
@@ -68,6 +59,19 @@ load_pipeline_environment <- function(repo_root = NULL, fatal_fn = stop) {
       "E_RENV_NOT_RESTORED: project library '%s' does not exist; run 'Rscript analysis/install_packages.R --restore'",
       lib_desc
     )))
+  }
+
+  active_libraries <- normalizePath(.libPaths(), winslash = "/", mustWork = FALSE)
+  project_is_active <- any(tolower(active_libraries) == tolower(project_library))
+  if (!project_is_active) {
+    tryCatch({
+      renv::load(project = repo_root)
+    }, error = function(e) {
+      fatal_fn("Environment activation", simpleError(sprintf(
+        "E_RENV_NOT_RESTORED: failed to load project environment at '%s': %s",
+        repo_root, conditionMessage(e)
+      )))
+    })
   }
 
   .libPaths(unique(c(project_library, .libPaths())))

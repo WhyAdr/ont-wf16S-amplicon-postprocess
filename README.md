@@ -196,7 +196,7 @@ the two engines must not be treated as byte-for-byte equivalent.
   - Offline default (`network_mode: cache_only`): resolves TaxIDs using local `taxonomy_cache.json` without internet requests.
   - Assignment-derived TaxIDs are written to a run-local resolved cache; an offline run does not mutate the configured source cache.
   - Opt-in refresh (`--refresh-taxonomy`): queries NCBI Entrez E-utilities with bounded exponential backoff, rate pacing, and atomic cache file replacement.
-  - Unresolved and conflicting mappings are exported explicitly. Named nodes with TaxID `0` should be resolved before treating the report as taxonomy-complete in Pavian.
+  - Unresolved and conflicting mappings are exported explicitly. Conflicting assignment mappings retain the modal TaxID (minimum numeric TaxID on a tie) for backward-compatible Kreport output, but are labeled `Conflicted`/`assignment_conflict`, emit a run warning, and must not be treated as authoritative without review. Named nodes with TaxID `0` should be resolved before treating the report as taxonomy-complete in Pavian.
   - The tracked cache-only reference run intentionally reports **46 unresolved taxonomy nodes** and **26 conflicting lineage-to-TaxID mappings**. These diagnostics are surfaced rather than silently discarded.
 - **Interactive Sankey Visualization**:
   - Generated `.kreport` files can be uploaded to [Pavian](https://fbreitwieser.shinyapps.io/pavian/) for interactive Sankey and sunburst diagrams.
@@ -307,7 +307,7 @@ Rscript analysis/install_packages.R --restore
 Rscript -e "files <- list.files('analysis', pattern='[.]R$', recursive=TRUE, full.names=TRUE); invisible(lapply(files, parse))"
 python -m compileall -q analysis tests
 Rscript tests/testthat.R
-python -m unittest -v tests/test_ncbi_taxonomy.py
+python -m unittest -v tests/test_ncbi_taxonomy.py tests/test_check_committed_whitespace.py
 Rscript analysis/00_run_pipeline.R --config config.yml --validate-only
 ```
 
@@ -328,14 +328,18 @@ Cardinality-dependent fields such as samples, requested modules, package version
 collections, module outputs/warnings, artifacts, and Krona provenance samples are always
 JSON arrays, including zero and one item. Failed fail-fast runs retain later
 requested modules as `not_run` records with null execution timestamps. Every v2
-manifest records whether the environment is locked and the SHA-256 of the
-repository `renv.lock` used for the run.
+manifest records whether the environment is locked, the SHA-256 of the
+repository `renv.lock` used for the run, the supplied configuration file's
+SHA-256 and byte size, and available package identity metadata from the lockfile
+and installed `DESCRIPTION` files.
 
 Publication safety includes exclusive file locking (`.wf16s_output.lock`) preventing concurrent
 pipeline execution against the same output root, isolated per-module private staging directories,
-and crash-recovery transaction journals (`.publication_journal.json`) that guarantee deterministic
-rollback or forward-recovery across aborted writes. Online taxonomy refresh features inter-process
-cache locking and pre-commit hash validation to avoid silent overwrites. True zero-mutation
+and hashed sibling transaction journals (`.*.wf16s_journal.json`) that guarantee deterministic
+rollback or forward-recovery across aborted writes. Online taxonomy refresh is computed into the
+run-local resolved cache first, then commits the shared source cache under an inter-process lock;
+a sibling taxonomy transaction journal and hash comparisons restore or forward-recover an interrupted
+commit without overwriting an unrelated cache revision. True zero-mutation
 `--validate-only` checks perform in-memory AST syntax validation without writing bytecode or touch files.
 
 The tracked assignment fixture retains its typed-column digest under the streamed

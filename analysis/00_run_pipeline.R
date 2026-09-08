@@ -82,6 +82,27 @@ if (!identical(lock_info$lock_status, "synchronized")) {
 }
 check_module_dependencies(requested_modules)
 
+taxonomy_cache_path <- cfg$taxonomy$cache
+taxonomy_lock <- NULL
+taxonomy_journal_path <- get_taxonomy_journal_path(taxonomy_cache_path)
+if (isTRUE(cfg$cli$validate_only) && file.exists(taxonomy_journal_path)) {
+  fatal("Taxonomy recovery error", simpleError(sprintf(
+    "E_TAXONOMY_RECOVERY_REQUIRED: pending taxonomy transaction at '%s'; validation cannot mutate it.",
+    taxonomy_journal_path)))
+}
+if (!isTRUE(cfg$cli$validate_only) &&
+    (identical(cfg$taxonomy$network_mode, "refresh") || file.exists(taxonomy_journal_path))) {
+  taxonomy_lock <- tryCatch(acquire_taxonomy_lock(taxonomy_cache_path),
+                            error = function(e) fatal("Taxonomy lock error", e))
+  on.exit(release_taxonomy_lock(taxonomy_lock), add = TRUE)
+  tryCatch(recover_taxonomy_journal(taxonomy_cache_path),
+           error = function(e) fatal("Taxonomy recovery error", e))
+  if (!identical(cfg$taxonomy$network_mode, "refresh")) {
+    release_taxonomy_lock(taxonomy_lock)
+    taxonomy_lock <- NULL
+  }
+}
+
   initial_inventory <- tryCatch(inventory_inputs(cfg), error = function(e) fatal("Preflight error", e))
   context <- tryCatch(build_context(cfg), error = function(e) fatal("Input validation error", e))
   tryCatch(validate_output_root(cfg, repo_root,
@@ -129,17 +150,51 @@ tryCatch(recover_publication_journal(final_root),
 prior_manifest <- tryCatch(validate_prior_output(final_root, cfg$cli$overwrite),
                            error = function(e) fatal("Output validation error", e))
 
-taxonomy_cache_path <- cfg$taxonomy$cache
-taxonomy_cache_state <- "unchanged" # "unchanged", "candidate_committed", "restored"
+taxonomy_cache_state <- "unchanged" # unchanged, candidate_committed, restored, published
 taxonomy_cache_backup_file <- NULL
 taxonomy_cache_original_sha256 <- full_inventory$taxonomy_cache$sha256
 taxonomy_cache_original_size <- full_inventory$taxonomy_cache$size_bytes
+taxonomy_cache_committed_sha256 <- NULL
 
 if (identical(cfg$taxonomy$network_mode, "refresh") && !is.null(taxonomy_cache_path) && file.exists(taxonomy_cache_path)) {
-  taxonomy_cache_backup_file <- tempfile(pattern = "wf16s_tax_backup_")
+  taxonomy_cache_backup_file <- tempfile(pattern = ".wf16s_tax_backup_",
+                                         tmpdir = dirname(taxonomy_cache_path))
   if (!file.copy(taxonomy_cache_path, taxonomy_cache_backup_file, overwrite = TRUE)) {
     fatal("Taxonomy backup error", simpleError(sprintf("Could not create backup of '%s'.", taxonomy_cache_path)))
   }
+}
+
+# Register cache cleanup immediately after backup creation so an error while
+# preparing the run stage cannot strand unjournaled recovery material.
+on.exit({
+  if (identical(taxonomy_cache_state, "candidate_committed")) {
+    tryCatch(restore_taxonomy_cache(), error = function(e) {
+      warning(sprintf("Taxonomy source-cache rollback failed: %s", conditionMessage(e)),
+              call. = FALSE)
+    })
+  }
+  if (!is.null(taxonomy_cache_backup_file) && file.exists(taxonomy_cache_backup_file)) {
+    tryCatch(cleanup_taxonomy_journal(taxonomy_cache_path, taxonomy_cache_backup_file),
+             error = function(e) warning(conditionMessage(e), call. = FALSE))
+  }
+}, add = TRUE)
+
+update_taxonomy_provenance <- function(root, restored = FALSE) {
+  if (is.null(root)) return(invisible(FALSE))
+  provenance_path <- file.path(root, "07_Kreport", "taxonomy_provenance.json")
+  if (!file.exists(provenance_path)) return(invisible(FALSE))
+  provenance <- jsonlite::fromJSON(provenance_path, simplifyVector = FALSE)
+  provenance$source_cache_updated <- !isTRUE(restored)
+  provenance$source_cache_commit_deferred <- FALSE
+  provenance$source_cache_rolled_back <- isTRUE(restored)
+  provenance$source_cache_sha256_after <- if (isTRUE(restored)) {
+    taxonomy_cache_original_sha256
+  } else {
+    taxonomy_cache_committed_sha256
+  }
+  provenance$source_cache_sha256_committed <- provenance$source_cache_sha256_after
+  atomic_write_json(provenance, provenance_path)
+  invisible(TRUE)
 }
 
 restore_taxonomy_cache <- function() {
@@ -152,42 +207,51 @@ restore_taxonomy_cache <- function() {
       cur_hash <- compute_file_hash(taxonomy_cache_path)
       if (identical(cur_hash, taxonomy_cache_original_sha256)) {
         taxonomy_cache_state <<- "restored"
+        update_taxonomy_provenance(current_module_stage, restored = TRUE)
+        update_taxonomy_provenance(stage, restored = TRUE)
+        cleanup_taxonomy_journal(taxonomy_cache_path, taxonomy_cache_backup_file)
+        taxonomy_cache_backup_file <<- NULL
         return(invisible(TRUE))
       }
     }
+  }
+  current_hash <- compute_file_hash(taxonomy_cache_path)
+  if (is.null(taxonomy_cache_committed_sha256) ||
+      !identical(current_hash, taxonomy_cache_committed_sha256)) {
+    stop(sprintf(
+      "E_TAXONOMY_CACHE_CHANGED: refusing rollback because taxonomy cache '%s' no longer matches this run's committed candidate.",
+      taxonomy_cache_path), call. = FALSE)
   }
   atomic_replace(taxonomy_cache_path, function(temp) {
     if (!file.copy(taxonomy_cache_backup_file, temp, overwrite = TRUE)) {
       stop(sprintf("Failed to copy taxonomy backup from '%s'.", taxonomy_cache_backup_file), call. = FALSE)
     }
-  })
+  }, expected_sha256 = taxonomy_cache_original_sha256)
   restored_hash <- compute_file_hash(taxonomy_cache_path)
   if (!identical(restored_hash, taxonomy_cache_original_sha256)) {
     stop("Taxonomy cache restoration failed SHA-256 verification.", call. = FALSE)
   }
   taxonomy_cache_state <<- "restored"
+  update_taxonomy_provenance(current_module_stage, restored = TRUE)
+  update_taxonomy_provenance(stage, restored = TRUE)
+  cleanup_taxonomy_journal(taxonomy_cache_path, taxonomy_cache_backup_file)
+  taxonomy_cache_backup_file <<- NULL
   invisible(TRUE)
 }
 
 taxonomy_cache_expected_hash <- function() {
   if (!identical(cfg$taxonomy$network_mode, "refresh")) return(NULL)
-  provenance_path <- file.path(stage, "07_Kreport", "taxonomy_provenance.json")
-  if (!file.exists(provenance_path)) return(full_inventory$taxonomy_cache$sha256)
-  provenance <- tryCatch(jsonlite::fromJSON(provenance_path, simplifyVector = FALSE),
-                         error = function(e) list())
-  provenance$source_cache_sha256_committed %||% full_inventory$taxonomy_cache$sha256
+  if (identical(taxonomy_cache_state, "candidate_committed")) {
+    taxonomy_cache_committed_sha256
+  } else {
+    full_inventory$taxonomy_cache$sha256
+  }
 }
 
 stage <- prepare_run_staging(final_root)
 stage_active <- TRUE
 current_module_stage <- NULL
 on.exit({
-  if (identical(taxonomy_cache_state, "candidate_committed")) {
-    tryCatch(restore_taxonomy_cache(), error = function(e) NULL)
-  }
-  if (!is.null(taxonomy_cache_backup_file) && file.exists(taxonomy_cache_backup_file)) {
-    unlink(taxonomy_cache_backup_file, force = TRUE)
-  }
   if (!is.null(current_module_stage) && dir.exists(current_module_stage)) {
     cleanup_module_staging(current_module_stage)
   }
@@ -270,7 +334,35 @@ for (module_name in requested_modules) {
 
   if (identical(module_name, "kreport") && identical(result$status, "completed") &&
       identical(cfg$taxonomy$network_mode, "refresh")) {
+    candidate_cache <- file.path(module_stage, "07_Kreport", "resolved_taxonomy_cache.json")
+    if (!file.exists(candidate_cache)) {
+      fatal("Taxonomy commit error", simpleError("Resolver candidate cache is missing."))
+    }
+    taxonomy_cache_committed_sha256 <- compute_file_hash(candidate_cache)
+    current_cache_sha256 <- compute_file_hash(taxonomy_cache_path)
+    if (!identical(current_cache_sha256, taxonomy_cache_original_sha256)) {
+      fatal("Taxonomy commit error", simpleError(sprintf(
+        "E_TAXONOMY_CACHE_CHANGED: taxonomy cache '%s' changed before deferred commit.",
+        taxonomy_cache_path)))
+    }
+    tryCatch(write_taxonomy_journal(
+      taxonomy_cache_path, taxonomy_cache_backup_file, final_root,
+      taxonomy_cache_original_sha256, taxonomy_cache_committed_sha256, "prepared"
+    ), error = function(e) fatal("Taxonomy journal error", e))
+    tryCatch(atomic_replace(taxonomy_cache_path, function(temp) {
+      if (!file.copy(candidate_cache, temp, overwrite = TRUE)) {
+        stop("Could not copy deferred taxonomy candidate.", call. = FALSE)
+      }
+    }, expected_sha256 = taxonomy_cache_committed_sha256),
+    error = function(e) fatal("Taxonomy commit error", e))
     taxonomy_cache_state <- "candidate_committed"
+    tryCatch(write_taxonomy_journal(
+      taxonomy_cache_path, taxonomy_cache_backup_file, final_root,
+      taxonomy_cache_original_sha256, taxonomy_cache_committed_sha256,
+      "candidate_committed"
+    ), error = function(e) fatal("Taxonomy journal error", e))
+    tryCatch(update_taxonomy_provenance(module_stage, restored = FALSE),
+             error = function(e) fatal("Taxonomy provenance update error", e))
   }
 
   input_check <- tryCatch({
@@ -429,6 +521,13 @@ if (any_failed && !is.null(prior_manifest)) {
 tryCatch(publish_staged_run(stage, final_root),
          error = function(e) fatal("Output publication failed", e))
 stage_active <- FALSE
+if (identical(taxonomy_cache_state, "candidate_committed")) {
+  taxonomy_cache_state <- "published"
+  tryCatch({
+    cleanup_taxonomy_journal(taxonomy_cache_path, taxonomy_cache_backup_file)
+    taxonomy_cache_backup_file <- NULL
+  }, error = function(e) fatal("Taxonomy transaction cleanup failed", e))
+}
 if (any_failed) {
   stop(sprintf("[FATAL] Failed run manifest published: %s", file.path(final_root, "run_manifest.json")),
        call. = FALSE)

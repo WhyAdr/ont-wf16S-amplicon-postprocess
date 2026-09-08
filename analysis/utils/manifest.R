@@ -339,7 +339,7 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
 
   # Inputs validation
   if (!is.list(manifest$inputs) || is.null(names(manifest$inputs))) manifest_fail("inputs", "expected an object.")
-  for (field in c("abundance_table", "params_json", "taxonomy_cache")) {
+  for (field in c("config_file", "abundance_table", "params_json", "taxonomy_cache")) {
     if (is.null(manifest$inputs[[field]])) manifest_fail(paste0("inputs.", field), "field is required.")
     validate_manifest_fingerprint(manifest$inputs[[field]], paste0("inputs.", field))
   }
@@ -581,6 +581,34 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
     assert_manifest_scalar(record$package, paste0("environment.package_locations[", index, "].package"), "character")
     assert_manifest_scalar(record$version, paste0("environment.package_locations[", index, "].version"), "character")
     if (!is.null(record$path)) assert_manifest_scalar(record$path, paste0("environment.package_locations[", index, "].path"), "character", nullable = TRUE)
+    for (field in c("description_sha256", "lock_source", "lock_repository", "lock_remote_type",
+                    "lock_remote_host", "lock_remote_repo", "lock_remote_ref", "lock_remote_sha",
+                    "lock_hash")) {
+      if (!field %in% names(record)) {
+        manifest_fail(paste0("environment.package_locations[", index, "].", field), "field is required.")
+      }
+    }
+    assert_manifest_scalar(record$description_sha256,
+                           paste0("environment.package_locations[", index, "].description_sha256"),
+                           "character", nullable = TRUE)
+    if (!is.null(record$description_sha256)) {
+      if (!grepl("^[0-9a-f]{64}$", record$description_sha256)) {
+        manifest_fail(paste0("environment.package_locations[", index, "].description_sha256"),
+                      "expected lowercase SHA-256 or null.")
+      }
+    }
+    for (field in c("lock_source", "lock_repository", "lock_remote_type", "lock_remote_host",
+                    "lock_remote_repo", "lock_remote_ref", "lock_remote_sha", "lock_hash")) {
+      assert_manifest_scalar(record[[field]],
+                             paste0("environment.package_locations[", index, "].", field),
+                             "character", nullable = TRUE)
+      if (!is.null(record[[field]])) {
+        if (!nzchar(record[[field]])) {
+          manifest_fail(paste0("environment.package_locations[", index, "].", field),
+                        "expected non-empty character value or null.")
+        }
+      }
+    }
   }
 
   if (identical(env$lock_status, "synchronized")) {

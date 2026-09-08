@@ -11,8 +11,14 @@ All notable changes to this project are documented in this file.
 - **Transactional Replace & Crash Recovery**: Replace unsafe rename-over-deleted semantics with atomic temporary replacements and sibling transaction journals with deterministic crash recovery.
 - **Output Concurrency Locking**: Acquire cross-platform output-root locks via `filelock` to eliminate races during parallel runs against identical output directories.
 - **Taxonomy Cache State Machine & Concurrency**: Implement explicit cache state machine (`unchanged`, `candidate_committed`, `restored`) with tempfile backup, SHA-256 pre-verification, cross-platform file locking (`fcntl` / `msvcrt`), and fail-closed race abortion (`E_TAXONOMY_CACHE_CHANGED`).
+- **Deferred Taxonomy Commit & Recovery**: Keep refresh candidates run-local until the kreport module succeeds, journal the source-cache commit, restore it when a later module or publication fails, and forward-recover only from a strictly validated completed output.
+- **Conflict Provenance**: Retain the compatibility modal/minimum TaxID tie-break for assignment conflicts while explicitly labelling affected rows `Conflicted` with `assignment_conflict` provenance and a run warning.
 - **Private Per-Module Staging**: Replace whole-stage directory copying with isolated per-module staging roots, eliminating quadratic disk I/O and enforcing module output boundaries.
-- **Environment & Preflight Hardening**: Make external-CWD loading self-sufficient via `env_loader.R`, enforce project-library containment for all non-base packages, and include startup files (`.Rprofile`, `renv/activate.R`, `renv/settings.json`) in source provenance.
+- **Environment & Preflight Hardening**: Make external-CWD loading self-sufficient via `env_loader.R`, enforce project-library containment for all non-base packages, include startup files (`.Rprofile`, `renv/activate.R`, `renv/settings.json`) in source provenance, fingerprint the supplied configuration, and record available lock/install identity metadata for each package.
+- **Environment Activation Idempotence**: Avoid redundant `renv::load()` calls when the canonical project library is already active, keeping subprocess validation deterministic on Windows while retaining bootstrap for external environments.
+- **Failure Retry & Recovery Validation**: Permit explicit overwrite of a failed current-contract run, reject unowned staging collisions before mutation, and require a complete schema-v2 manifest, artifact hashes, and physical census before trusting a crash-recovery candidate.
+- **Release CI Assertions**: Map each GitHub event to an explicit diff base and unit-test root, multi-commit push, new-branch, and pull-request range selection.
+- **Exact Release Identity**: Require release-verification outputs to come from the current exact Git commit, a clean source tree, a synchronized lock, and no development escape hatches.
 - **AST Syntax Checking**: Replace bytecode compilation in preflight with read-only AST syntax parsing.
 
 ## [0.4.2] - 2026-09-07

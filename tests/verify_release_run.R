@@ -14,6 +14,15 @@ expected_pipeline_version <- trimws(readLines(
 lockfile_path <- file.path(repo_root, "renv.lock")
 if (!file.exists(lockfile_path)) stop("Expected committed renv.lock.")
 expected_lockfile_sha256 <- digest::digest(file = lockfile_path, algo = "sha256")
+expected_git_commit <- trimws(system2(
+  "git",
+  c("-c", sprintf("safe.directory=%s", repo_root), "-C", repo_root, "rev-parse", "HEAD"),
+  stdout = TRUE,
+  stderr = TRUE
+))
+if (length(expected_git_commit) != 1L || !grepl("^[0-9a-f]{40}$", expected_git_commit)) {
+  stop("Could not resolve the release checkout's exact Git commit.")
+}
 root <- normalizePath(args[1], winslash = "/", mustWork = TRUE)
 manifest <- jsonlite::fromJSON(
   file.path(root, "run_manifest.json"),
@@ -49,7 +58,10 @@ stopifnot(isTRUE(manifest$environment$locked))
 stopifnot(identical(manifest$environment$lock_status, "synchronized"))
 stopifnot(identical(manifest$environment$lockfile, "renv.lock"))
 stopifnot(identical(manifest$environment$lockfile_sha256, expected_lockfile_sha256))
-stopifnot(grepl("^[0-9a-f]{40}$", manifest$git_commit))
+stopifnot(identical(manifest$git_commit, expected_git_commit))
+stopifnot(identical(manifest$git_dirty, FALSE))
+stopifnot(identical(manifest$cli$allow_dirty, FALSE))
+stopifnot(identical(manifest$cli$allow_unlocked, FALSE))
 stopifnot(grepl("^R version 4[.]", manifest$interpreter$r))
 stopifnot(grepl("Python 3[.]12", manifest$interpreter$python))
 stopifnot(identical(manifest$cli$refresh_taxonomy, FALSE))
@@ -282,9 +294,6 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
       !grepl("^KronaTools executable .* was not found; writing Krona TSV files without HTML rendering[.]$",
              unexpected_warnings)
     ]
-  }
-  if (isTRUE(manifest$cli$allow_dirty)) {
-    unexpected_warnings <- unexpected_warnings[unexpected_warnings != "Dirty-source development run"]
   }
   stopifnot(length(unexpected_warnings) == 0L)
   for (mod in names(manifest$modules)) {

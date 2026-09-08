@@ -152,7 +152,10 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
 
   context <- build_context(cfg)
 
-  res <- run_kreport(context)
+  expect_warning(
+    res <- run_kreport(context),
+    "26 lineage-to-TaxID conflict"
+  )
   expect_equal(res$status, "completed")
 
   kreport_file <- file.path(cfg$output$dirs$kreport, "AmbarAyunda_minimap2_16S.kreport")
@@ -200,7 +203,11 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
                            check.names = FALSE)
   expect_true("ResolutionSource" %in% names(resolution))
   expect_true(all(resolution$ResolutionSource %in%
-                    c("source_cache", "assignment", "ncbi_refresh", "unresolved")))
+                    c("source_cache", "assignment", "assignment_conflict",
+                      "ncbi_refresh", "unresolved")))
+  expect_gt(sum(resolution$Status == "Conflicted"), 0L)
+  expect_true(all(resolution$Status[resolution$ResolutionSource == "assignment_conflict"] ==
+                    "Conflicted"))
 })
 
 test_that("kreport resolver handles input and output paths containing spaces", {
