@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep zero-classified samples undefined in composition heatmaps: sidecars retain
+  finite zero abundances, exclude invalid samples from selection, clustering, and
+  pseudocount derivation, and mark the plotted column as undefined.
+- Preserve undefined cohort group means as `NA` when no valid sample contributes;
+  group plots label the state and document arithmetic, non-pooled means.
+- Serialize Krona `magnitude` (clade total) and `magnitudeUnassigned` (direct
+  assignment) values with recursive tree checks and a normalized semantic fixture.
+- Make Krona provenance portable across transactional publication and run moves
+  with run-relative POSIX paths, content hashes, and explicit renderer identities.
+- Add deterministic display-label resolution, sidecar/release invariant checks,
+  exact non-symlink vendor inventories, atomic failure regressions, and a
+  mutation-free requested-Krona CI preflight.
+
 ## [0.4.5] - 2026-09-09
 
 ### Added

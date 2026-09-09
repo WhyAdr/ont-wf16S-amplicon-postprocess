@@ -168,6 +168,17 @@ least two display rows; single-sample rows are abundance-ordered and are not
 clustered. A rank with no positive classified abundance produces a structured
 `*_skipped.tsv` sidecar instead of a fabricated image.
 
+Zero-classified samples are represented as undefined composition: stacked and
+heatmap sidecars keep finite numeric zero abundances with
+`ValidDenominator = FALSE`, and those samples are excluded from taxon-selection
+means, cohort means, heatmap pseudocounts, and clustering distances. Heatmap
+columns are plotted as neutral `NA` cells with an explicit denominator-status
+annotation. The residual `Other` row is never positive for an invalid sample.
+When a cohort group has no valid samples, its group-mean rows remain present with
+`SamplesUsed = 0` and `MeanRelativeAbundance = NA`; the plot marks that group as
+undefined. Other group means are arithmetic means of valid per-sample classified-
+read proportions, not read-depth-pooled proportions.
+
 ### FAPROTAX Functional Inference (opt-in)
 
 Request the module explicitly with `--modules faprotax`, or include `faprotax`
@@ -280,6 +291,15 @@ The vendored Krona 2.8.1 browser files are unmodified and SHA-256 pinned in
 Krona-compatible, not as official Krona software. The module writes
 `07_Kreport/krona/krona_provenance.json` with renderer policy/version, vendor
 manifest hashes, HTML status, and exact read-accounting reconciliation.
+
+Builtin Krona XML records both `magnitude` (the clade total) and
+`magnitudeUnassigned` (the direct assignment at that node), including internal
+nodes and the dataset root. Krona artifact paths in provenance use the
+`path_basis = "run_dir"` contract: they are POSIX-style paths relative to the
+completed run root and carry SHA-256 hashes, so they remain valid after private
+module staging is removed or the completed run is moved as a unit. The pipeline
+renderer identity comes from `VERSION`; the upstream Krona identity comes from
+the pinned vendor manifest.
 
 Krona magnitudes use direct positive-count taxonomy rows plus one explicit
 top-level `Unclassified` contribution when applicable. Ancestor clade counts
