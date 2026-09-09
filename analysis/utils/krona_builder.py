@@ -26,9 +26,24 @@ import unicodedata
 import xml.etree.ElementTree as ET
 
 
-BUILDER_VERSION = "0.4.5"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SEMVER_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\n\Z")
+
+
+def read_strict_semver(path: os.PathLike[str] | str) -> str:
+    """Read the byte-strict pipeline version from the repository VERSION file."""
+
+    try:
+        text = Path(path).read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"could not read pipeline VERSION '{path}': {exc}") from exc
+    if not SEMVER_RE.fullmatch(text):
+        raise ValueError("VERSION must contain exactly one newline-terminated SemVer value")
+    return text[:-1]
+
+
+BUILDER_VERSION = read_strict_semver(REPO_ROOT / "VERSION")
 VENDOR_TAG = "v2.8.1"
-VENDOR_VERSION = "2.8.1"
 EXPECTED_VENDOR_FILES = (
     "LICENSE.txt",
     "src/krona-2.0.js",
@@ -138,6 +153,25 @@ def build_tree(records: list[tuple[int, tuple[str, ...]]]) -> dict[str, object]:
     return root
 
 
+def validate_tree(node: dict[str, object]) -> int:
+    """Validate and return a node's clade total from direct and child totals."""
+
+    direct = int(node["direct"])
+    clade = int(node["clade"])
+    if direct < 0:
+        _fail("Krona tree direct magnitude cannot be negative")
+    children = node["children"]
+    assert isinstance(children, dict)
+    child_total = 0
+    for child in children.values():
+        if not isinstance(child, dict):
+            _fail("Krona tree contains a malformed child node")
+        child_total += validate_tree(child)
+    if clade != direct + child_total or clade < direct:
+        _fail("Krona tree direct/clade invariant failed")
+    return clade
+
+
 def _element_text(parent: ET.Element, tag: str, text: str) -> ET.Element:
     child = ET.SubElement(parent, tag)
     child.text = text
@@ -148,6 +182,8 @@ def _append_node(parent: ET.Element, name: str, node: dict[str, object]) -> None
     xml_node = ET.SubElement(parent, "node", {"name": name})
     magnitude = ET.SubElement(xml_node, "magnitude")
     _element_text(magnitude, "val", str(int(node["clade"])))
+    unassigned = ET.SubElement(xml_node, "magnitudeUnassigned")
+    _element_text(unassigned, "val", str(int(node["direct"])))
     children = node["children"]
     assert isinstance(children, dict)
     for child_name in sorted(children):
@@ -163,10 +199,15 @@ def build_krona_xml(
 
     dataset = _require_text(dataset_name, "dataset name")
     tree = build_tree(records)
+    validate_tree(tree)
     root = ET.Element("krona", {"collapse": "false", "key": "false"})
     attributes = ET.SubElement(root, "attributes", {"magnitude": "magnitude"})
     attribute = ET.SubElement(attributes, "attribute", {"display": "Total"})
     attribute.text = "magnitude"
+    unassigned_attribute = ET.SubElement(
+        attributes, "attribute", {"display": "Unassigned"}
+    )
+    unassigned_attribute.text = "magnitudeUnassigned"
     datasets = ET.SubElement(root, "datasets")
     _element_text(datasets, "dataset", dataset)
     _append_node(root, dataset, tree)
@@ -175,7 +216,7 @@ def build_krona_xml(
 
 def _load_manifest(vendor_dir: os.PathLike[str] | str) -> tuple[dict[str, object], Path]:
     root = Path(vendor_dir)
-    if not root.is_dir():
+    if root.is_symlink() or not root.is_dir():
         _fail(f"Krona vendor directory is missing: {root}")
     manifest_path = root / "SOURCE.json"
     if not manifest_path.is_file():
@@ -193,29 +234,56 @@ def _load_manifest(vendor_dir: os.PathLike[str] | str) -> tuple[dict[str, object
     entries = manifest.get("files")
     if not isinstance(entries, list):
         _fail("Krona vendor manifest files must be a list")
-    seen: set[str] = set()
+    declared: set[str] = set()
+    declared_casefolded: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             _fail("Krona vendor manifest contains an invalid file entry")
         relative = entry["path"]
-        pure = PurePosixPath(relative.replace("\\", "/"))
-        if pure.is_absolute() or ".." in pure.parts or str(pure) != relative.replace("\\", "/"):
+        if (
+            not relative
+            or "\\" in relative
+            or relative.startswith("/")
+            or re.match(r"^[A-Za-z]:", relative)
+        ):
             _fail(f"Krona vendor manifest path is unsafe: {relative}")
-        if relative in seen:
-            _fail(f"Krona vendor manifest contains duplicate path: {relative}")
-        seen.add(relative)
+        parts = relative.split("/")
+        pure = PurePosixPath(relative)
+        if (
+            pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in parts)
+            or pure.as_posix() != relative
+        ):
+            _fail(f"Krona vendor manifest path is unsafe: {relative}")
+        folded = relative.casefold()
+        if relative in declared or folded in declared_casefolded:
+            _fail(f"Krona vendor manifest contains duplicate or case-colliding path: {relative}")
+        declared.add(relative)
+        declared_casefolded.add(folded)
         expected_hash = entry.get("sha256")
         if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
             _fail(f"Krona vendor manifest has an invalid SHA-256 for {relative}")
         file_path = root.joinpath(*pure.parts)
-        if not file_path.is_file():
+        if file_path.is_symlink() or not file_path.is_file():
             _fail(f"Krona vendor file is missing: {file_path}")
         actual_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
         if actual_hash != expected_hash:
             _fail(f"Krona vendor SHA-256 mismatch for {relative}")
-    missing = sorted(set(EXPECTED_VENDOR_FILES) - seen)
-    if missing:
-        _fail("Krona vendor manifest omits required file(s): " + ", ".join(missing))
+    for candidate in root.rglob("*"):
+        if candidate.is_symlink():
+            _fail(f"Krona vendor tree contains a symlink: {candidate}")
+    actual = {
+        candidate.relative_to(root).as_posix()
+        for candidate in root.rglob("*")
+        if candidate.is_file() and candidate != manifest_path
+    }
+    actual_casefolded = {path.casefold() for path in actual}
+    if len(actual_casefolded) != len(actual):
+        _fail("Krona vendor tree contains case-colliding files")
+    if actual != declared:
+        _fail("declared and actual Krona vendor inventories differ")
+    if declared != set(EXPECTED_VENDOR_FILES):
+        _fail("Krona vendor inventory differs from the renderer contract")
     return manifest, root
 
 
@@ -250,7 +318,8 @@ def build_html(xml_bytes: bytes, dataset_name: str, vendor_dir: os.PathLike[str]
     """Embed Krona JavaScript, images, and XML into a standalone HTML document."""
 
     dataset = _require_text(dataset_name, "dataset name")
-    _manifest, root = _load_manifest(vendor_dir)
+    manifest, root = _load_manifest(vendor_dir)
+    vendor_version = str(manifest["tag"]).removeprefix("v")
     javascript = _read_vendor_asset(root, "src/krona-2.0.js").decode("utf-8")
     hidden_uri = _data_uri("img/hidden.png", _read_vendor_asset(root, "img/hidden.png"))
     loading_uri = _data_uri("img/loading.gif", _read_vendor_asset(root, "img/loading.gif"))
@@ -269,7 +338,7 @@ def build_html(xml_bytes: bytes, dataset_name: str, vendor_dir: os.PathLike[str]
         '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">\n'
         " <head>\n"
         '  <meta charset="utf-8"/>\n'
-        f'  <meta name="generator" content="AAy Amplicon builtin Krona {VENDOR_VERSION}"/>\n'
+        f'  <meta name="generator" content="AAy Amplicon builtin {BUILDER_VERSION} + Krona {vendor_version}"/>\n'
         f"  <title>{title}</title>\n"
         f'  <link rel="shortcut icon" href="{favicon_uri}"/>\n'
         '  <script type="text/javascript">\n'
@@ -295,9 +364,9 @@ def atomic_write(path: os.PathLike[str] | str, content: bytes) -> None:
 
     output = Path(path)
     parent = output.parent
+    temporary: Path | None = None
     try:
         parent.mkdir(parents=True, exist_ok=True)
-        temporary: Path | None = None
         with tempfile.NamedTemporaryFile(
             mode="wb", prefix=output.name + ".tmp-", dir=parent, delete=False
         ) as handle:
@@ -306,12 +375,15 @@ def atomic_write(path: os.PathLike[str] | str, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, output)
-    except OSError as exc:
-        if "temporary" in locals() and temporary is not None:
+        temporary = None
+    except Exception as exc:
+        if temporary is not None:
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+        if isinstance(exc, BuilderError):
+            raise
         _fail(f"could not atomically write '{output}': {exc}")
 
 
