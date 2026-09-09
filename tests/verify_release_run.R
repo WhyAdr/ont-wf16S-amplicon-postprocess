@@ -7,6 +7,7 @@ if (length(script_arg) != 1L) stop("Could not locate verify_release_run.R.")
 script_path <- normalizePath(sub("^--file=", "", script_arg), winslash = "/", mustWork = TRUE)
 repo_root <- normalizePath(file.path(dirname(script_path), ".."), winslash = "/", mustWork = TRUE)
 source(file.path(repo_root, "analysis", "utils", "config.R"))
+source(file.path(repo_root, "analysis", "utils", "dependencies.R"))
 source(file.path(repo_root, "analysis", "utils", "version.R"))
 source(file.path(repo_root, "analysis", "utils", "manifest.R"))
 expected_pipeline_version <- read_pipeline_version(file.path(repo_root, "VERSION"))
@@ -404,7 +405,7 @@ assert_heatmap_pair <- function(rank) {
     pseudo <- unique(round(table$PseudoCount, 15))
     stopifnot(length(pseudo) == 1L)
     positive <- table$RelativeAbundance[table$ValidDenominator & table$RelativeAbundance > 0]
-    stopifnot(length(positive), abs(pseudo - min(positive) / 2) < 1e-12)
+    stopifnot(length(positive) > 0L, abs(pseudo - min(positive) / 2) < 1e-12)
     stopifnot(isTRUE(all.equal(
       as.numeric(table$TransformedValue),
       log10(as.numeric(table$RelativeAbundance) + pseudo),
@@ -493,6 +494,55 @@ if (isTRUE(manifest$cli$krona)) {
     )
   }
 
+  verify_builtin_krona_html <- function(path, expected_total) {
+    python <- find_python()
+    python_code <- paste(
+      "import sys",
+      "import re",
+      "from pathlib import Path",
+      "from xml.etree import ElementTree as ET",
+      "text = Path(sys.argv[1]).read_text(encoding='utf-8')",
+      "starts = list(re.finditer(r'<krona(?:\\s[^>]*)?>', text))",
+      "if len(starts) != 1 or text.count('</krona>') != 1:",
+      "    raise ValueError('expected exactly one Krona XML fragment')",
+      "start = starts[0].start()",
+      "end = text.index('</krona>', start) + len('</krona>')",
+      "document = ET.fromstring(text[start:end])",
+      "dataset_nodes = document.findall('./node')",
+      "if len(dataset_nodes) != 1:",
+      "    raise ValueError('expected exactly one dataset node')",
+      "def integer(node, path):",
+      "    value = node.findtext(path)",
+      "    if value is None or not value.isdigit() or (len(value) > 1 and value[0] == '0'):",
+      "        raise ValueError(f'non-canonical integer at {path}')",
+      "    return int(value)",
+      "def check(node):",
+      "    clade = integer(node, './magnitude/val')",
+      "    direct = integer(node, './magnitudeUnassigned/val')",
+      "    child_clades = sum(check(child) for child in node.findall('./node'))",
+      "    if clade < direct or clade != direct + child_clades:",
+      "        raise ValueError('Krona clade/direct arithmetic mismatch')",
+      "    return clade",
+      "print(check(dataset_nodes[0]))",
+      sep = "\n"
+    )
+    result <- processx::run(
+      python,
+      args = c("-c", python_code, path),
+      error_on_status = FALSE
+    )
+    if (!identical(result$status, 0L)) {
+      detail <- paste(c(result$stdout, result$stderr), collapse = "\n")
+      stop(sprintf("Builtin Krona XML verification failed: %s", trimws(detail)))
+    }
+    root_clade <- suppressWarnings(as.numeric(trimws(result$stdout)))
+    if (length(root_clade) != 1L || is.na(root_clade) || !is.finite(root_clade) ||
+        root_clade != expected_total) {
+      stop("Builtin Krona root total does not match the declared read total.")
+    }
+    invisible(root_clade)
+  }
+
   for (record in krona_records) {
     sample_id <- as.character(record$sample_id)
     accounting_row <- accounting[accounting$SampleID == sample_id, , drop = FALSE]
@@ -521,32 +571,11 @@ if (isTRUE(manifest$cli$krona)) {
       stopifnot(identical(basename(html_path), paste0(sanitize_release_filename(sample_id), ".krona.html")))
       stopifnot(grepl("^[0-9a-f]{64}$", as.character(record$html_sha256)))
       stopifnot(identical(sha256_file(html_path), as.character(record$html_sha256)))
-        if (identical(krona_provenance$renderer, "builtin_krona_compatible")) {
+      if (identical(krona_provenance$renderer, "builtin_krona_compatible")) {
         html_text <- paste(readLines(html_path, warn = FALSE), collapse = "\n")
         stopifnot(!grepl("<(script|link|img)[^>]+(src|href)=['\"]https?://", html_text,
                          ignore.case = TRUE, perl = TRUE))
-          if (!requireNamespace("xml2", quietly = TRUE)) {
-            stop("Builtin Krona release verification requires the xml2 package.")
-          }
-          document <- xml2::read_html(html_path)
-          dataset_node <- xml2::xml_find_first(document, ".//node")
-          stopifnot(length(dataset_node) == 1L)
-          check_krona_node <- function(node) {
-            clade_node <- xml2::xml_find_first(node, "./magnitude/val")
-            direct_node <- xml2::xml_find_first(node, "./magnitudeUnassigned/val")
-            stopifnot(length(clade_node) == 1L, length(direct_node) == 1L)
-            clade <- suppressWarnings(as.numeric(xml2::xml_text(clade_node)))
-            direct <- suppressWarnings(as.numeric(xml2::xml_text(direct_node)))
-            children <- xml2::xml_find_all(node, "./node")
-            child_clades <- if (length(children)) {
-              vapply(seq_along(children), function(i) check_krona_node(children[[i]]), numeric(1))
-            } else numeric(0)
-            stopifnot(is.finite(clade), is.finite(direct), direct >= 0,
-                      clade == direct + sum(child_clades))
-            clade
-          }
-          root_clade <- check_krona_node(dataset_node)
-          stopifnot(root_clade == totals$total)
+        verify_builtin_krona_html(html_path, totals$total)
       }
     } else {
       stopifnot(is.null(record$html_path))
