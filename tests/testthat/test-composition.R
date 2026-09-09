@@ -26,6 +26,24 @@ test_that("TaxonPath identity survives contextual display-label disambiguation",
   expect_false(any(mapping$DisplayTaxon == "Other"))
 })
 
+test_that("display labels are invariant to input-row permutation and literal Other", {
+  table <- data.frame(
+    TaxonPath = c("Bacteria;P1;Shared", "Bacteria;P2;Shared",
+                  "Bacteria;P3;Other", "Bacteria;P4;Other [P3]"),
+    stringsAsFactors = FALSE
+  )
+  expected <- make_taxon_display_map(table)
+  set.seed(1046)
+  for (i in seq_len(100L)) {
+    permuted <- table[sample(seq_len(nrow(table))), , drop = FALSE]
+    actual <- make_taxon_display_map(permuted)
+    expect_equal(actual[order(actual$TaxonPath), , drop = FALSE],
+                 expected[order(expected$TaxonPath), , drop = FALSE])
+  }
+  expect_length(unique(expected$DisplayTaxon), nrow(expected))
+  expect_false(any(expected$DisplayTaxon == "Other"))
+})
+
 test_that("Taxon selection uses valid-sample means and TaxonPath tie breaks", {
   table <- composition_rank_fixture()
   selected <- select_display_taxa(
@@ -86,12 +104,70 @@ test_that("Cohort order, arithmetic group means, and heatmap contracts are expli
   expect_false(any(prepared$sidecar$ColumnOrder > 3L))
   expect_true(all(is.finite(prepared$sidecar$TransformedValue)))
   expect_true(all(prepared$sidecar$PseudoCount > 0))
+  expect_equal(unique(prepared$sidecar$PseudoCount), 0.125, tolerance = 1e-12)
+  expect_equal(sum(prepared$sidecar$RelativeAbundance[prepared$sidecar$SampleID == "S1"]), 0)
+  expect_true(all(is.na(prepared$matrix_plot[, "S1"])))
+  expect_true(all(is.finite(prepared$matrix_transformed[, "S1"])))
+  expect_false(any(prepared$sidecar$TaxonPath == "__OTHER__" &
+                   prepared$sidecar$SampleID == "S1" &
+                   prepared$sidecar$RelativeAbundance > 0))
 
   none <- prepare_heatmap_data(
     table, c("S2", "S10", "S1"), metadata, top_n = 1L,
     include_other = FALSE, transform = "none", rank = "genus"
   )
-  expect_true(all(none$sidecar$PseudoCount == 0))
+  expect_true(all(is.na(none$sidecar$PseudoCount)))
+  expect_identical(none$sidecar$TransformedValue, none$sidecar$RelativeAbundance)
+})
+
+test_that("invalid heatmap denominators skip the complete heatmap", {
+  table <- composition_rank_fixture()
+  metadata <- data.frame(
+    SampleID = "S1", Group = "empty", ValidDenominator = FALSE,
+    stringsAsFactors = FALSE
+  )
+  prepared <- prepare_heatmap_data(
+    table[, c("TaxonPath", "Taxon", "S1"), drop = FALSE], "S1", metadata,
+    top_n = 2L, include_other = TRUE, transform = "log10_relative", rank = "genus"
+  )
+  expect_true(prepared$skipped)
+  expect_equal(prepared$skip$Rank, "genus")
+})
+
+test_that("zero-valid groups retain NA means and an explicit invalid plot state", {
+  table <- composition_rank_fixture()
+  metadata <- data.frame(
+    SampleID = c("S2", "S10", "S1"),
+    Group = c("valid", "valid", "empty"),
+    ValidDenominator = c(TRUE, TRUE, FALSE),
+    stringsAsFactors = FALSE
+  )
+  collapsed <- collapse_rank_for_display(
+    table, c("Bacteria;P1;Shared", "Bacteria;P2;Shared"),
+    metadata$SampleID, metadata
+  )
+  means <- summarize_group_means(collapsed)
+  expect_true(all(is.na(means$MeanRelativeAbundance[means$Group == "empty"])))
+  expect_equal(unique(means$SamplesUsed[means$Group == "empty"]), 0L)
+
+  plot_data <- means
+  plot_data$SampleID <- plot_data$Group
+  plot_data$RelativeAbundance <- plot_data$MeanRelativeAbundance
+  plot_data$ValidDenominator <- plot_data$SamplesUsed > 0L
+  plot_data$SampleOrder <- plot_data$GroupOrder
+  plot <- build_stacked_taxa_plot(
+    plot_data[, c("TaxonPath", "DisplayTaxon", "SampleID", "Group",
+                  "RelativeAbundance", "IsOther", "ValidDenominator",
+                  "StackOrder", "GroupOrder")],
+    composition_colors(unique(plot_data$TaxonPath), unique(plot_data$DisplayTaxon)),
+    c("valid", "empty"), c("valid", "empty"), single = TRUE,
+    rank = "genus group mean",
+    subtitle = "Arithmetic mean of per-sample classified-read relative abundance; samples are not pooled by read depth.",
+    invalid_groups = "empty"
+  )
+  expect_match(plot$labels$subtitle, "arithmetic mean", ignore.case = TRUE)
+  expect_match(plot$labels$subtitle, "not pooled", ignore.case = TRUE)
+  expect_true(any(vapply(plot$layers, function(layer) inherits(layer$geom, "GeomText"), logical(1))))
 })
 
 test_that("Cohort composition emits all configured rank figures and sidecars", {
@@ -144,4 +220,7 @@ test_that("Cohort composition emits all configured rank figures and sidecars", {
     "MeanRelativeAbundance", "IsOther", "ValidDenominator", "StackOrder", "SampleOrder"
   ))
   expect_true(any(stacked$SampleID == "S1" & !stacked$ValidDenominator))
+  expect_equal(sum(stacked$RelativeAbundance[stacked$SampleID == "S1"]), 0)
+  expect_false(any(stacked$TaxonPath == "__OTHER__" & stacked$SampleID == "S1" &
+                   stacked$RelativeAbundance > 0))
 })

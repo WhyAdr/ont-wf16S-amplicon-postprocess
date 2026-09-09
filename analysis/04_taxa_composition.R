@@ -26,57 +26,71 @@ make_taxon_display_map <- function(rank_table) {
   if (!is.data.frame(rank_table) || !"TaxonPath" %in% names(rank_table)) {
     stop("A rank table with a TaxonPath column is required.", call. = FALSE)
   }
-  paths <- as.character(rank_table$TaxonPath)
-  if (!length(paths) || anyNA(paths) || any(!nzchar(paths)) || anyDuplicated(paths)) {
+  input_paths <- as.character(rank_table$TaxonPath)
+  if (!length(input_paths) || anyNA(input_paths) || any(!nzchar(input_paths)) ||
+      anyDuplicated(input_paths)) {
     stop("TaxonPath values must be unique, non-empty strings.", call. = FALSE)
   }
 
+  # Build from an immutable sorted path set. Display labels are presentation
+  # only; sorting here makes collision resolution independent of input-row
+  # order while TaxonPath remains the stable join key.
+  paths <- sort(input_paths, method = "radix")
   parts <- lapply(paths, taxon_path_parts)
   leaves <- vapply(parts, function(x) x[length(x)], character(1))
   parents <- vapply(parts, function(x) if (length(x) > 1L) x[length(x) - 1L] else "", character(1))
-  display <- leaves
+  base_display <- leaves
 
   unknown <- tolower(leaves) %in% c("unknown", "unclassified", "uncultured")
-  display[unknown] <- ifelse(
+  base_display[unknown] <- ifelse(
     nzchar(parents[unknown]),
     sprintf("%s [%s]", leaves[unknown], parents[unknown]),
     sprintf("%s [%s]", leaves[unknown], paths[unknown])
   )
-  biological_other <- display == "Other"
-  display[biological_other] <- ifelse(
+  biological_other <- leaves == "Other"
+  base_display[biological_other] <- ifelse(
     nzchar(parents[biological_other]),
     sprintf("Other [%s]", parents[biological_other]),
     sprintf("Other [%s]", paths[biological_other])
   )
 
-  # Add the shortest deterministic path suffix needed to make leaf labels
-  # unique. TaxonPath, rather than the display label, remains the identity key.
-  chosen <- character(0)
-  for (i in seq_along(display)) {
-    needs_context <- display[i] %in% chosen ||
-      any(display[-i] == display[i]) || display[i] == "Other"
-    if (needs_context) {
-      candidate <- NULL
-      for (width in seq.int(2L, length(parts[[i]]))) {
-        suffix <- paste(head(tail(parts[[i]], width), -1L), collapse = " / ")
-        proposal <- sprintf("%s [%s]", leaves[i], suffix)
-        if (!proposal %in% c(chosen, display[-i])) {
-          candidate <- proposal
-          break
-        }
-      }
-      if (is.null(candidate)) {
-        candidate <- sprintf("%s [%s]", leaves[i], paths[i])
-      }
-      display[i] <- candidate
-    }
-    chosen <- c(chosen, display[i])
+  candidate_labels <- function(depth) {
+    vapply(seq_along(paths), function(i) {
+      if (depth[i] <= 1L && nzchar(base_display[i])) return(base_display[i])
+      width <- min(as.integer(depth[i]), length(parts[[i]]))
+      suffix_parts <- head(tail(parts[[i]], width), -1L)
+      if (!length(suffix_parts)) return(sprintf("%s [%s]", leaves[i], paths[i]))
+      sprintf("%s [%s]", leaves[i], paste(suffix_parts, collapse = " / "))
+    }, character(1))
   }
 
+  depth <- rep(1L, length(paths))
+  repeat {
+    display <- candidate_labels(depth)
+    collision <- duplicated(display) | duplicated(display, fromLast = TRUE) |
+      display == "Other"
+    if (!any(collision)) break
+    can_expand <- collision & depth < vapply(parts, length, integer(1))
+    if (!any(can_expand)) break
+    depth[can_expand] <- depth[can_expand] + 1L
+  }
+
+  # If the full lineage still collides with a literal biological label or a
+  # punctuation-shaped generated label, use the canonical path as the final
+  # deterministic suffix. Paths are unique, so this fallback is stable.
+  final_collision <- duplicated(display) | duplicated(display, fromLast = TRUE) |
+    display == "Other"
+  if (any(final_collision)) {
+    display[final_collision] <- sprintf("%s [%s]", display[final_collision], paths[final_collision])
+  }
+  if (anyDuplicated(display) || any(display == "Other")) {
+    display <- sprintf("%s {%s}", display, paths)
+  }
   if (anyDuplicated(display) || any(display == "Other")) {
     stop("Could not derive unique deterministic composition display labels.", call. = FALSE)
   }
-  data.frame(TaxonPath = paths, DisplayTaxon = display, stringsAsFactors = FALSE)
+  result <- data.frame(TaxonPath = paths, DisplayTaxon = display, stringsAsFactors = FALSE)
+  result[match(input_paths, result$TaxonPath), , drop = FALSE]
 }
 
 rank_relative_matrix <- function(rel_table, samples) {
@@ -112,7 +126,7 @@ select_display_taxa <- function(rel_table, samples, valid_samples = samples,
   }
 
   valid_values <- values[, valid_samples, drop = FALSE]
-  positive <- rowSums(values > 0) > 0
+  positive <- rowSums(valid_values > 0) > 0
   candidate_paths <- rownames(values)[positive]
   if (!length(candidate_paths)) {
     return(data.frame(
@@ -207,6 +221,8 @@ collapse_rank_for_display <- function(rel_table, selected_paths, samples, metada
   }
 
   map <- make_taxon_display_map(rel_table)
+  display_values <- values
+  display_values[, !valid] <- 0
   mean_values <- if (any(valid) && length(selected_paths)) {
     rowMeans(values[selected_paths, samples[valid], drop = FALSE])
   } else {
@@ -215,21 +231,16 @@ collapse_rank_for_display <- function(rel_table, selected_paths, samples, metada
   if (length(selected_paths)) names(mean_values) <- selected_paths
 
   selected_sum <- if (length(selected_paths)) {
-    colSums(values[selected_paths, samples, drop = FALSE])
+    colSums(display_values[selected_paths, samples, drop = FALSE])
   } else {
     stats::setNames(rep(0, length(samples)), samples)
   }
   other_values <- stats::setNames(pmax(0, 1 - selected_sum), samples)
   other_values[!valid] <- 0
   has_other <- any(other_values > 0)
-  if (!has_other && !length(selected_paths) && length(samples) == 1L && !valid[1]) {
-    # Preserve an inspectable zero-height bar and its invalid denominator flag
-    # for a single sample with no classified reads.
-    has_other <- TRUE
-  }
   if (has_other) {
     mean_values <- c(mean_values, stats::setNames(
-      if (any(valid)) mean(other_values[valid]) else 0, OTHER_TAXON_PATH
+      if (any(valid)) mean(other_values[valid]) else NA_real_, OTHER_TAXON_PATH
     ))
   }
   path_order <- c(selected_paths, if (has_other) OTHER_TAXON_PATH else character(0))
@@ -241,7 +252,7 @@ collapse_rank_for_display <- function(rel_table, selected_paths, samples, metada
   rows <- lapply(sample_order, function(sample_id) {
     sample_index <- match(sample_id, samples)
     values_for_sample <- if (length(selected_paths)) {
-      as.numeric(values[selected_paths, sample_id])
+      as.numeric(display_values[selected_paths, sample_id])
     } else numeric(0)
     if (has_other) values_for_sample <- c(values_for_sample, other_values[sample_id])
     data.frame(
@@ -287,7 +298,7 @@ summarize_group_means <- function(display_long) {
         Group = g,
         TaxonPath = taxa$TaxonPath[i],
         DisplayTaxon = taxa$DisplayTaxon[i],
-        MeanRelativeAbundance = if (length(values)) mean(values) else 0,
+        MeanRelativeAbundance = if (length(values)) mean(values) else NA_real_,
         SamplesTotal = length(g_samples),
         SamplesUsed = sum(g_valid),
         SamplesExcludedZeroClassified = sum(!g_valid),
@@ -305,7 +316,8 @@ summarize_group_means <- function(display_long) {
 
 build_stacked_taxa_plot <- function(display_long, colors, sample_order,
                                     group_order = NULL, single = TRUE,
-                                    rank = "taxonomic") {
+                                    rank = "taxonomic", subtitle = NULL,
+                                    invalid_groups = character(0)) {
   if (!nrow(display_long)) stop("Cannot plot an empty composition table.", call. = FALSE)
   stack_levels <- display_long[order(display_long$StackOrder), "DisplayTaxon"]
   stack_levels <- unique(as.character(stack_levels))
@@ -314,8 +326,10 @@ build_stacked_taxa_plot <- function(display_long, colors, sample_order,
   data$SampleID <- factor(data$SampleID, levels = sample_order)
   if (!single) data$Group <- factor(data$Group, levels = group_order)
 
-  p <- ggplot(data, aes(x = SampleID, y = RelativeAbundance, fill = DisplayTaxon)) +
+  plot_data <- data[is.finite(data$RelativeAbundance), , drop = FALSE]
+  p <- ggplot(plot_data, aes(x = SampleID, y = RelativeAbundance, fill = DisplayTaxon)) +
     geom_col(width = 0.7, position = position_stack(reverse = TRUE)) +
+    scale_x_discrete(drop = FALSE) +
     scale_fill_manual(values = colors, drop = FALSE, name = "Taxon") +
     scale_y_continuous(
       limits = c(0, 1), breaks = c(0, 0.25, 0.5, 0.75, 1),
@@ -324,7 +338,8 @@ build_stacked_taxa_plot <- function(display_long, colors, sample_order,
     ) +
     labs(
       title = sprintf("%s-level classified-read composition", tools::toTitleCase(rank)),
-      subtitle = "Relative abundance among classified reads; Other is the residual",
+      subtitle = subtitle %||%
+        "Relative abundance among classified reads; Other is the residual",
       x = NULL, y = "Relative abundance"
     ) +
     theme_amplicon() +
@@ -349,6 +364,18 @@ build_stacked_taxa_plot <- function(display_long, colors, sample_order,
       )
     }
   }
+  if (length(invalid_groups)) {
+    invalid_labels <- data.frame(
+      SampleID = factor(as.character(invalid_groups), levels = sample_order),
+      Label = "Undefined: 0 valid samples",
+      stringsAsFactors = FALSE
+    )
+    p <- p + geom_text(
+      data = invalid_labels,
+      aes(x = SampleID, y = 0.02, label = Label),
+      inherit.aes = FALSE, colour = "#666666", size = 3
+    )
+  }
   if (length(stack_levels) > 10L) p <- p + guides(fill = guide_legend(ncol = 2))
   p
 }
@@ -362,28 +389,44 @@ prepare_heatmap_data <- function(rel_table, samples, metadata = NULL, top_n = 10
     valid_samples <- metadata$SampleID[as.logical(metadata$ValidDenominator)]
   }
   valid_samples <- intersect(samples, as.character(valid_samples))
+  meta <- plot_metadata(samples, metadata, valid_samples = valid_samples)
+  valid_by_sample <- stats::setNames(as.logical(meta$ValidDenominator), meta$SampleID)
+  valid <- unname(valid_by_sample[samples])
+
   empty <- function(reason) list(
     skipped = TRUE,
     skip = data.frame(Rank = rank, Reason = reason, stringsAsFactors = FALSE)
   )
-  if (!length(valid_samples)) return(empty("No sample has a positive classified-read denominator."))
+  if (!length(valid_samples) || !any(valid)) {
+    return(empty("No sample has a positive classified-read denominator."))
+  }
 
-  means <- rowMeans(values[, valid_samples, drop = FALSE])
-  positive <- rowSums(values[, valid_samples, drop = FALSE] > 0) > 0
+  valid_values <- values[, valid_samples, drop = FALSE]
+  means <- rowMeans(valid_values)
+  positive <- rowSums(valid_values > 0) > 0
   if (!any(positive)) return(empty("No positive classified relative abundance exists at this rank."))
   candidate_paths <- rownames(values)[positive]
   ordered <- candidate_paths[order(-means[candidate_paths], candidate_paths, method = "radix")]
   selected_paths <- head(ordered, as.integer(top_n))
+
   selected_values <- values[selected_paths, samples, drop = FALSE]
-  residual <- pmax(0, 1 - colSums(selected_values))
+  if (any(!valid)) selected_values[, !valid] <- 0
+  residual <- stats::setNames(pmax(0, 1 - colSums(selected_values)), samples)
+  residual[!valid] <- 0
   display_paths <- selected_paths
-  if (isTRUE(include_other) && any(residual > 0)) display_paths <- c(display_paths, OTHER_TAXON_PATH)
-  raw <- rbind(selected_values, if (tail(display_paths, 1L) == OTHER_TAXON_PATH) residual else NULL)
+  if (isTRUE(include_other) && any(residual > 0)) {
+    display_paths <- c(display_paths, OTHER_TAXON_PATH)
+  }
+  raw <- selected_values
+  if (length(display_paths) > length(selected_paths)) {
+    raw <- rbind(raw, residual)
+  }
   rownames(raw) <- display_paths
 
-  pseudo_count <- 0
+  pseudo_count <- NA_real_
   if (identical(transform, "log10_relative")) {
-    positive_values <- as.numeric(raw[raw > 0])
+    transform_source <- raw[, valid, drop = FALSE]
+    positive_values <- as.numeric(transform_source[transform_source > 0])
     if (!length(positive_values)) return(empty("No positive value is available for the log10 transform."))
     pseudo_count <- min(positive_values) / 2
     transformed <- log10(raw + pseudo_count)
@@ -394,11 +437,11 @@ prepare_heatmap_data <- function(rel_table, samples, metadata = NULL, top_n = 10
   }
   if (any(!is.finite(transformed))) stop("Heatmap transformed values must be finite.", call. = FALSE)
 
-  meta <- plot_metadata(samples, metadata, valid_samples = valid_samples)
   cohort <- !is.null(metadata) && length(samples) >= 2L
   sample_order <- if (cohort) ordered_cohort_samples(samples, metadata)$sample_order else samples
-  transformed <- transformed[, sample_order, drop = FALSE]
   raw <- raw[, sample_order, drop = FALSE]
+  transformed <- transformed[, sample_order, drop = FALSE]
+  valid_ordered <- unname(valid_by_sample[sample_order])
 
   display_map <- make_taxon_display_map(rel_table)
   display_labels <- ifelse(
@@ -411,7 +454,8 @@ prepare_heatmap_data <- function(rel_table, samples, metadata = NULL, top_n = 10
   row_hclust <- NULL
   row_order <- seq_len(nrow(transformed))
   if (cohort && nrow(transformed) >= 2L) {
-    row_hclust <- stats::hclust(stats::dist(transformed, method = "euclidean"), method = "complete")
+    cluster_values <- transformed[, valid_ordered, drop = FALSE]
+    row_hclust <- stats::hclust(stats::dist(cluster_values, method = "euclidean"), method = "complete")
     row_order <- row_hclust$order
   } else {
     row_order <- order(-rowMeans(raw), display_paths, method = "radix")
@@ -421,29 +465,27 @@ prepare_heatmap_data <- function(rel_table, samples, metadata = NULL, top_n = 10
     display_labels <- display_labels[row_order]
   }
 
-  row_position <- stats::setNames(seq_along(row_order), row_order)
+  matrix_plot <- transformed
+  if (any(!valid_ordered)) matrix_plot[, !valid_ordered] <- NA_real_
+
   rows <- list()
   for (i in seq_along(display_paths)) {
     original_index <- if (cohort && nrow(transformed) >= 2L) row_order[i] else i
-    path <- if (cohort && nrow(transformed) >= 2L) {
-      display_paths[original_index]
-    } else display_paths[i]
-    label <- if (cohort && nrow(transformed) >= 2L) display_labels[original_index] else display_labels[i]
+    path <- display_paths[original_index]
+    label <- display_labels[original_index]
     for (j in seq_along(sample_order)) {
       sample_id <- sample_order[j]
       sample_meta <- meta[match(sample_id, meta$SampleID), , drop = FALSE]
-      value <- raw[path == display_paths, sample_id]
-      transformed_value <- transformed[label == rownames(transformed), sample_id]
       rows[[length(rows) + 1L]] <- data.frame(
         Rank = rank,
         TaxonPath = path,
         DisplayTaxon = label,
         SampleID = sample_id,
         Group = sample_meta$Group,
-        RelativeAbundance = as.numeric(value),
+        RelativeAbundance = as.numeric(raw[original_index, sample_id]),
         Transform = transform,
         PseudoCount = as.numeric(pseudo_count),
-        TransformedValue = as.numeric(transformed_value),
+        TransformedValue = as.numeric(transformed[original_index, sample_id]),
         IsOther = identical(path, OTHER_TAXON_PATH),
         RowOrder = i,
         ColumnOrder = j,
@@ -457,6 +499,7 @@ prepare_heatmap_data <- function(rel_table, samples, metadata = NULL, top_n = 10
     skipped = FALSE,
     matrix_raw = raw,
     matrix_transformed = transformed,
+    matrix_plot = matrix_plot,
     sidecar = sidecar,
     row_hclust = row_hclust,
     sample_order = sample_order,
@@ -470,23 +513,30 @@ prepare_heatmap_data <- function(rel_table, samples, metadata = NULL, top_n = 10
 draw_taxa_heatmap <- function(prepared, path, mode = if (isTRUE(prepared$cohort)) "cohort" else "single",
                               rank = unique(prepared$sidecar$Rank)) {
   if (isTRUE(prepared$skipped)) stop("Cannot draw a skipped heatmap.", call. = FALSE)
-  matrix_values <- prepared$matrix_transformed
+  matrix_values <- prepared$matrix_plot
   value_range <- range(matrix_values, finite = TRUE)
   if (!all(is.finite(value_range))) stop("Heatmap range must be finite.", call. = FALSE)
   if (diff(value_range) == 0) value_range <- value_range + c(-0.5, 0.5)
   breaks <- seq(value_range[1], value_range[2], length.out = 101L)
   colors <- colorRampPalette(rev(RColorBrewer::brewer.pal(11, "RdYlBu")))(100)
-  annotation <- NULL
+  sample_valid <- prepared$sidecar$ValidDenominator[
+    match(prepared$sample_order, prepared$sidecar$SampleID)
+  ]
+  annotation <- data.frame(
+    Denominator = factor(
+      ifelse(sample_valid, "valid", "undefined (0 classified reads)"),
+      levels = c("valid", "undefined (0 classified reads)")
+    ),
+    row.names = prepared$sample_order,
+    stringsAsFactors = FALSE
+  )
   if (identical(mode, "cohort")) {
-    annotation <- data.frame(
-      Group = factor(
-        prepared$sidecar$Group[match(prepared$sample_order,
-                                     prepared$sidecar$SampleID)],
-        levels = prepared$group_order
-      ),
-      row.names = prepared$sample_order,
-      stringsAsFactors = FALSE
+    annotation$Group <- factor(
+      prepared$sidecar$Group[match(prepared$sample_order,
+                                   prepared$sidecar$SampleID)],
+      levels = prepared$group_order
     )
+    annotation <- annotation[, c("Group", "Denominator"), drop = FALSE]
   }
   with_png_device(path, width = if (identical(mode, "cohort")) {
     max(8, min(24, 5 + 0.28 * length(prepared$sample_order)))
@@ -498,18 +548,261 @@ draw_taxa_heatmap <- function(prepared, path, mode = if (isTRUE(prepared$cohort)
       annotation_col = annotation,
       color = colors,
       breaks = breaks,
+      na_col = "#E6E6E6",
+      annotation_colors = list(Denominator = c(
+        "valid" = "#FFFFFF",
+        "undefined (0 classified reads)" = "#BDBDBD"
+      )),
       border_color = "#D9D9D9",
       cluster_rows = if (identical(mode, "cohort") && !is.null(prepared$row_hclust)) {
         prepared$row_hclust
       } else FALSE,
       cluster_cols = FALSE,
       angle_col = if (identical(mode, "cohort")) 90 else 0,
-      main = sprintf("%s abundance (%s; classified-read denominator)",
+      main = sprintf("%s abundance (%s; classified-read denominator; undefined = 0 classified reads)",
                      tools::toTitleCase(rank), prepared$transform),
       fontsize = 9
     )
   })
   invisible(path)
+}
+
+composition_stacked_columns <- c(
+  "Rank", "TaxonPath", "DisplayTaxon", "SampleID", "Group",
+  "RelativeAbundance", "MeanRelativeAbundance", "IsOther",
+  "ValidDenominator", "StackOrder", "SampleOrder"
+)
+
+composition_group_columns <- c(
+  "Rank", "Group", "TaxonPath", "DisplayTaxon", "MeanRelativeAbundance",
+  "SamplesTotal", "SamplesUsed", "SamplesExcludedZeroClassified", "IsOther",
+  "StackOrder", "GroupOrder"
+)
+
+composition_heatmap_columns <- c(
+  "Rank", "TaxonPath", "DisplayTaxon", "SampleID", "Group",
+  "RelativeAbundance", "Transform", "PseudoCount", "TransformedValue",
+  "IsOther", "RowOrder", "ColumnOrder", "ValidDenominator"
+)
+
+validate_composition_display_labels <- function(data) {
+  paths <- unique(as.character(data$TaxonPath[data$TaxonPath != OTHER_TAXON_PATH]))
+  if (length(paths)) {
+    map <- make_taxon_display_map(data.frame(TaxonPath = paths, stringsAsFactors = FALSE))
+    expected <- map$DisplayTaxon[match(as.character(data$TaxonPath), map$TaxonPath)]
+  } else {
+    expected <- rep(NA_character_, nrow(data))
+  }
+  expected[data$TaxonPath == OTHER_TAXON_PATH] <- "Other"
+  if (anyNA(expected) || !identical(as.character(data$DisplayTaxon), expected)) {
+    stop("Composition DisplayTaxon values are inconsistent with TaxonPath identity.", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+validate_sidecar_sample_order <- function(data, expected_samples) {
+  sample_order <- vapply(expected_samples, function(sample_id) {
+    values <- unique(data$SampleOrder[data$SampleID == sample_id])
+    if (length(values) != 1L) NA_real_ else as.numeric(values)
+  }, numeric(1))
+  if (anyNA(sample_order) || !identical(unname(sort(as.numeric(sample_order))),
+                                         as.numeric(seq_along(expected_samples)))) {
+    stop("Composition SampleOrder is not a contiguous deterministic sample order.", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+validate_sidecar_taxon_sets <- function(data, expected_samples, label) {
+  path_sets <- lapply(expected_samples, function(sample_id) {
+    sort(unique(as.character(data$TaxonPath[data$SampleID == sample_id])), method = "radix")
+  })
+  if (length(path_sets) > 1L && any(vapply(path_sets[-1L], function(paths) {
+    !identical(paths, path_sets[[1L]])
+  }, logical(1)))) {
+    stop(sprintf("%s sidecar does not use one complete TaxonPath set per sample.", label),
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL) {
+  if (!is.data.frame(x) || !identical(names(x), composition_stacked_columns) || !nrow(x)) {
+    stop("Invalid stacked composition sidecar schema.", call. = FALSE)
+  }
+  if (!is.null(expected_rank) && !all(as.character(x$Rank) == expected_rank)) {
+    stop("Stacked composition sidecar has an unexpected rank.", call. = FALSE)
+  }
+  if (!setequal(as.character(unique(x$SampleID)), as.character(expected_samples)) ||
+      anyDuplicated(paste(x$SampleID, x$TaxonPath, sep = "\r"))) {
+    stop("Stacked composition sidecar has an invalid sample set or key.", call. = FALSE)
+  }
+  if (any(!is.finite(x$RelativeAbundance)) || any(x$RelativeAbundance < 0) ||
+      any(x$RelativeAbundance > 1) || any(!is.finite(x$MeanRelativeAbundance)) ||
+      any(x$MeanRelativeAbundance < 0) || any(x$MeanRelativeAbundance > 1) ||
+      anyNA(x$ValidDenominator) || anyNA(x$IsOther)) {
+    stop("Stacked composition sidecar contains invalid abundance or flag values.", call. = FALSE)
+  }
+  validate_composition_display_labels(x)
+  validate_sidecar_sample_order(x, expected_samples)
+  validate_sidecar_taxon_sets(x, expected_samples, "Stacked composition")
+  for (sample_id in expected_samples) {
+    sample <- x[x$SampleID == sample_id, , drop = FALSE]
+    if (length(unique(sample$IsOther[sample$TaxonPath == OTHER_TAXON_PATH])) > 1L ||
+        sum(sample$IsOther) > 1L ||
+        any(sample$IsOther != (sample$TaxonPath == OTHER_TAXON_PATH))) {
+      stop("Stacked composition sidecar has an invalid Other row.", call. = FALSE)
+    }
+    if (isTRUE(sample$ValidDenominator[1])) {
+      if (abs(sum(sample$RelativeAbundance) - 1) > 1e-8) {
+        stop("Valid stacked composition does not conserve to one.", call. = FALSE)
+      }
+    } else if (abs(sum(sample$RelativeAbundance)) > 1e-12) {
+      stop("Invalid stacked composition must have zero abundance.", call. = FALSE)
+    }
+    stack_order <- sort(unique(as.integer(sample$StackOrder)))
+    if (!identical(stack_order, seq_len(nrow(sample)))) {
+      stop("Stacked composition StackOrder is not contiguous.", call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+
+validate_group_sidecar <- function(group, sample, expected_rank = NULL) {
+  if (!is.data.frame(group) || !identical(names(group), composition_group_columns) || !nrow(group) ||
+      !is.data.frame(sample)) {
+    stop("Invalid group composition sidecar schema.", call. = FALSE)
+  }
+  if (!is.null(expected_rank) && !all(as.character(group$Rank) == expected_rank)) {
+    stop("Group composition sidecar has an unexpected rank.", call. = FALSE)
+  }
+  if (anyDuplicated(paste(group$Group, group$TaxonPath, sep = "\r"))) {
+    stop("Group composition sidecar has duplicate group/taxon keys.", call. = FALSE)
+  }
+  validate_composition_display_labels(group)
+  sample_info <- unique(sample[, c("SampleID", "Group", "ValidDenominator"), drop = FALSE])
+  if (anyDuplicated(sample_info$SampleID) || anyNA(sample_info$ValidDenominator)) {
+    stop("Sample composition data cannot establish group denominator status.", call. = FALSE)
+  }
+  for (g in unique(as.character(group$Group))) {
+    g_samples <- sample_info$SampleID[sample_info$Group == g]
+    g_valid <- sample_info$ValidDenominator[sample_info$Group == g]
+    g_rows <- group[group$Group == g, , drop = FALSE]
+    if (any(g_rows$SamplesTotal != length(g_samples)) ||
+        any(g_rows$SamplesUsed != sum(g_valid)) ||
+        any(g_rows$SamplesExcludedZeroClassified != sum(!g_valid))) {
+      stop("Group composition sample counts do not match sample denominator status.", call. = FALSE)
+    }
+    if (sum(g_valid) == 0L) {
+      if (any(!is.na(g_rows$MeanRelativeAbundance))) {
+        stop("A zero-valid group must have NA means.", call. = FALSE)
+      }
+    } else {
+      if (any(!is.finite(g_rows$MeanRelativeAbundance)) ||
+          any(g_rows$MeanRelativeAbundance < 0) || any(g_rows$MeanRelativeAbundance > 1)) {
+        stop("A valid group has invalid mean abundance values.", call. = FALSE)
+      }
+      if (abs(sum(g_rows$MeanRelativeAbundance) - 1) > 1e-8) {
+        stop("Valid group means do not conserve to one.", call. = FALSE)
+      }
+    }
+    for (i in seq_len(nrow(g_rows))) {
+      path <- as.character(g_rows$TaxonPath[i])
+      values <- sample$RelativeAbundance[
+        sample$Group == g & sample$TaxonPath == path & sample$ValidDenominator
+      ]
+      if (!length(values)) {
+        if (!is.na(g_rows$MeanRelativeAbundance[i])) {
+          stop("Group mean is defined despite zero valid sample values.", call. = FALSE)
+        }
+      } else if (!isTRUE(all.equal(as.numeric(g_rows$MeanRelativeAbundance[i]),
+                                   mean(values), tolerance = 1e-12))) {
+        stop("Group mean is not the arithmetic mean of valid sample proportions.", call. = FALSE)
+      }
+    }
+  }
+  invisible(TRUE)
+}
+
+validate_heatmap_sidecar <- function(x, expected_samples, cfg, expected_rank = NULL) {
+  if (!is.data.frame(x) || !identical(names(x), composition_heatmap_columns) || !nrow(x)) {
+    stop("Invalid heatmap composition sidecar schema.", call. = FALSE)
+  }
+  if (!is.null(expected_rank) && !all(as.character(x$Rank) == expected_rank)) {
+    stop("Heatmap composition sidecar has an unexpected rank.", call. = FALSE)
+  }
+  if (!setequal(as.character(unique(x$SampleID)), as.character(expected_samples)) ||
+      anyDuplicated(paste(x$SampleID, x$TaxonPath, sep = "\r"))) {
+    stop("Heatmap composition sidecar has an invalid sample set or key.", call. = FALSE)
+  }
+  if (any(!is.finite(x$RelativeAbundance)) || any(x$RelativeAbundance < 0) ||
+      any(x$RelativeAbundance > 1) || any(!is.finite(x$TransformedValue)) ||
+      anyNA(x$ValidDenominator) || anyNA(x$IsOther)) {
+    stop("Heatmap composition sidecar contains invalid abundance or flag values.", call. = FALSE)
+  }
+  if (any(x$IsOther != (x$TaxonPath == OTHER_TAXON_PATH))) {
+    stop("Heatmap composition sidecar has an invalid Other row.", call. = FALSE)
+  }
+  validate_composition_display_labels(x)
+  validate_sidecar_taxon_sets(x, expected_samples, "Heatmap composition")
+  transformed <- as.character(unique(x$Transform))
+  if (length(transformed) != 1L || !transformed %in% c("none", "log10_relative")) {
+    stop("Heatmap composition sidecar has an unsupported transform.", call. = FALSE)
+  }
+  include_other <- isTRUE(cfg$composition$heatmap_include_other)
+  top_n <- as.integer(cfg$composition$heatmap_top_n_taxa)
+  column_orders <- vapply(expected_samples, function(sample_id) {
+    values <- unique(x$ColumnOrder[x$SampleID == sample_id])
+    if (length(values) != 1L) NA_integer_ else as.integer(values)
+  }, integer(1))
+  if (anyNA(column_orders) || !identical(unname(sort(column_orders)), seq_along(expected_samples))) {
+    stop("Heatmap ColumnOrder is not a contiguous deterministic sample order.", call. = FALSE)
+  }
+  for (sample_id in expected_samples) {
+    sample <- x[x$SampleID == sample_id, , drop = FALSE]
+    if (sum(sample$IsOther) > 1L || any(sample$IsOther != (sample$TaxonPath == OTHER_TAXON_PATH))) {
+      stop("Heatmap composition sidecar has duplicate or inconsistent Other rows.", call. = FALSE)
+    }
+    if (isTRUE(sample$ValidDenominator[1])) {
+      total <- sum(sample$RelativeAbundance)
+      if (include_other && abs(total - 1) > 1e-8) {
+        stop("Valid heatmap composition does not conserve to one with Other enabled.", call. = FALSE)
+      }
+      if (!include_other && (total < -1e-12 || total > 1 + 1e-8)) {
+        stop("Valid heatmap composition exceeds one with Other disabled.", call. = FALSE)
+      }
+    } else if (abs(sum(sample$RelativeAbundance)) > 1e-12 ||
+               any(sample$IsOther & sample$RelativeAbundance > 0)) {
+      stop("Invalid heatmap composition must have zero abundance and no Other.", call. = FALSE)
+    }
+    if (sum(!sample$IsOther) > top_n) {
+      stop("Heatmap composition exceeds the configured named taxon limit.", call. = FALSE)
+    }
+    if (!identical(sort(unique(as.integer(sample$RowOrder))), seq_len(nrow(sample)))) {
+      stop("Heatmap row or column order is not contiguous.", call. = FALSE)
+    }
+  }
+  if (identical(transformed, "none")) {
+    if (any(!is.na(x$PseudoCount)) ||
+        !isTRUE(all.equal(as.numeric(x$TransformedValue), as.numeric(x$RelativeAbundance),
+                          tolerance = 0, check.attributes = FALSE))) {
+      stop("A none heatmap transform must report no pseudocount and unchanged values.", call. = FALSE)
+    }
+  } else {
+    if (any(!is.finite(x$PseudoCount)) || any(x$PseudoCount <= 0) ||
+        length(unique(round(x$PseudoCount, 15))) != 1L) {
+      stop("A log10 heatmap transform must report one positive pseudocount.", call. = FALSE)
+    }
+    positive <- x$RelativeAbundance[x$ValidDenominator & x$RelativeAbundance > 0]
+    if (!length(positive) || abs(unique(x$PseudoCount)[1] - min(positive) / 2) > 1e-12) {
+      stop("Heatmap pseudocount was not derived from valid positive abundance.", call. = FALSE)
+    }
+    expected_transformed <- log10(x$RelativeAbundance + unique(x$PseudoCount)[1])
+    if (!isTRUE(all.equal(as.numeric(x$TransformedValue), expected_transformed,
+                          tolerance = 1e-12, check.attributes = FALSE))) {
+      stop("Heatmap transformed values do not match the log10 pseudocount contract.", call. = FALSE)
+    }
+  }
+  invisible(TRUE)
 }
 
 write_composition_table <- function(data, path, columns) {
@@ -655,16 +948,8 @@ run_taxa_composition <- function(context) {
   }
 
   plot_meta <- plot_metadata(samples, context$metadata, valid_samples = valid_samples)
-  stacked_sidecar_columns <- c(
-    "Rank", "TaxonPath", "DisplayTaxon", "SampleID", "Group",
-    "RelativeAbundance", "MeanRelativeAbundance", "IsOther",
-    "ValidDenominator", "StackOrder", "SampleOrder"
-  )
-  group_sidecar_columns <- c(
-    "Rank", "Group", "TaxonPath", "DisplayTaxon", "MeanRelativeAbundance",
-    "SamplesTotal", "SamplesUsed", "SamplesExcludedZeroClassified", "IsOther",
-    "StackOrder", "GroupOrder"
-  )
+  stacked_sidecar_columns <- composition_stacked_columns
+  group_sidecar_columns <- composition_group_columns
 
   for (rk in stacked_ranks) {
     selection <- select_display_taxa(
@@ -673,12 +958,12 @@ run_taxa_composition <- function(context) {
       min_n = cfg$composition$stacked_bar_min_taxa,
       max_n = cfg$composition$stacked_bar_max_taxa
     )
-    display_long <- if (nrow(selection) || (length(samples) == 1L && !length(valid_samples))) {
+    display_long <- if (nrow(selection)) {
       collapse_rank_for_display(rank_tables[[rk]]$rel, selection$TaxonPath, samples, plot_meta)
     } else NULL
     positive_display <- !is.null(display_long) && any(display_long$RelativeAbundance > 0 &
       display_long$ValidDenominator)
-    if (is.null(display_long) || (!positive_display && length(samples) > 1L)) {
+    if (is.null(display_long) || !nrow(display_long) || !positive_display) {
       skipped <- data.frame(Rank = rk,
                             Reason = "No valid positive classified relative abundance exists at this rank.",
                             stringsAsFactors = FALSE)
@@ -697,6 +982,7 @@ run_taxa_composition <- function(context) {
     display_long <- display_long[, c("Rank", setdiff(names(display_long), "Rank")), drop = FALSE]
     display_long_full <- display_long
     display_long <- display_long[, stacked_sidecar_columns, drop = FALSE]
+    validate_stacked_sidecar(display_long, samples, expected_rank = rk)
     stacked_path <- file.path(comp_dir, sprintf("04_%s_stacked.tsv", rk))
     write_composition_table(display_long, stacked_path, stacked_sidecar_columns)
     all_outputs <- c(all_outputs, stacked_path)
@@ -719,19 +1005,25 @@ run_taxa_composition <- function(context) {
       group_means$Rank <- rk
       group_means <- group_means[, c("Rank", setdiff(names(group_means), "Rank")), drop = FALSE]
       group_means <- group_means[, group_sidecar_columns, drop = FALSE]
+      validate_group_sidecar(group_means, display_long_full, expected_rank = rk)
       group_path <- file.path(comp_dir, sprintf("04_%s_group_mean_stacked.tsv", rk))
       write_composition_table(group_means, group_path, group_sidecar_columns)
       all_outputs <- c(all_outputs, group_path)
       group_plot_data <- group_means
       group_plot_data$SampleID <- group_plot_data$Group
       group_plot_data$RelativeAbundance <- group_plot_data$MeanRelativeAbundance
-      group_plot_data$ValidDenominator <- TRUE
+      group_plot_data$ValidDenominator <- group_plot_data$SamplesUsed > 0L
       group_plot_data$SampleOrder <- group_plot_data$GroupOrder
       group_plot <- build_stacked_taxa_plot(
         group_plot_data[, c("TaxonPath", "DisplayTaxon", "SampleID", "Group",
                             "RelativeAbundance", "IsOther", "ValidDenominator",
                             "StackOrder", "GroupOrder")],
-        colors, group_order, group_order, single = TRUE, rank = paste(rk, "group mean")
+        colors, group_order, group_order, single = TRUE, rank = paste(rk, "group mean"),
+        subtitle = paste(
+          "Arithmetic mean of per-sample classified-read relative abundance;",
+          "samples are not pooled by read depth."
+        ),
+        invalid_groups = unique(group_means$Group[group_means$SamplesUsed == 0L])
       )
       group_png <- file.path(comp_dir, sprintf("04_%s_group_mean_stacked.png", rk))
       save_plot(group_png, group_plot,
@@ -753,6 +1045,9 @@ run_taxa_composition <- function(context) {
       all_outputs <- c(all_outputs, skip_path)
       next
     }
+    validate_heatmap_sidecar(
+      prepared$sidecar, samples, cfg, expected_rank = rk
+    )
     heatmap_tsv <- file.path(comp_dir, sprintf("04_heatmap_%s.tsv", rk))
     write_composition_table(prepared$sidecar, heatmap_tsv,
                             c("Rank", "TaxonPath", "DisplayTaxon", "SampleID", "Group",
