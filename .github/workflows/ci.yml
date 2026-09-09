@@ -68,6 +68,17 @@ jobs:
           Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci validation output" --validate-only
           test ! -e "ci validation output"
 
+      - name: Validate requested builtin Krona without filesystem mutation
+        shell: bash
+        run: |
+          test ! -e "ci krona validation output"
+          Rscript analysis/00_run_pipeline.R \
+            --config config.yml \
+            --output-dir "ci krona validation output" \
+            --validate-only --krona
+          test ! -e "ci krona validation output"
+          git diff --exit-code
+
       - name: Run full release integration
         shell: bash
         run: |
