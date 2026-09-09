@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Deterministic classified-read-relative phylum, family, and genus stacked bars,
+  group-mean cohort bars, and multi-rank heatmaps with inspectable TSV sidecars.
+- A standard-library-only builtin Krona-compatible HTML renderer with pinned,
+  unmodified Krona 2.8.1 browser assets, atomic output replacement, and
+  renderer/vendor provenance.
+
+### Changed
+
+- Krona HTML rendering defaults to the builtin offline renderer. `kronatools`
+  is strict and `auto` falls back to builtin when `ktImportText` is unavailable.
+- Legacy scalar `composition.heatmap_rank` migrates to a one-element vector
+  only when the new `heatmap_ranks` key is absent; specifying both is an error.
+- The `0.4.4` version number is intentionally reserved/skipped; this work is
+  targeted to `0.4.5`.
+
 ### Fixed
 
 - Preserve case-sensitive filesystem identity for locks and transaction journals on Unix while retaining Windows alias canonicalization.
