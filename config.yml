@@ -30,7 +30,14 @@ alpha:
 
 composition:
   top_n_taxa: 15
-  heatmap_rank: "genus"
+  stacked_bar_ranks: ["phylum", "family", "genus"]
+  stacked_bar_max_taxa: 15
+  stacked_bar_min_taxa: 5
+  stacked_bar_min_mean_relative: 0.005
+  heatmap_rank: null
+  heatmap_ranks: ["phylum", "family", "genus"]
+  heatmap_top_n_taxa: 10
+  heatmap_include_other: true
   heatmap_transform: "log10_relative"
 
 beta:

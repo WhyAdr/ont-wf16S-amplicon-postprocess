@@ -20,6 +20,34 @@ theme_amplicon <- function(base_size = 12) {
     )
 }
 
+# Explicitly bounded palette for the new classified-read composition figures.
+# The order is part of the output contract: the first named taxon receives the
+# first colour and the mapping is reused across its figures and sidecars.
+composition_palette <- c(
+  "#FF8C5A", "#E6B66E", "#8DB17E", "#5C9462", "#2F6B34",
+  "#34C79B", "#63C4C7", "#3699C5", "#5F65C8", "#9060C2",
+  "#BF5BC4", "#ED54B8", "#F184B9", "#C69090", "#996666"
+)
+
+composition_colors <- function(display_paths, display_labels = NULL) {
+  if (is.null(display_labels)) display_labels <- display_paths
+  if (!is.character(display_paths) || !is.character(display_labels) ||
+      length(display_paths) != length(display_labels) ||
+      anyNA(display_paths) || anyNA(display_labels) ||
+      anyDuplicated(display_paths) || anyDuplicated(display_labels)) {
+    stop("Composition colour mapping requires unique path and label vectors.", call. = FALSE)
+  }
+  named <- display_paths != "__OTHER__"
+  if (sum(named) > length(composition_palette)) {
+    stop(sprintf("Composition figures support at most %d named taxa.",
+                 length(composition_palette)), call. = FALSE)
+  }
+  values <- character(length(display_paths))
+  values[named] <- composition_palette[seq_len(sum(named))]
+  values[!named] <- "#F3C58F"
+  stats::setNames(values, display_labels)
+}
+
 phylum_palette <- c(
   "Bacillota"                  = "#1b9e77",
   "Pseudomonadota"             = "#d95f02",

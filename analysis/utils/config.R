@@ -8,6 +8,10 @@ suppressMessages(library(yaml))
   if (is.null(x) || length(x) == 0L) fallback else x
 }
 
+SUPPORTED_COMPOSITION_RANKS <- c(
+  "phylum", "class", "order", "family", "genus", "species"
+)
+
 assert_scalar_number <- function(x, name, lower = -Inf, upper = Inf, integer = FALSE,
                                  lower_open = FALSE, upper_open = FALSE) {
   valid <- is.numeric(x) && length(x) == 1L && !is.na(x) && is.finite(x)
@@ -78,6 +82,10 @@ validate_config <- function(cfg) {
     stop("'krona.render_html' must be true or false.", call. = FALSE)
   }
   assert_nonempty_string(cfg$krona$executable, "krona.executable")
+  assert_nonempty_string(cfg$krona$html_renderer, "krona.html_renderer")
+  if (!cfg$krona$html_renderer %in% c("builtin", "kronatools", "auto")) {
+    stop("'krona.html_renderer' must be 'builtin', 'kronatools', or 'auto'.", call. = FALSE)
+  }
   if (!is.null(cfg$input$wf16s_output_root)) {
     assert_nonempty_string(cfg$input$wf16s_output_root, "input.wf16s_output_root")
   }
@@ -135,11 +143,44 @@ validate_config <- function(cfg) {
                        lower = 0, upper = 1, lower_open = TRUE)
   assert_scalar_number(cfg$alpha$resample_iterations, "alpha.resample_iterations", lower = 1, upper = 10000, integer = TRUE)
   assert_scalar_number(cfg$composition$top_n_taxa, "composition.top_n_taxa", lower = 1, upper = 10000, integer = TRUE)
-  assert_nonempty_string(cfg$composition$heatmap_rank, "composition.heatmap_rank")
-  assert_nonempty_string(cfg$composition$heatmap_transform, "composition.heatmap_transform")
-  if (!cfg$composition$heatmap_rank %in% c("phylum", "class", "order", "family", "genus", "species")) {
-    stop("'composition.heatmap_rank' is not a supported rank.", call. = FALSE)
+  validate_rank_vector <- function(value, name) {
+    if (!is.character(value) || length(value) == 0L || anyNA(value) ||
+        any(!nzchar(value)) || anyDuplicated(value) ||
+        any(!value %in% SUPPORTED_COMPOSITION_RANKS)) {
+      stop(sprintf("'%s' must contain unique supported rank names.", name), call. = FALSE)
+    }
+    invisible(TRUE)
   }
+  legacy_heatmap_rank <- cfg$composition[["heatmap_rank"]]
+  if (!is.null(legacy_heatmap_rank)) {
+    validate_rank_vector(legacy_heatmap_rank, "composition.heatmap_rank")
+    if (length(legacy_heatmap_rank) != 1L) {
+      stop("'composition.heatmap_rank' must be null or one supported rank.", call. = FALSE)
+    }
+  }
+  validate_rank_vector(cfg$composition$stacked_bar_ranks, "composition.stacked_bar_ranks")
+  validate_rank_vector(cfg$composition$heatmap_ranks, "composition.heatmap_ranks")
+  assert_scalar_number(cfg$composition$stacked_bar_max_taxa,
+                       "composition.stacked_bar_max_taxa", lower = 1, upper = 10000,
+                       integer = TRUE)
+  assert_scalar_number(cfg$composition$stacked_bar_min_taxa,
+                       "composition.stacked_bar_min_taxa", lower = 1, upper = 10000,
+                       integer = TRUE)
+  if (cfg$composition$stacked_bar_min_taxa > cfg$composition$stacked_bar_max_taxa) {
+    stop("'composition.stacked_bar_min_taxa' must be less than or equal to 'composition.stacked_bar_max_taxa'.",
+         call. = FALSE)
+  }
+  assert_scalar_number(cfg$composition$stacked_bar_min_mean_relative,
+                       "composition.stacked_bar_min_mean_relative", lower = 0, upper = 1)
+  assert_scalar_number(cfg$composition$heatmap_top_n_taxa,
+                       "composition.heatmap_top_n_taxa", lower = 1, upper = 10000,
+                       integer = TRUE)
+  if (!is.logical(cfg$composition$heatmap_include_other) ||
+      length(cfg$composition$heatmap_include_other) != 1L ||
+      is.na(cfg$composition$heatmap_include_other)) {
+    stop("'composition.heatmap_include_other' must be true or false.", call. = FALSE)
+  }
+  assert_nonempty_string(cfg$composition$heatmap_transform, "composition.heatmap_transform")
   if (!cfg$composition$heatmap_transform %in% c("log10_relative", "none")) {
     stop("'composition.heatmap_transform' must be 'log10_relative' or 'none'.", call. = FALSE)
   }
@@ -240,7 +281,14 @@ get_default_config <- function() {
     ),
     composition = list(
       top_n_taxa = 15L,
-      heatmap_rank = "genus",
+      stacked_bar_ranks = c("phylum", "family", "genus"),
+      stacked_bar_max_taxa = 15L,
+      stacked_bar_min_taxa = 5L,
+      stacked_bar_min_mean_relative = 0.005,
+      heatmap_rank = NULL,
+      heatmap_ranks = c("phylum", "family", "genus"),
+      heatmap_top_n_taxa = 10L,
+      heatmap_include_other = TRUE,
       heatmap_transform = "log10_relative"
     ),
     faprotax = list(
@@ -249,6 +297,7 @@ get_default_config <- function() {
     krona = list(
       enabled = FALSE,
       render_html = TRUE,
+      html_renderer = "builtin",
       executable = "ktImportText"
     ),
     beta = list(
@@ -284,6 +333,35 @@ get_default_config <- function() {
   )
 }
 
+migrate_composition_config <- function(raw_yaml) {
+  if (is.null(raw_yaml$composition) || !is.list(raw_yaml$composition)) {
+    return(raw_yaml)
+  }
+
+  raw_composition <- raw_yaml$composition
+  has_legacy <- "heatmap_rank" %in% names(raw_composition)
+  has_new <- "heatmap_ranks" %in% names(raw_composition)
+  legacy_value <- raw_composition[["heatmap_rank"]]
+  legacy_non_null <- has_legacy && !is.null(legacy_value)
+
+  if (legacy_non_null && has_new) {
+    stop(paste(
+      "Configuration supplies both 'composition.heatmap_rank' and",
+      "'composition.heatmap_ranks'; remove the legacy scalar key or the new vector."
+    ), call. = FALSE)
+  }
+  if (legacy_non_null) {
+    warning(paste(
+      "'composition.heatmap_rank' is deprecated; use 'composition.heatmap_ranks'.",
+      "The scalar value was migrated to a one-element rank vector."
+    ), call. = FALSE)
+    raw_composition$heatmap_ranks <- legacy_value
+    raw_composition$heatmap_rank <- NULL
+  }
+  raw_yaml$composition <- raw_composition
+  raw_yaml
+}
+
 merge_config <- function(default_cfg, user_cfg, path = "") {
   unknown <- setdiff(names(user_cfg), names(default_cfg))
   if (length(unknown) > 0L) {
@@ -292,7 +370,12 @@ merge_config <- function(default_cfg, user_cfg, path = "") {
   }
   merged <- default_cfg
   for (key in names(user_cfg)) {
-    if (is.list(user_cfg[[key]]) && is.list(merged[[key]])) {
+    if (is.null(user_cfg[[key]])) {
+      # Preserve explicit null keys. Besides retaining the distinction between
+      # an omitted and a deprecated setting, this prevents R's partial `$`
+      # matching from confusing heatmap_rank with heatmap_ranks.
+      merged[key] <- list(NULL)
+    } else if (is.list(user_cfg[[key]]) && is.list(merged[[key]])) {
       merged[[key]] <- merge_config(merged[[key]], user_cfg[[key]], paste0(path, key, "."))
     } else {
       merged[[key]] <- user_cfg[[key]]
@@ -314,6 +397,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   if (!is.list(raw_yaml) || is.null(names(raw_yaml))) {
     stop("Configuration YAML root must be a named mapping.", call. = FALSE)
   }
+  raw_yaml <- migrate_composition_config(raw_yaml)
   cfg <- merge_config(default_cfg, raw_yaml)
   cli_refresh <- isTRUE(cli_opts$refresh_taxonomy) ||
     isTRUE(cli_opts[["refresh-taxonomy"]])

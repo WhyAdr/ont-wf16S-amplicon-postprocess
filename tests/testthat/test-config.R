@@ -40,9 +40,13 @@ test_that("load_config loads default config.yml and resolves relative paths to c
   expect_false(cfg$krona$enabled)
   expect_true(is.logical(cfg$krona$render_html))
   expect_true(cfg$krona$render_html)
+  expect_equal(cfg$krona$html_renderer, "builtin")
   expect_equal(cfg$krona$executable, "ktImportText")
   expect_false(cfg$cli$krona)
   expect_false("faprotax" %in% cfg$cli$modules)
+  expect_equal(cfg$composition$stacked_bar_ranks, c("phylum", "family", "genus"))
+  expect_equal(cfg$composition$heatmap_ranks, c("phylum", "family", "genus"))
+  expect_null(cfg$composition$heatmap_rank)
 })
 
 test_that("Krona CLI opt-in is recorded in config and manifest settings", {
@@ -112,6 +116,47 @@ test_that("Krona configuration values fail closed", {
   bad_executable <- get_default_config()
   bad_executable$krona$executable <- "  "
   expect_error(validate_config(bad_executable), "krona.executable")
+
+  bad_renderer <- get_default_config()
+  bad_renderer$krona$html_renderer <- "perl"
+  expect_error(validate_config(bad_renderer), "krona.html_renderer")
+
+  bad_ranks <- get_default_config()
+  bad_ranks$composition$heatmap_ranks <- c("genus", "genus")
+  expect_error(validate_config(bad_ranks), "heatmap_ranks")
+
+  bad_range <- get_default_config()
+  bad_range$composition$stacked_bar_min_taxa <- 16L
+  bad_range$composition$stacked_bar_max_taxa <- 15L
+  expect_error(validate_config(bad_range), "min_taxa")
+})
+
+test_that("Legacy scalar heatmap configuration migrates once", {
+  root <- tempfile("heatmap_migration_")
+  dir.create(root)
+  raw <- yaml::read_yaml(file.path("..", "..", "config.yml"))
+  raw$composition$heatmap_ranks <- NULL
+  raw$composition$heatmap_rank <- "genus"
+  path <- file.path(root, "legacy.yml")
+  yaml::write_yaml(raw, path)
+
+  expect_warning(
+    migrated <- load_config(path),
+    "heatmap_rank.*deprecated"
+  )
+  expect_equal(migrated$composition$heatmap_ranks, "genus")
+  expect_null(migrated$composition$heatmap_rank)
+})
+
+test_that("Legacy and vector heatmap keys cannot both be explicit", {
+  root <- tempfile("heatmap_conflict_")
+  dir.create(root)
+  raw <- yaml::read_yaml(file.path("..", "..", "config.yml"))
+  raw$composition$heatmap_rank <- "genus"
+  raw$composition$heatmap_ranks <- c("phylum", "genus")
+  path <- file.path(root, "conflict.yml")
+  yaml::write_yaml(raw, path)
+  expect_error(load_config(path), "both.*heatmap_rank.*heatmap_ranks")
 })
 
 test_that("taxonomy refresh requires explicit CLI opt-in", {
