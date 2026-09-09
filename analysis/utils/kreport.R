@@ -225,7 +225,7 @@ write_krona_input <- function(output_path, nodes_df, total_reads, uncl_reads) {
   invisible(output_path)
 }
 
-render_krona_html <- function(executable, output_path, sample_id, input_path) {
+render_kronatools_html <- function(executable, output_path, sample_id, input_path) {
   valid_executable <- is.character(executable) && length(executable) == 1L &&
     !is.na(executable) && nzchar(trimws(executable))
   valid_sample <- is.character(sample_id) && length(sample_id) == 1L &&
@@ -276,6 +276,142 @@ render_krona_html <- function(executable, output_path, sample_id, input_path) {
     ), call. = FALSE)
   }
 
+  invisible(output_path)
+}
+
+krona_vendor_directory <- function(repo_root) {
+  file.path(repo_root, "analysis", "vendor", "krona-2.8.1")
+}
+
+krona_vendor_manifest <- function(vendor_dir) {
+  manifest_path <- file.path(vendor_dir, "SOURCE.json")
+  if (!file.exists(manifest_path) || dir.exists(manifest_path)) {
+    stop(sprintf("Krona vendor manifest is missing: '%s'.", manifest_path), call. = FALSE)
+  }
+  manifest <- tryCatch(
+    jsonlite::fromJSON(manifest_path, simplifyVector = FALSE),
+    error = function(e) stop(sprintf("Krona vendor manifest is invalid: %s", e$message), call. = FALSE)
+  )
+  if (!identical(manifest$upstream, "marbl/Krona") || !identical(manifest$tag, "v2.8.1")) {
+    stop("Krona vendor manifest does not identify marbl/Krona v2.8.1.", call. = FALSE)
+  }
+  entries <- manifest$files %||% list()
+  if (!is.list(entries) || length(entries) == 0L) {
+    stop("Krona vendor manifest has no pinned files.", call. = FALSE)
+  }
+  manifest_entries <- vapply(entries, function(entry) {
+    if (is.null(entry$path) || is.null(entry$sha256)) {
+      stop("Krona vendor manifest contains an incomplete file entry.", call. = FALSE)
+    }
+    path <- as.character(entry$path)
+    expected <- as.character(entry$sha256)
+    actual_path <- file.path(vendor_dir, path)
+    if (!file.exists(actual_path) || dir.exists(actual_path)) {
+      stop(sprintf("Krona vendor file is missing: '%s'.", actual_path), call. = FALSE)
+    }
+    actual <- compute_file_hash(actual_path)
+    if (!identical(actual, expected)) {
+      stop(sprintf("Krona vendor SHA-256 mismatch for '%s'.", path), call. = FALSE)
+    }
+    paste(path, expected, sep = "\t")
+  }, character(1))
+  list(
+    tag = as.character(manifest$tag),
+    commit = as.character(manifest$commit),
+    source_url = as.character(manifest$source_url),
+    entries = manifest_entries
+  )
+}
+
+resolve_krona_renderer <- function(krona_cfg, repo_root) {
+  policy <- tolower(as.character(krona_cfg$html_renderer %||% "builtin"))
+  if (!policy %in% c("builtin", "kronatools", "auto")) {
+    stop(sprintf("Unsupported Krona html_renderer '%s'; use builtin, kronatools, or auto.", policy),
+         call. = FALSE)
+  }
+
+  requested <- as.character(krona_cfg$executable %||% "ktImportText")
+  external <- find_krona_executable(requested)
+  vendor_dir <- krona_vendor_directory(repo_root)
+  builder <- file.path(repo_root, "analysis", "utils", "krona_builder.py")
+  builtin <- list(
+    policy = policy,
+    provider = "builtin",
+    renderer = "builtin_krona_compatible",
+    renderer_version = "AAy Amplicon builtin 0.4.5 + Krona 2.8.1",
+    builder = normalizePath(builder, winslash = "/", mustWork = FALSE),
+    vendor_dir = normalizePath(vendor_dir, winslash = "/", mustWork = FALSE),
+    requested_executable = requested,
+    resolved_executable = NULL
+  )
+
+  if (identical(policy, "builtin") || (identical(policy, "auto") && is.na(external))) {
+    if (!file.exists(builder) || dir.exists(builder)) {
+      stop(sprintf("Builtin Krona renderer is missing: '%s'.", builder), call. = FALSE)
+    }
+    krona_vendor_manifest(vendor_dir)
+    return(builtin)
+  }
+
+  if (is.na(external)) {
+    stop(sprintf("KronaTools executable '%s' was not found for html_renderer='%s'.",
+                 requested, policy), call. = FALSE)
+  }
+  list(
+    policy = policy,
+    provider = "kronatools",
+    renderer = "ktImportText",
+    renderer_version = get_krona_version(external) %||% "unknown",
+    builder = NULL,
+    vendor_dir = NULL,
+    requested_executable = requested,
+    resolved_executable = external
+  )
+}
+
+render_builtin_krona_html <- function(python_cmd, builder_path, vendor_dir,
+                                      output_path, sample_id, input_path, expected_total) {
+  if (!file.exists(builder_path) || dir.exists(builder_path)) {
+    stop(sprintf("Builtin Krona renderer is missing: '%s'.", builder_path), call. = FALSE)
+  }
+  if (!file.exists(input_path) || !isTRUE(file.info(input_path)$size > 0)) {
+    stop(sprintf("Krona input for sample '%s' is missing or empty.", sample_id), call. = FALSE)
+  }
+  parent_dir <- dirname(output_path)
+  dir.create(parent_dir, recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(parent_dir)) {
+    stop(sprintf("Could not create Krona HTML output directory '%s'.", parent_dir), call. = FALSE)
+  }
+  args <- c(
+    builder_path,
+    "--input", input_path,
+    "--output", output_path,
+    "--dataset-name", sample_id,
+    "--expected-total", format_krona_magnitude(expected_total),
+    "--vendor-dir", vendor_dir
+  )
+  result <- tryCatch(
+    processx::run(command = python_cmd, args = args, error_on_status = FALSE),
+    error = function(e) stop(sprintf(
+      "Builtin Krona HTML rendering failed for sample '%s': %s", sample_id, e$message
+    ), call. = FALSE)
+  )
+  if (!identical(result$status, 0L)) {
+    detail <- trimws(paste(result$stderr, result$stdout))
+    stop(sprintf("Builtin Krona HTML rendering failed for sample '%s' (exit status %s): %s",
+                 sample_id, as.character(result$status %||% "unknown"), detail), call. = FALSE)
+  }
+  if (!file.exists(output_path) || !isTRUE(file.info(output_path)$size > 0)) {
+    stop(sprintf("Builtin Krona renderer reported success but produced no output for sample '%s'.",
+                 sample_id), call. = FALSE)
+  }
+  temporary <- list.files(parent_dir, full.names = TRUE)
+  temporary <- temporary[startsWith(
+    basename(temporary), paste0(basename(output_path), ".tmp-"))]
+  if (length(temporary) > 0L) {
+    stop(sprintf("Builtin Krona renderer left temporary output(s) for sample '%s'.", sample_id),
+         call. = FALSE)
+  }
   invisible(output_path)
 }
 

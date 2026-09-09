@@ -110,6 +110,7 @@ run_kreport <- function(context) {
   krona_cfg <- cfg$krona %||% list(
     enabled = FALSE,
     render_html = FALSE,
+    html_renderer = "builtin",
     executable = "ktImportText"
   )
   krona_enabled <- isTRUE(krona_cfg$enabled)
@@ -118,7 +119,9 @@ run_kreport <- function(context) {
   krona_provenance_file <- file.path(krona_dir, "krona_provenance.json")
   krona_executable <- NA_character_
   krona_requested_executable <- krona_cfg$executable %||% "ktImportText"
-  html_status <- if (render_html) "renderer_missing" else "not_requested"
+  krona_renderer <- NULL
+  krona_vendor <- NULL
+  html_status <- if (render_html) "pending" else "not_requested"
   krona_records <- list()
 
   if (krona_enabled) {
@@ -128,12 +131,10 @@ run_kreport <- function(context) {
     }
 
     if (render_html) {
-      krona_executable <- find_krona_executable(krona_requested_executable)
-      if (is.na(krona_executable)) {
-        warning(sprintf(
-          "KronaTools executable '%s' was not found; writing Krona TSV files without HTML rendering.",
-          krona_requested_executable
-        ), call. = FALSE)
+      krona_renderer <- resolve_krona_renderer(krona_cfg, cfg$pipeline_root)
+      krona_executable <- krona_renderer$resolved_executable %||% NA_character_
+      if (identical(krona_renderer$provider, "builtin")) {
+        krona_vendor <- krona_vendor_manifest(krona_renderer$vendor_dir)
       }
     }
   }
@@ -182,9 +183,21 @@ run_kreport <- function(context) {
         tsv_path = krona_tsv
       )
 
-      if (render_html && !is.na(krona_executable)) {
+      if (render_html) {
         krona_html <- file.path(krona_dir, sprintf("%s.krona.html", sample_filename))
-        render_krona_html(krona_executable, krona_html, s, krona_tsv)
+        if (identical(krona_renderer$provider, "builtin")) {
+          render_builtin_krona_html(
+            python_cmd = python_cmd,
+            builder_path = krona_renderer$builder,
+            vendor_dir = krona_renderer$vendor_dir,
+            output_path = krona_html,
+            sample_id = s,
+            input_path = krona_tsv,
+            expected_total = total_reads
+          )
+        } else {
+          render_kronatools_html(krona_executable, krona_html, s, krona_tsv)
+        }
         all_outputs <- c(all_outputs, krona_html)
         sample_record$html_path <- krona_html
       }
@@ -230,22 +243,38 @@ run_kreport <- function(context) {
   }
 
   if (krona_enabled) {
-    html_rendered <- render_html && !is.na(krona_executable)
+    html_rendered <- isTRUE(render_html)
     if (html_rendered) {
       html_status <- "rendered"
     }
-    krona_version <- if (html_rendered) get_krona_version(krona_executable) else NULL
+    renderer_policy <- tolower(as.character(krona_cfg$html_renderer %||% "builtin"))
+    renderer_manifest <- if (identical(krona_renderer$provider %||% "", "builtin")) {
+      krona_vendor
+    } else {
+      NULL
+    }
     krona_provenance <- list(
-      format = "KronaTools ktImportText tab-delimited lineage format",
-      renderer = if (html_rendered) "ktImportText" else NULL,
-      krona_tools_version = if (html_rendered) krona_version else NULL,
+      format = "Krona 2.0-compatible direct-count tab-delimited lineage format",
+      renderer_policy = renderer_policy,
+      renderer = if (html_rendered) krona_renderer$renderer else NULL,
+      renderer_version = if (html_rendered) krona_renderer$renderer_version else NULL,
+      vendor_source = if (!is.null(renderer_manifest)) renderer_manifest$source_url else NULL,
+      vendor_sha256_manifest = if (!is.null(renderer_manifest)) {
+        json_array(renderer_manifest$entries)
+      } else {
+        json_array(character(0))
+      },
       html_status = html_status,
-      standalone_html = if (html_rendered) TRUE else NULL,
+      standalone_html = isTRUE(html_rendered),
       count_model = "direct abundance-table taxon counts plus canonical unclassified count",
       denominator = "TotalReads",
       classified_definition = "sum of direct positive-count classified taxonomy rows",
       requested_executable = krona_requested_executable,
-      resolved_executable = if (html_rendered) krona_executable else NULL,
+      resolved_executable = if (html_rendered) {
+        krona_renderer$resolved_executable %||% krona_renderer$builder
+      } else {
+        NULL
+      },
       render_html = render_html,
       samples = json_array(krona_records)
     )

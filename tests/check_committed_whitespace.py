@@ -74,6 +74,11 @@ def changed_paths() -> list[pathlib.PurePosixPath]:
 
 
 def check_file(path: pathlib.PurePosixPath) -> list[str]:
+    # Vendored Krona assets are pinned by byte hash in SOURCE.json.  Their
+    # upstream JavaScript intentionally contains whitespace, so do not rewrite
+    # it to satisfy this repository's text-style check.
+    if path.as_posix().startswith("analysis/vendor/krona-2.8.1/"):
+        return []
     data = subprocess.run(
         [*GIT, "show", f"HEAD:{path.as_posix()}"],
         check=True,

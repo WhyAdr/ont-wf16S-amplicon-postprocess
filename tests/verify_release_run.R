@@ -197,6 +197,62 @@ composition <- read.delim(
 stopifnot(!anyNA(composition))
 stopifnot(composition$ClassifiedReads + composition$UnclassifiedReads == composition$TotalReads)
 
+# 3a. Multi-rank composition artifacts and sidecar schemas
+resolved_config <- yaml::read_yaml(file.path(root, "resolved_config.yml"))
+composition_cfg <- resolved_config$composition
+stacked_sidecar_columns <- c(
+  "Rank", "TaxonPath", "DisplayTaxon", "SampleID", "Group",
+  "RelativeAbundance", "MeanRelativeAbundance", "IsOther",
+  "ValidDenominator", "StackOrder", "SampleOrder"
+)
+heatmap_sidecar_columns <- c(
+  "Rank", "TaxonPath", "DisplayTaxon", "SampleID", "Group",
+  "RelativeAbundance", "Transform", "PseudoCount", "TransformedValue",
+  "IsOther", "RowOrder", "ColumnOrder", "ValidDenominator"
+)
+assert_composition_sidecar <- function(path, expected_columns, rank, kind) {
+  if (!file.exists(path)) stop(sprintf("Missing %s sidecar: %s", kind, path))
+  table <- read.delim(path, check.names = FALSE, stringsAsFactors = FALSE)
+  if (!identical(names(table), expected_columns)) {
+    stop(sprintf("Unexpected %s sidecar schema for rank '%s'.", kind, rank))
+  }
+  stopifnot(all(table$Rank == rank), nrow(table) > 0L)
+  stopifnot(!any(grepl("(^|;)Unclassified($|;)", table$TaxonPath, ignore.case = TRUE)))
+  table
+}
+assert_composition_pair <- function(rank) {
+  tsv <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_stacked.tsv", rank))
+  png <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_stacked.png", rank))
+  skipped <- sub("[.]tsv$", "_skipped.tsv", tsv)
+  if (file.exists(skipped)) {
+    stopifnot(!file.exists(tsv), !file.exists(png))
+    return(invisible(NULL))
+  }
+  stopifnot(file.exists(tsv), file.exists(png))
+  table <- assert_composition_sidecar(tsv, stacked_sidecar_columns, rank, "stacked")
+  for (sample_id in unique(table$SampleID)) {
+    sample <- table[table$SampleID == sample_id, , drop = FALSE]
+    valid <- sample$ValidDenominator
+    if (any(valid)) stopifnot(abs(sum(sample$RelativeAbundance[valid]) - 1) < 1e-8)
+  }
+  invisible(NULL)
+}
+assert_heatmap_pair <- function(rank) {
+  tsv <- file.path(root, "04_Taxa_Composition", sprintf("04_heatmap_%s.tsv", rank))
+  png <- file.path(root, "04_Taxa_Composition", sprintf("04_heatmap_%s.png", rank))
+  skipped <- sub("[.]tsv$", "_skipped.tsv", tsv)
+  if (file.exists(skipped)) {
+    stopifnot(!file.exists(tsv), !file.exists(png))
+    return(invisible(NULL))
+  }
+  stopifnot(file.exists(tsv), file.exists(png))
+  table <- assert_composition_sidecar(tsv, heatmap_sidecar_columns, rank, "heatmap")
+  stopifnot(all(table$Transform == composition_cfg$heatmap_transform))
+  invisible(NULL)
+}
+for (rank in as.character(composition_cfg$stacked_bar_ranks)) assert_composition_pair(rank)
+for (rank in as.character(composition_cfg$heatmap_ranks)) assert_heatmap_pair(rank)
+
 if (isTRUE(manifest$cli$krona)) {
   krona_dir <- file.path(root, "07_Kreport", "krona")
   krona_provenance_file <- file.path(krona_dir, "krona_provenance.json")
@@ -234,7 +290,11 @@ if (isTRUE(manifest$cli$krona)) {
       html_status, paste(expected_html, collapse = ", "), paste(actual_html, collapse = ", ")
     ))
   }
-  stopifnot(html_status %in% c("not_requested", "renderer_missing", "rendered"))
+  stopifnot(html_status %in% c("not_requested", "rendered"))
+  stopifnot(!is.null(krona_provenance$renderer_policy))
+  stopifnot(!is.null(krona_provenance$vendor_sha256_manifest))
+  invisible(require_json_array(krona_provenance$vendor_sha256_manifest,
+                               "krona_provenance.vendor_sha256_manifest"))
   invisible(require_json_array(krona_provenance$samples, "krona_provenance.samples"))
   stopifnot(length(krona_provenance$samples) == length(krona_samples))
 
@@ -289,12 +349,6 @@ if (isTRUE(manifest$cli$krona)) {
 if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   stopifnot(identical(manifest$upstream_contract$wf_agent, "epi2melabs/5.2.5"))
   unexpected_warnings <- unlist(manifest$warnings, use.names = FALSE)
-  if (isTRUE(manifest$cli$krona)) {
-    unexpected_warnings <- unexpected_warnings[
-      !grepl("^KronaTools executable .* was not found; writing Krona TSV files without HTML rendering[.]$",
-             unexpected_warnings)
-    ]
-  }
   conflict_count <- as.integer(manifest$taxonomy$conflicts_count %||% 0L)
   expected_conflict_warning <- sprintf(
     "%d lineage-to-TaxID conflict(s) used the documented modal-count/minimum-TaxID tie-break; review taxonomy_conflicts.tsv.",
@@ -311,12 +365,6 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   }
   for (mod in names(manifest$modules)) {
     module_warnings <- unlist(manifest$modules[[mod]]$warnings, use.names = FALSE)
-    if (isTRUE(manifest$cli$krona) && identical(mod, "kreport")) {
-      module_warnings <- module_warnings[
-        !grepl("^KronaTools executable .* was not found; writing Krona TSV files without HTML rendering[.]$",
-               module_warnings)
-      ]
-    }
     if (identical(mod, "kreport") && conflict_count > 0L) {
       if (sum(module_warnings == expected_conflict_warning) != 1L) {
         stop("Expected exactly one canonical taxonomy-conflict kreport warning.")

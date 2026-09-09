@@ -46,6 +46,17 @@ test_that("source digest ignores generated Python bytecode", {
   expect_false(generated %in% as.character(before$source_files))
 })
 
+test_that("pinned Krona renderer assets are included in source provenance", {
+  repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
+  relative <- as.character(source_provenance(repo_root)$source_files)
+  expected <- file.path(
+    "analysis", "vendor", "krona-2.8.1",
+    c("SOURCE.json", "LICENSE.txt", "src/krona-2.0.js", "img/favicon.ico",
+      "img/hidden.png", "img/loading.gif", "img/logo-med.png")
+  )
+  expect_true(all(gsub("\\\\", "/", expected) %in% relative))
+})
+
 test_that("lock status reports the full lock closure and active library paths", {
   repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
   skip_if_not(requireNamespace("renv", quietly = TRUE))

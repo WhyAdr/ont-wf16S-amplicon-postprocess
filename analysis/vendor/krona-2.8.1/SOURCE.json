@@ -1,0 +1,34 @@
+{
+  "upstream": "marbl/Krona",
+  "tag": "v2.8.1",
+  "commit": "106dedb36b6c80445c6bacbd53d745a2388de273",
+  "source_url": "https://github.com/marbl/Krona/tree/v2.8.1/KronaTools",
+  "retrieved_utc": "2026-09-09",
+  "license": "KronaTools/LICENSE.txt",
+  "files": [
+    {
+      "path": "LICENSE.txt",
+      "sha256": "a9842218710304179c463bdcc24999958a95daaf6d2d79d461c2a0901dd42d7a"
+    },
+    {
+      "path": "img/favicon.ico",
+      "sha256": "39bdb5fbdc9a77ce9b7fb5a1a5eba64565af54ba291bfca3e017a7754b4ad763"
+    },
+    {
+      "path": "img/hidden.png",
+      "sha256": "1a5ba08b039ba7a72a7fd72cc1730da5aec04b41456f5170af1b229f56d9001a"
+    },
+    {
+      "path": "img/loading.gif",
+      "sha256": "43a526a07a078d736e5c9d67d8479dd54072b7e5c6ddd2cd466f86a086e49ef5"
+    },
+    {
+      "path": "img/logo-med.png",
+      "sha256": "9f9d76e7222fbaa8e75b7814d121ddce27466f26d8afac91533a47c3501fdb31"
+    },
+    {
+      "path": "src/krona-2.0.js",
+      "sha256": "ffca7a7fc49a17d311b925f206769e3f3b101b8857251dab95ecc3441f95ff76"
+    }
+  ]
+}

@@ -241,6 +241,13 @@ source_file_allowed <- function(path) {
     grepl("[.](R|r|py|json|ya?ml)$", path, perl = TRUE)
 }
 
+is_krona_vendor_file <- function(path, repo_root) {
+  vendor_root <- normalizePath(file.path(repo_root, "analysis", "vendor", "krona-2.8.1"),
+                               winslash = "/", mustWork = FALSE)
+  candidate <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  preflight_path_is_same_or_descendant(candidate, vendor_root)
+}
+
 maintained_source_files <- function(repo_root) {
   root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
   git_scoped_paths <- c("analysis", "config.example.yml", "VERSION", "renv.lock",
@@ -259,7 +266,9 @@ maintained_source_files <- function(repo_root) {
     file.path(root, c("config.example.yml", "VERSION", "renv.lock",
                       ".Rprofile", "renv/activate.R", "renv/settings.json"))
   )
-  candidates <- candidates[file.exists(candidates) & !dir.exists(candidates) & source_file_allowed(candidates)]
+  candidates <- candidates[file.exists(candidates) & !dir.exists(candidates) &
+    (source_file_allowed(candidates) | vapply(candidates, is_krona_vendor_file,
+                                               logical(1), repo_root = root))]
   sort(normalizePath(candidates, winslash = "/", mustWork = TRUE))
 }
 
@@ -366,9 +375,31 @@ run_module_preflight <- function(context, modules) {
     if (nzchar(krona_exe) && dir.exists(krona_exe)) {
       preflight_error("E_KRONA_PREFLIGHT", sprintf("Krona executable '%s' is a directory, not a file.", krona_exe))
     }
-    resolved_krona <- find_krona_executable(krona_exe)
-    if (is.na(resolved_krona)) {
-      warnings <- c(warnings, sprintf("Krona executable '%s' was not found; Krona HTML rendering will be skipped (TSV-only).", krona_exe))
+    renderer <- tryCatch(
+      resolve_krona_renderer(cfg$krona, cfg$pipeline_root),
+      error = function(e) preflight_error("E_KRONA_PREFLIGHT", e$message)
+    )
+    if (identical(renderer$provider, "builtin")) {
+      python <- tryCatch(find_python(), error = function(e) {
+        preflight_error("E_KRONA_PREFLIGHT", e$message)
+      })
+      builder <- renderer$builder
+      compile <- processx::run(
+        python,
+        c("-c", "import ast, sys; p = sys.argv[1]; ast.parse(open(p, 'rb').read(), filename=p)", builder),
+        error_on_status = FALSE
+      )
+      if (!identical(compile$status, 0L)) {
+        preflight_error("E_KRONA_PREFLIGHT", trimws(paste(compile$stderr, compile$stdout)))
+      }
+      validate <- processx::run(
+        python,
+        c(builder, "--validate-only", "--vendor-dir", renderer$vendor_dir),
+        error_on_status = FALSE
+      )
+      if (!identical(validate$status, 0L)) {
+        preflight_error("E_KRONA_PREFLIGHT", trimws(paste(validate$stderr, validate$stdout)))
+      }
     }
   }
   invisible(warnings)

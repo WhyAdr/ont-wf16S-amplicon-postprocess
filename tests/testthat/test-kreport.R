@@ -127,6 +127,45 @@ test_that("write_krona_input creates a physical TSV under paths with spaces", {
                "10\tBacteria\tBacillati\tBacillota\tBacilli\tBacillales\tBacillaceae\tBacillus\tBacillus_sp1")
 })
 
+test_that("builtin Krona renderer is deterministic and strict external policy fails closed", {
+  repo_root <- normalizePath(file.path("..", ".."), winslash = "/")
+  renderer <- resolve_krona_renderer(
+    list(enabled = TRUE, render_html = TRUE, html_renderer = "builtin",
+         executable = "ktImportText"),
+    repo_root
+  )
+  expect_equal(renderer$provider, "builtin")
+  expect_true(file.exists(renderer$builder))
+  expect_true(file.exists(file.path(renderer$vendor_dir, "SOURCE.json")))
+
+  root <- tempfile("builtin krona path with spaces ")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  input <- file.path(root, "sample input.tsv")
+  output <- file.path(root, "sample output.html")
+  writeLines(c("2\tBacteria\tFirmicutes", "1\tBacteria\tProteobacteria"), input)
+  render_builtin_krona_html(
+    find_python(), renderer$builder, renderer$vendor_dir, output,
+    "sample id", input, 3
+  )
+  first <- readBin(output, "raw", n = file.info(output)$size)
+  render_builtin_krona_html(
+    find_python(), renderer$builder, renderer$vendor_dir, output,
+    "sample id", input, 3
+  )
+  expect_identical(first, readBin(output, "raw", n = file.info(output)$size))
+  expect_true(grepl("id=\"hiddenImage\" src=\"data:image/png", rawToChar(first), fixed = TRUE))
+  expect_length(list.files(root, pattern = "[.]tmp-", full.names = TRUE), 0L)
+
+  expect_error(
+    resolve_krona_renderer(
+      list(enabled = TRUE, render_html = TRUE, html_renderer = "kronatools",
+           executable = file.path(root, "missing-ktImportText")),
+      repo_root
+    ),
+    "was not found"
+  )
+})
+
 test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
   cache_path <- file.path("..", "..", "output_AAy", "taxonomy_cache.json")

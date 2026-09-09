@@ -58,6 +58,7 @@ jobs:
         shell: bash
         run: |
           Rscript tests/testthat.R
+          python -m unittest -v tests/test_krona_builder.py
           python -m unittest -v tests/test_ncbi_taxonomy.py tests/test_check_committed_whitespace.py
 
       - name: Validate without filesystem mutation
@@ -70,7 +71,7 @@ jobs:
       - name: Run full release integration
         shell: bash
         run: |
-          Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci integration output"
+          Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci integration output" --krona
           Rscript tests/verify_release_run.R "ci integration output"
           Rscript analysis/00_run_pipeline.R --config tests/fixtures/synthetic_minimap2/config.yml --output-dir "ci bamstats output"
           Rscript tests/verify_release_run.R "ci bamstats output"
