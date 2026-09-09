@@ -479,17 +479,13 @@ draw_taxa_heatmap <- function(prepared, path, mode = if (isTRUE(prepared$cohort)
   annotation <- NULL
   if (identical(mode, "cohort")) {
     annotation <- data.frame(
-      Group = factor(prepared$group_order[match(prepared$sample_order, prepared$sample_order)],
-                     levels = prepared$group_order),
+      Group = factor(
+        prepared$sidecar$Group[match(prepared$sample_order,
+                                     prepared$sidecar$SampleID)],
+        levels = prepared$group_order
+      ),
       row.names = prepared$sample_order,
       stringsAsFactors = FALSE
-    )
-    # group_order is the order of groups, not a per-sample vector; recover the
-    # per-column labels from the sidecar while preserving sample order.
-    annotation$Group <- factor(
-      prepared$sidecar$Group[match(prepared$sample_order,
-                                   prepared$sidecar$SampleID)],
-      levels = prepared$group_order
     )
   }
   with_png_device(path, width = if (identical(mode, "cohort")) {
@@ -503,7 +499,9 @@ draw_taxa_heatmap <- function(prepared, path, mode = if (isTRUE(prepared$cohort)
       color = colors,
       breaks = breaks,
       border_color = "#D9D9D9",
-      cluster_rows = if (identical(mode, "cohort")) prepared$row_hclust else FALSE,
+      cluster_rows = if (identical(mode, "cohort") && !is.null(prepared$row_hclust)) {
+        prepared$row_hclust
+      } else FALSE,
       cluster_cols = FALSE,
       angle_col = if (identical(mode, "cohort")) 90 else 0,
       main = sprintf("%s abundance (%s; classified-read denominator)",
