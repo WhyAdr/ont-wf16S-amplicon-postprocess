@@ -180,7 +180,8 @@ run_kreport <- function(context) {
         classified_reads = as.numeric(total_reads - uncl_reads),
         unclassified_reads = as.numeric(uncl_reads),
         emitted_magnitude_sum = as.numeric(emitted_sum),
-        tsv_path = krona_tsv
+        tsv_path = krona_artifact_relpath(krona_tsv, cfg$output$base_dir),
+        tsv_sha256 = compute_file_hash(krona_tsv)
       )
 
       if (render_html) {
@@ -199,7 +200,8 @@ run_kreport <- function(context) {
           render_kronatools_html(krona_executable, krona_html, s, krona_tsv)
         }
         all_outputs <- c(all_outputs, krona_html)
-        sample_record$html_path <- krona_html
+        sample_record$html_path <- krona_artifact_relpath(krona_html, cfg$output$base_dir)
+        sample_record$html_sha256 <- compute_file_hash(krona_html)
       }
       krona_records[[length(krona_records) + 1L]] <- sample_record
     }
@@ -254,11 +256,19 @@ run_kreport <- function(context) {
       NULL
     }
     krona_provenance <- list(
+      schema_version = 1L,
+      path_basis = "run_dir",
       format = "Krona 2.0-compatible direct-count tab-delimited lineage format",
       renderer_policy = renderer_policy,
       renderer = if (html_rendered) krona_renderer$renderer else NULL,
       renderer_version = if (html_rendered) krona_renderer$renderer_version else NULL,
+      krona_version = if (html_rendered) krona_renderer$krona_version else NULL,
       vendor_source = if (!is.null(renderer_manifest)) renderer_manifest$source_url else NULL,
+      vendor_manifest_sha256 = if (!is.null(renderer_manifest)) {
+        renderer_manifest$manifest_sha256
+      } else {
+        NULL
+      },
       vendor_sha256_manifest = if (!is.null(renderer_manifest)) {
         json_array(renderer_manifest$entries)
       } else {

@@ -7,10 +7,9 @@ if (length(script_arg) != 1L) stop("Could not locate verify_release_run.R.")
 script_path <- normalizePath(sub("^--file=", "", script_arg), winslash = "/", mustWork = TRUE)
 repo_root <- normalizePath(file.path(dirname(script_path), ".."), winslash = "/", mustWork = TRUE)
 source(file.path(repo_root, "analysis", "utils", "config.R"))
+source(file.path(repo_root, "analysis", "utils", "version.R"))
 source(file.path(repo_root, "analysis", "utils", "manifest.R"))
-expected_pipeline_version <- trimws(readLines(
-  file.path(repo_root, "VERSION"), n = 1L, warn = FALSE
-))
+expected_pipeline_version <- read_pipeline_version(file.path(repo_root, "VERSION"))
 lockfile_path <- file.path(repo_root, "renv.lock")
 if (!file.exists(lockfile_path)) stop("Expected committed renv.lock.")
 expected_lockfile_sha256 <- digest::digest(file = lockfile_path, algo = "sha256")
@@ -47,8 +46,57 @@ array_strings <- function(value, path) {
   unname(values)
 }
 
+sha256_file <- function(path) digest::digest(file = path, algo = "sha256")
+
+resolve_run_artifact <- function(root, relative) {
+  if (!is.character(relative) || length(relative) != 1L || is.na(relative) ||
+      !nzchar(relative) || grepl("\\\\", relative)) {
+    stop("Krona provenance contains a non-POSIX relative artifact path.")
+  }
+  parts <- strsplit(relative, "/", fixed = TRUE)[[1]]
+  if (grepl("^([A-Za-z]:|/|//)", relative) || any(!nzchar(parts)) ||
+      any(parts %in% c(".", ".."))) {
+    stop(sprintf("Unsafe run-relative Krona artifact path: '%s'.", relative))
+  }
+  normalized_root <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  resolved <- normalizePath(file.path(normalized_root, relative), winslash = "/", mustWork = FALSE)
+  root_key <- if (identical(.Platform$OS.type, "windows")) tolower(normalized_root) else normalized_root
+  resolved_key <- if (identical(.Platform$OS.type, "windows")) tolower(resolved) else resolved
+  if (!startsWith(resolved_key, paste0(root_key, "/"))) {
+    stop(sprintf("Krona artifact escapes the run root: '%s'.", relative))
+  }
+  resolved
+}
+
+assert_unique_key <- function(data, columns, label) {
+  key <- do.call(paste, c(data[columns], sep = "\r"))
+  if (anyDuplicated(key)) stop(sprintf("Duplicate key in %s.", label))
+}
+
+assert_sample_taxon_sets <- function(data, samples, label) {
+  path_sets <- lapply(samples, function(sample_id) {
+    sort(unique(as.character(data$TaxonPath[data$SampleID == sample_id])), method = "radix")
+  })
+  if (length(path_sets) > 1L && any(vapply(path_sets[-1L], function(paths) {
+    !identical(paths, path_sets[[1L]])
+  }, logical(1)))) {
+    stop(sprintf("TaxonPath sets differ across samples in %s.", label))
+  }
+}
+
+assert_display_labels <- function(data) {
+  unique_rows <- data[!duplicated(data$TaxonPath), , drop = FALSE]
+  if (anyDuplicated(as.character(unique_rows$DisplayTaxon))) {
+    stop("Composition display labels are not globally unique.")
+  }
+  other <- unique_rows$TaxonPath == "__OTHER__"
+  if (any(as.character(unique_rows$DisplayTaxon[other]) != "Other")) {
+    stop("Composition residual label is not Other.")
+  }
+}
+
 stopifnot(identical(manifest$run_status, "completed"))
-stopifnot(identical(manifest$mode, "single"))
+stopifnot(manifest$mode %in% c("single", "cohort"))
 stopifnot(identical(manifest$schema_version, 2L))
 stopifnot(identical(manifest$schema_revision, 2L))
 stopifnot(identical(manifest$config_schema_version, 1L))
@@ -77,6 +125,7 @@ ALL_MODULES <- c("qc", "alpha", "beta", "composition", "ordination", "shared", "
 expected_modules <- array_strings(manifest$cli$modules, "cli.modules")
 if (length(expected_modules) == 0L) expected_modules <- ALL_MODULES
 invisible(require_json_array(manifest$samples, "samples"))
+release_samples <- array_strings(manifest$samples, "samples")
 invisible(require_json_array(manifest$command, "command"))
 invisible(require_json_array(manifest$warnings, "warnings"))
 invisible(require_json_array(manifest$package_versions, "package_versions"))
@@ -135,6 +184,10 @@ if (identical(manifest$mode, "single")) {
   }
   for (m in intersect(c("beta", "ordination", "shared"), expected_modules)) {
     stopifnot(identical(manifest$modules[[m]]$status, "skipped"))
+  }
+} else {
+  for (m in intersect(c("qc", "alpha", "composition", "kreport"), expected_modules)) {
+    stopifnot(identical(manifest$modules[[m]]$status, "completed"))
   }
 }
 
@@ -220,6 +273,14 @@ assert_composition_sidecar <- function(path, expected_columns, rank, kind) {
   stopifnot(!any(grepl("(^|;)Unclassified($|;)", table$TaxonPath, ignore.case = TRUE)))
   table
 }
+assert_sidecar_display_labels <- function(table) {
+  by_path <- table[!duplicated(table$TaxonPath), c("TaxonPath", "DisplayTaxon"), drop = FALSE]
+  if (anyDuplicated(by_path$DisplayTaxon)) stop("Composition display labels are not unique by TaxonPath.")
+  other <- by_path$TaxonPath == "__OTHER__"
+  if (any(as.character(by_path$DisplayTaxon[other]) != "Other")) {
+    stop("Composition residual label is not Other.")
+  }
+}
 assert_composition_pair <- function(rank) {
   tsv <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_stacked.tsv", rank))
   png <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_stacked.png", rank))
@@ -230,12 +291,68 @@ assert_composition_pair <- function(rank) {
   }
   stopifnot(file.exists(tsv), file.exists(png))
   table <- assert_composition_sidecar(tsv, stacked_sidecar_columns, rank, "stacked")
-  for (sample_id in unique(table$SampleID)) {
+  assert_unique_key(table, c("SampleID", "TaxonPath"), "stacked composition")
+  stopifnot(setequal(as.character(unique(table$SampleID)), release_samples))
+  assert_sidecar_display_labels(table)
+  assert_sample_taxon_sets(table, release_samples, "stacked composition")
+  stopifnot(all(is.finite(table$RelativeAbundance)), all(table$RelativeAbundance >= 0),
+            all(table$RelativeAbundance <= 1), all(is.finite(table$MeanRelativeAbundance)))
+  for (sample_id in release_samples) {
     sample <- table[table$SampleID == sample_id, , drop = FALSE]
     valid <- sample$ValidDenominator
-    if (any(valid)) stopifnot(abs(sum(sample$RelativeAbundance[valid]) - 1) < 1e-8)
+    stopifnot(length(unique(valid)) == 1L)
+    stopifnot(sum(sample$IsOther) <= 1L)
+    stopifnot(all(sample$IsOther == (sample$TaxonPath == "__OTHER__")))
+    stopifnot(identical(sort(unique(as.integer(sample$StackOrder))), seq_len(nrow(sample))))
+    if (isTRUE(valid[1])) {
+      stopifnot(abs(sum(sample$RelativeAbundance) - 1) < 1e-8)
+    } else {
+      stopifnot(abs(sum(sample$RelativeAbundance)) < 1e-12)
+    }
   }
-  invisible(NULL)
+  if (identical(manifest$mode, "cohort")) {
+    group_tsv <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_group_mean_stacked.tsv", rank))
+    group_png <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_group_mean_stacked.png", rank))
+    group_skip <- sub("[.]tsv$", "_skipped.tsv", group_tsv)
+    stopifnot(file.exists(group_tsv), file.exists(group_png), !file.exists(group_skip))
+    group_columns <- c(
+      "Rank", "Group", "TaxonPath", "DisplayTaxon", "MeanRelativeAbundance",
+      "SamplesTotal", "SamplesUsed", "SamplesExcludedZeroClassified", "IsOther",
+      "StackOrder", "GroupOrder"
+    )
+    groups <- read.delim(group_tsv, check.names = FALSE, stringsAsFactors = FALSE)
+    stopifnot(identical(names(groups), group_columns), nrow(groups) > 0L)
+    assert_unique_key(groups, c("Group", "TaxonPath"), "group composition")
+    assert_sidecar_display_labels(groups)
+    for (group_name in unique(as.character(groups$Group))) {
+      group <- groups[groups$Group == group_name, , drop = FALSE]
+      group_samples <- unique(table$SampleID[table$Group == group_name])
+      valid_samples <- group_samples[vapply(group_samples, function(id) {
+        isTRUE(table$ValidDenominator[match(id, table$SampleID)])
+      }, logical(1))]
+      stopifnot(all(group$SamplesTotal == length(group_samples)))
+      stopifnot(all(group$SamplesUsed == length(valid_samples)))
+      stopifnot(all(group$SamplesExcludedZeroClassified == length(group_samples) - length(valid_samples)))
+      if (!length(valid_samples)) {
+        stopifnot(all(is.na(group$MeanRelativeAbundance)))
+      } else {
+        stopifnot(all(is.finite(group$MeanRelativeAbundance)))
+        stopifnot(abs(sum(group$MeanRelativeAbundance) - 1) < 1e-8)
+      }
+      for (i in seq_len(nrow(group))) {
+        values <- table$RelativeAbundance[
+          table$Group == group_name & table$TaxonPath == group$TaxonPath[i] &
+            table$ValidDenominator
+        ]
+        if (!length(values)) {
+          stopifnot(is.na(group$MeanRelativeAbundance[i]))
+        } else {
+          stopifnot(abs(group$MeanRelativeAbundance[i] - mean(values)) < 1e-12)
+        }
+      }
+    }
+  }
+  invisible(table)
 }
 assert_heatmap_pair <- function(rank) {
   tsv <- file.path(root, "04_Taxa_Composition", sprintf("04_heatmap_%s.tsv", rank))
@@ -248,7 +365,55 @@ assert_heatmap_pair <- function(rank) {
   stopifnot(file.exists(tsv), file.exists(png))
   table <- assert_composition_sidecar(tsv, heatmap_sidecar_columns, rank, "heatmap")
   stopifnot(all(table$Transform == composition_cfg$heatmap_transform))
-  invisible(NULL)
+  assert_unique_key(table, c("SampleID", "TaxonPath"), "heatmap composition")
+  stopifnot(setequal(as.character(unique(table$SampleID)), release_samples))
+  assert_sidecar_display_labels(table)
+  assert_sample_taxon_sets(table, release_samples, "heatmap composition")
+  stopifnot(all(is.finite(table$RelativeAbundance)), all(table$RelativeAbundance >= 0),
+            all(table$RelativeAbundance <= 1), all(is.finite(table$TransformedValue)))
+  include_other <- isTRUE(composition_cfg$heatmap_include_other)
+  top_n <- as.integer(composition_cfg$heatmap_top_n_taxa)
+  column_orders <- vapply(release_samples, function(sample_id) {
+    values <- unique(table$ColumnOrder[table$SampleID == sample_id])
+    if (length(values) != 1L) NA_integer_ else as.integer(values)
+  }, integer(1))
+  stopifnot(!anyNA(column_orders), identical(unname(sort(column_orders)), seq_along(release_samples)))
+  for (sample_id in release_samples) {
+    sample <- table[table$SampleID == sample_id, , drop = FALSE]
+    valid <- sample$ValidDenominator
+    stopifnot(length(unique(valid)) == 1L)
+    stopifnot(sum(sample$IsOther) <= 1L)
+    stopifnot(all(sample$IsOther == (sample$TaxonPath == "__OTHER__")))
+    stopifnot(sum(!sample$IsOther) <= top_n)
+    if (isTRUE(valid[1])) {
+      if (include_other) stopifnot(abs(sum(sample$RelativeAbundance) - 1) < 1e-8)
+      else stopifnot(sum(sample$RelativeAbundance) <= 1 + 1e-8)
+    } else {
+      stopifnot(abs(sum(sample$RelativeAbundance)) < 1e-12)
+      stopifnot(!any(sample$IsOther & sample$RelativeAbundance > 0))
+    }
+    stopifnot(identical(sort(unique(as.integer(sample$RowOrder))), seq_len(nrow(sample))))
+  }
+  if (identical(as.character(composition_cfg$heatmap_transform), "none")) {
+    stopifnot(all(is.na(table$PseudoCount)))
+    stopifnot(isTRUE(all.equal(as.numeric(table$TransformedValue),
+                              as.numeric(table$RelativeAbundance),
+                              tolerance = 0, check.attributes = FALSE)))
+  } else if (identical(as.character(composition_cfg$heatmap_transform), "log10_relative")) {
+    stopifnot(all(is.finite(table$PseudoCount)), all(table$PseudoCount > 0))
+    pseudo <- unique(round(table$PseudoCount, 15))
+    stopifnot(length(pseudo) == 1L)
+    positive <- table$RelativeAbundance[table$ValidDenominator & table$RelativeAbundance > 0]
+    stopifnot(length(positive), abs(pseudo - min(positive) / 2) < 1e-12)
+    stopifnot(isTRUE(all.equal(
+      as.numeric(table$TransformedValue),
+      log10(as.numeric(table$RelativeAbundance) + pseudo),
+      tolerance = 1e-12, check.attributes = FALSE
+    )))
+  } else {
+    stop("Unsupported heatmap transform in resolved config.")
+  }
+  invisible(table)
 }
 for (rank in as.character(composition_cfg$stacked_bar_ranks)) assert_composition_pair(rank)
 for (rank in as.character(composition_cfg$heatmap_ranks)) assert_heatmap_pair(rank)
@@ -260,7 +425,7 @@ if (isTRUE(manifest$cli$krona)) {
     stop("Krona was enabled but '07_Kreport/krona/krona_provenance.json' is missing.")
   }
   krona_provenance <- jsonlite::fromJSON(krona_provenance_file, simplifyVector = FALSE)
-  krona_samples <- array_strings(manifest$samples, "samples")
+  krona_samples <- release_samples
   sanitize_release_filename <- function(sample_id) {
     gsub("[^A-Za-z0-9_.-]", "_", sample_id)
   }
@@ -291,6 +456,8 @@ if (isTRUE(manifest$cli$krona)) {
     ))
   }
   stopifnot(html_status %in% c("not_requested", "rendered"))
+  stopifnot(identical(krona_provenance$schema_version, 1L))
+  stopifnot(identical(krona_provenance$path_basis, "run_dir"))
   stopifnot(!is.null(krona_provenance$renderer_policy))
   stopifnot(!is.null(krona_provenance$vendor_sha256_manifest))
   invisible(require_json_array(krona_provenance$vendor_sha256_manifest,
@@ -301,6 +468,13 @@ if (isTRUE(manifest$cli$krona)) {
   krona_records <- krona_provenance$samples
   krona_record_ids <- vapply(krona_records, function(record) as.character(record$sample_id), character(1))
   stopifnot(setequal(krona_record_ids, krona_samples))
+
+  if (identical(html_status, "rendered") &&
+      identical(krona_provenance$renderer, "builtin_krona_compatible")) {
+    stopifnot(identical(as.character(krona_provenance$renderer_version), expected_pipeline_version))
+    stopifnot(identical(as.character(krona_provenance$krona_version), "2.8.1"))
+    stopifnot(grepl("^[0-9a-f]{64}$", as.character(krona_provenance$vendor_manifest_sha256)))
+  }
 
   read_krona_totals <- function(path) {
     lines <- readLines(path, warn = FALSE)
@@ -323,9 +497,13 @@ if (isTRUE(manifest$cli$krona)) {
     sample_id <- as.character(record$sample_id)
     accounting_row <- accounting[accounting$SampleID == sample_id, , drop = FALSE]
     stopifnot(nrow(accounting_row) == 1L)
-    tsv_path <- as.character(record$tsv_path)
-    stopifnot(file.exists(tsv_path))
+    tsv_rel <- as.character(record$tsv_path)
+    tsv_path <- resolve_run_artifact(root, tsv_rel)
+    stopifnot(grepl("^07_Kreport/krona/", tsv_rel, fixed = FALSE))
+    stopifnot(file.exists(tsv_path), !dir.exists(tsv_path))
     stopifnot(identical(basename(tsv_path), paste0(sanitize_release_filename(sample_id), ".krona.tsv")))
+    stopifnot(grepl("^[0-9a-f]{64}$", as.character(record$tsv_sha256)))
+    stopifnot(identical(sha256_file(tsv_path), as.character(record$tsv_sha256)))
     totals <- read_krona_totals(tsv_path)
     stopifnot(totals$total == accounting_row$TotalReads)
     stopifnot(totals$classified == accounting_row$ClassifiedReads)
@@ -336,11 +514,43 @@ if (isTRUE(manifest$cli$krona)) {
     stopifnot(as.numeric(record$emitted_magnitude_sum) == totals$total)
 
     if (identical(html_status, "rendered")) {
-      html_path <- as.character(record$html_path)
-      stopifnot(file.exists(html_path), file.info(html_path)$size > 0)
+      html_rel <- as.character(record$html_path)
+      html_path <- resolve_run_artifact(root, html_rel)
+      stopifnot(grepl("^07_Kreport/krona/", html_rel, fixed = FALSE))
+      stopifnot(file.exists(html_path), !dir.exists(html_path), file.info(html_path)$size > 0)
       stopifnot(identical(basename(html_path), paste0(sanitize_release_filename(sample_id), ".krona.html")))
+      stopifnot(grepl("^[0-9a-f]{64}$", as.character(record$html_sha256)))
+      stopifnot(identical(sha256_file(html_path), as.character(record$html_sha256)))
+        if (identical(krona_provenance$renderer, "builtin_krona_compatible")) {
+        html_text <- paste(readLines(html_path, warn = FALSE), collapse = "\n")
+        stopifnot(!grepl("<(script|link|img)[^>]+(src|href)=['\"]https?://", html_text,
+                         ignore.case = TRUE, perl = TRUE))
+          if (!requireNamespace("xml2", quietly = TRUE)) {
+            stop("Builtin Krona release verification requires the xml2 package.")
+          }
+          document <- xml2::read_html(html_path)
+          dataset_node <- xml2::xml_find_first(document, ".//node")
+          stopifnot(length(dataset_node) == 1L)
+          check_krona_node <- function(node) {
+            clade_node <- xml2::xml_find_first(node, "./magnitude/val")
+            direct_node <- xml2::xml_find_first(node, "./magnitudeUnassigned/val")
+            stopifnot(length(clade_node) == 1L, length(direct_node) == 1L)
+            clade <- suppressWarnings(as.numeric(xml2::xml_text(clade_node)))
+            direct <- suppressWarnings(as.numeric(xml2::xml_text(direct_node)))
+            children <- xml2::xml_find_all(node, "./node")
+            child_clades <- if (length(children)) {
+              vapply(seq_along(children), function(i) check_krona_node(children[[i]]), numeric(1))
+            } else numeric(0)
+            stopifnot(is.finite(clade), is.finite(direct), direct >= 0,
+                      clade == direct + sum(child_clades))
+            clade
+          }
+          root_clade <- check_krona_node(dataset_node)
+          stopifnot(root_clade == totals$total)
+      }
     } else {
       stopifnot(is.null(record$html_path))
+      stopifnot(is.null(record$html_sha256))
     }
   }
 }
@@ -489,6 +699,11 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   stopifnot(composition$TotalReads == 5L)
   stopifnot(composition$ClassifiedReads == 1L)
   stopifnot(composition$UnclassifiedReads == 4L)
+} else if (identical(manifest$mode, "cohort")) {
+  # Cohort release fixtures are intentionally data-agnostic here. The common
+  # reconciliation, composition, and module-contract checks above remain
+  # authoritative while dataset-specific expected counts stay with each fixture.
+  invisible(TRUE)
 } else {
   stop(sprintf("Unknown project_name for release verification: '%s'", manifest$project_name))
 }

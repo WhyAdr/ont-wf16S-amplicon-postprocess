@@ -4,8 +4,10 @@
 
 source(file.path("..", "..", "analysis", "utils", "dependencies.R"))
 source(file.path("..", "..", "analysis", "utils", "config.R"))
+source(file.path("..", "..", "analysis", "utils", "version.R"))
 source(file.path("..", "..", "analysis", "utils", "io.R"))
 source(file.path("..", "..", "analysis", "utils", "manifest.R"))
+source(file.path("..", "..", "analysis", "utils", "atomic_io.R"))
 source(file.path("..", "..", "analysis", "utils", "kreport.R"))
 source(file.path("..", "..", "analysis", "07_kreport_pavian.R"))
 
@@ -166,6 +168,42 @@ test_that("builtin Krona renderer is deterministic and strict external policy fa
   )
 })
 
+test_that("external Krona renderer failures preserve prior output and clean partial HTML", {
+  root <- tempfile("krona_renderer_failure_")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  input <- file.path(root, "input.tsv")
+  output <- file.path(root, "output.html")
+  writeLines("1\tBacteria", input)
+  writeLines("prior HTML", output)
+  executable <- if (identical(.Platform$OS.type, "windows")) {
+    script <- file.path(root, "failing-renderer.cmd")
+    writeLines(c(
+      "@echo off",
+      "echo renderer stderr 1>&2",
+      "echo partial>\"%~2\"",
+      "exit /b 7"
+    ), script)
+    script
+  } else {
+    script <- file.path(root, "failing-renderer.sh")
+    writeLines(c(
+      "#!/bin/sh",
+      "printf partial > \"$2\"",
+      "printf 'renderer stderr\\n' >&2",
+      "exit 7"
+    ), script)
+    Sys.chmod(script, mode = "0755")
+    script
+  }
+
+  expect_error(
+    render_kronatools_html(executable, output, "S1", input),
+    "renderer stderr"
+  )
+  expect_identical(readLines(output, warn = FALSE), "prior HTML")
+  expect_length(list.files(root, pattern = "[.]tmp-", full.names = TRUE), 0L)
+})
+
 test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
   cache_path <- file.path("..", "..", "output_AAy", "taxonomy_cache.json")
@@ -225,8 +263,15 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   expect_equal(sum(krona_magnitudes), 114056)
   expect_equal(sum(krona_magnitudes[-1]), 80556)
   krona_provenance <- jsonlite::fromJSON(krona_provenance_file, simplifyVector = FALSE)
+  expect_equal(krona_provenance$schema_version, 1)
+  expect_equal(krona_provenance$path_basis, "run_dir")
   expect_equal(krona_provenance$html_status, "not_requested")
   expect_equal(krona_provenance$samples[[1]]$emitted_magnitude_sum, 114056)
+  expect_equal(krona_provenance$samples[[1]]$tsv_path,
+               "07_Kreport/krona/AmbarAyunda_minimap2_16S.krona.tsv")
+  expect_match(krona_provenance$samples[[1]]$tsv_sha256, "^[0-9a-f]{64}$")
+  expect_null(krona_provenance$samples[[1]]$html_path)
+  expect_null(krona_provenance$samples[[1]]$html_sha256)
 
   unresolved <- read.delim(file.path(cfg$output$dirs$kreport,
                                      "unresolved_taxids.tsv"),
@@ -284,13 +329,37 @@ test_that("kreport resolver handles input and output paths containing spaces", {
   cfg$input$params_json <- create_temp_params(root)
   cfg$input$assignments <- list(S1 = assignments)
   cfg$taxonomy$cache <- cache_file
-  cfg$output$base_dir <- file.path(root, "output directory")
-  cfg$output$dirs <- list(kreport = file.path(cfg$output$base_dir, "07_Kreport"))
-  cfg$krona <- NULL
+  run_stage <- file.path(root, "run stage")
+  dir.create(run_stage, recursive = TRUE, showWarnings = FALSE)
+  module_stage <- prepare_module_staging(run_stage, "kreport")
+  cfg$output$base_dir <- module_stage
+  cfg$output$dirs <- list(kreport = file.path(module_stage, "07_Kreport"))
+  cfg$krona <- list(enabled = TRUE, render_html = FALSE, executable = "ktImportText")
   cfg$cli <- list(modules = "kreport", validate_only = FALSE)
 
   context <- build_context(cfg)
-  expect_equal(run_kreport(context)$status, "completed")
-  expect_true(file.exists(file.path(cfg$output$dirs$kreport, "S1.kreport")))
-  expect_false(dir.exists(file.path(cfg$output$dirs$kreport, "krona")))
+  result <- run_kreport(context)
+  expect_equal(result$status, "completed")
+  expect_true(file.exists(file.path(module_stage, "07_Kreport", "S1.kreport")))
+  publish_module_staging(module_stage, run_stage, result$outputs)
+  expect_false(dir.exists(module_stage))
+  expect_true(file.exists(file.path(run_stage, "07_Kreport", "S1.kreport")))
+  provenance <- jsonlite::fromJSON(
+    file.path(run_stage, "07_Kreport", "krona", "krona_provenance.json"),
+    simplifyVector = FALSE
+  )
+  record <- provenance$samples[[1]]
+  expect_equal(record$tsv_path, "07_Kreport/krona/S1.krona.tsv")
+  expect_match(record$tsv_sha256, "^[0-9a-f]{64}$")
+  expect_false(grepl("^([A-Za-z]:|/)|[.]module-stage", record$tsv_path))
+  expect_identical(compute_file_hash(file.path(run_stage, record$tsv_path)), record$tsv_sha256)
+
+  moved <- file.path(root, "moved completed run")
+  dir.create(moved, recursive = TRUE, showWarnings = FALSE)
+  expect_true(all(file.copy(list.files(run_stage, full.names = TRUE), moved, recursive = TRUE)))
+  moved_record <- jsonlite::fromJSON(
+    file.path(moved, "07_Kreport", "krona", "krona_provenance.json"),
+    simplifyVector = FALSE
+  )$samples[[1]]
+  expect_identical(compute_file_hash(file.path(moved, moved_record$tsv_path)), moved_record$tsv_sha256)
 })

@@ -242,12 +242,11 @@ render_kronatools_html <- function(executable, output_path, sample_id, input_pat
   if (!dir.exists(parent_dir)) {
     stop(sprintf("Could not create Krona HTML output directory '%s'.", parent_dir), call. = FALSE)
   }
-  if (file.exists(output_path) && !file.remove(output_path)) {
-    stop(sprintf("Krona HTML output for sample '%s' could not be replaced.", sample_id),
-         call. = FALSE)
-  }
 
-  args <- c("-o", output_path, "-n", sample_id, input_path)
+  rendered_path <- tempfile(pattern = paste0(".", basename(output_path), ".tmp-"),
+                            tmpdir = parent_dir)
+  on.exit(if (file.exists(rendered_path)) unlink(rendered_path, force = TRUE), add = TRUE)
+  args <- c("-o", rendered_path, "-n", sample_id, input_path)
   result <- tryCatch(
     processx::run(
       command = executable,
@@ -264,17 +263,27 @@ render_kronatools_html <- function(executable, output_path, sample_id, input_pat
 
   if (!isTRUE(result$status == 0L)) {
     status <- if (is.null(result$status)) "unknown" else as.character(result$status)
+    detail <- trimws(paste(result$stderr %||% "", result$stdout %||% ""))
     stop(sprintf(
-      "Krona HTML rendering failed for sample '%s' using executable '%s' (exit status %s).",
-      sample_id, executable, status
+      "Krona HTML rendering failed for sample '%s' using executable '%s' (exit status %s): %s",
+      sample_id, executable, status, detail
     ), call. = FALSE)
   }
-  if (!file.exists(output_path) || !isTRUE(file.info(output_path)$size > 0)) {
+  if (!file.exists(rendered_path) || !isTRUE(file.info(rendered_path)$size > 0)) {
     stop(sprintf(
       "Krona HTML renderer reported success but produced no output for sample '%s' using executable '%s'.",
       sample_id, executable
     ), call. = FALSE)
   }
+
+  if (!exists("atomic_replace", mode = "function")) {
+    stop("Krona HTML rendering requires the atomic output helper.", call. = FALSE)
+  }
+  atomic_replace(output_path, function(temp) {
+    if (!file.copy(rendered_path, temp, overwrite = TRUE)) {
+      stop(sprintf("Could not stage Krona HTML output for sample '%s'.", sample_id), call. = FALSE)
+    }
+  })
 
   invisible(output_path)
 }
@@ -283,7 +292,34 @@ krona_vendor_directory <- function(repo_root) {
   file.path(repo_root, "analysis", "vendor", "krona-2.8.1")
 }
 
+krona_artifact_relpath <- function(path, module_root) {
+  canonical <- function(value) {
+    if (exists("canonicalize_root_path", mode = "function")) {
+      canonicalize_root_path(value)
+    } else {
+      normalizePath(value, winslash = "/", mustWork = TRUE)
+    }
+  }
+  normalized_path <- canonical(path)
+  normalized_root <- canonical(module_root)
+  path_key <- if (identical(.Platform$OS.type, "windows")) tolower(normalized_path) else normalized_path
+  root_key <- if (identical(.Platform$OS.type, "windows")) tolower(normalized_root) else normalized_root
+  if (!startsWith(path_key, paste0(root_key, "/"))) {
+    stop("Krona artifact is outside the module output root.", call. = FALSE)
+  }
+  relative <- substring(normalized_path, nchar(normalized_root) + 2L)
+  parts <- strsplit(relative, "/", fixed = TRUE)[[1]]
+  if (!nzchar(relative) || any(!nzchar(parts)) || any(parts %in% c(".", "..")) ||
+      grepl("^[A-Za-z]:|^/", relative)) {
+    stop("Krona artifact has an unsafe run-relative path.", call. = FALSE)
+  }
+  relative
+}
+
 krona_vendor_manifest <- function(vendor_dir) {
+  if (nzchar(Sys.readlink(vendor_dir)) || !dir.exists(vendor_dir)) {
+    stop(sprintf("Krona vendor directory is missing: '%s'.", vendor_dir), call. = FALSE)
+  }
   manifest_path <- file.path(vendor_dir, "SOURCE.json")
   if (!file.exists(manifest_path) || dir.exists(manifest_path)) {
     stop(sprintf("Krona vendor manifest is missing: '%s'.", manifest_path), call. = FALSE)
@@ -295,18 +331,47 @@ krona_vendor_manifest <- function(vendor_dir) {
   if (!identical(manifest$upstream, "marbl/Krona") || !identical(manifest$tag, "v2.8.1")) {
     stop("Krona vendor manifest does not identify marbl/Krona v2.8.1.", call. = FALSE)
   }
+  if (!is.character(manifest$commit) || length(manifest$commit) != 1L ||
+      !grepl("^[0-9a-f]{40}$", manifest$commit)) {
+    stop("Krona vendor manifest has an invalid upstream commit.", call. = FALSE)
+  }
   entries <- manifest$files %||% list()
   if (!is.list(entries) || length(entries) == 0L) {
     stop("Krona vendor manifest has no pinned files.", call. = FALSE)
   }
+  expected_files <- c(
+    "LICENSE.txt", "src/krona-2.0.js", "img/favicon.ico", "img/hidden.png",
+    "img/loading.gif", "img/logo-med.png"
+  )
+  declared <- character(0)
+  declared_casefolded <- character(0)
   manifest_entries <- vapply(entries, function(entry) {
-    if (is.null(entry$path) || is.null(entry$sha256)) {
+    if (!is.character(entry$path) || length(entry$path) != 1L ||
+        !is.character(entry$sha256) || length(entry$sha256) != 1L) {
       stop("Krona vendor manifest contains an incomplete file entry.", call. = FALSE)
     }
     path <- as.character(entry$path)
     expected <- as.character(entry$sha256)
+    if (length(path) != 1L || is.na(path) || !nzchar(path) || grepl("\\\\", path) ||
+        grepl("^/|^[A-Za-z]:", path)) {
+      stop(sprintf("Krona vendor manifest path is unsafe: '%s'.", path), call. = FALSE)
+    }
+    parts <- strsplit(path, "/", fixed = TRUE)[[1]]
+    if (any(!nzchar(parts)) || any(parts %in% c(".", "..")) ||
+        !identical(path, paste(parts, collapse = "/"))) {
+      stop(sprintf("Krona vendor manifest path is unsafe: '%s'.", path), call. = FALSE)
+    }
+    folded <- tolower(path)
+    if (path %in% declared || folded %in% declared_casefolded) {
+      stop(sprintf("Krona vendor manifest contains duplicate or case-colliding path: '%s'.", path), call. = FALSE)
+    }
+    declared <<- c(declared, path)
+    declared_casefolded <<- c(declared_casefolded, folded)
+    if (length(expected) != 1L || is.na(expected) || !grepl("^[0-9a-f]{64}$", expected)) {
+      stop(sprintf("Krona vendor manifest has an invalid SHA-256 for '%s'.", path), call. = FALSE)
+    }
     actual_path <- file.path(vendor_dir, path)
-    if (!file.exists(actual_path) || dir.exists(actual_path)) {
+    if (nzchar(Sys.readlink(actual_path)) || !file.exists(actual_path) || dir.exists(actual_path)) {
       stop(sprintf("Krona vendor file is missing: '%s'.", actual_path), call. = FALSE)
     }
     actual <- compute_file_hash(actual_path)
@@ -315,11 +380,34 @@ krona_vendor_manifest <- function(vendor_dir) {
     }
     paste(path, expected, sep = "\t")
   }, character(1))
+  all_paths <- list.files(vendor_dir, recursive = TRUE, all.files = TRUE,
+                          no.. = TRUE, include.dirs = TRUE, full.names = FALSE)
+  symlinks <- all_paths[vapply(file.path(vendor_dir, all_paths), function(path) {
+    nzchar(Sys.readlink(path))
+  }, logical(1))]
+  if (length(symlinks)) {
+    stop(sprintf("Krona vendor tree contains a symlink: '%s'.", symlinks[1]), call. = FALSE)
+  }
+  actual <- all_paths[vapply(all_paths, function(relative) {
+    path <- file.path(vendor_dir, relative)
+    file.exists(path) && !dir.exists(path) && !identical(gsub("\\\\", "/", relative), "SOURCE.json")
+  }, logical(1))]
+  actual <- gsub("\\\\", "/", actual)
+  if (anyDuplicated(tolower(actual))) {
+    stop("Krona vendor tree contains case-colliding files.", call. = FALSE)
+  }
+  if (!setequal(actual, declared)) {
+    stop("Declared and actual Krona vendor inventories differ.", call. = FALSE)
+  }
+  if (!setequal(declared, expected_files)) {
+    stop("Krona vendor inventory differs from the renderer contract.", call. = FALSE)
+  }
   list(
     tag = as.character(manifest$tag),
     commit = as.character(manifest$commit),
     source_url = as.character(manifest$source_url),
-    entries = manifest_entries
+    entries = manifest_entries,
+    manifest_sha256 = compute_file_hash(manifest_path)
   )
 }
 
@@ -334,22 +422,27 @@ resolve_krona_renderer <- function(krona_cfg, repo_root) {
   external <- find_krona_executable(requested)
   vendor_dir <- krona_vendor_directory(repo_root)
   builder <- file.path(repo_root, "analysis", "utils", "krona_builder.py")
+  pipeline_version <- read_pipeline_version(file.path(repo_root, "VERSION"))
   builtin <- list(
     policy = policy,
     provider = "builtin",
     renderer = "builtin_krona_compatible",
-    renderer_version = "AAy Amplicon builtin 0.4.5 + Krona 2.8.1",
+    renderer_version = pipeline_version,
+    krona_version = NULL,
     builder = normalizePath(builder, winslash = "/", mustWork = FALSE),
     vendor_dir = normalizePath(vendor_dir, winslash = "/", mustWork = FALSE),
     requested_executable = requested,
-    resolved_executable = NULL
+    resolved_executable = NULL,
+    vendor_manifest_sha256 = NULL
   )
 
   if (identical(policy, "builtin") || (identical(policy, "auto") && is.na(external))) {
     if (!file.exists(builder) || dir.exists(builder)) {
       stop(sprintf("Builtin Krona renderer is missing: '%s'.", builder), call. = FALSE)
     }
-    krona_vendor_manifest(vendor_dir)
+    vendor <- krona_vendor_manifest(vendor_dir)
+    builtin$vendor_manifest_sha256 <- vendor$manifest_sha256
+    builtin$krona_version <- sub("^v", "", vendor$tag)
     return(builtin)
   }
 
@@ -362,10 +455,12 @@ resolve_krona_renderer <- function(krona_cfg, repo_root) {
     provider = "kronatools",
     renderer = "ktImportText",
     renderer_version = get_krona_version(external) %||% "unknown",
+    krona_version = get_krona_version(external) %||% "unknown",
     builder = NULL,
     vendor_dir = NULL,
     requested_executable = requested,
-    resolved_executable = external
+    resolved_executable = external,
+    vendor_manifest_sha256 = NULL
   )
 }
 

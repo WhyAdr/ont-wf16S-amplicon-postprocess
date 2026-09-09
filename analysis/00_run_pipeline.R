@@ -10,15 +10,7 @@ get_script_dir <- function() {
     normalizePath(file.path(getwd(), "analysis"), winslash = "/")
 }
 
-read_pipeline_version <- function(path) {
-  if (!file.exists(path)) stop("VERSION is missing.", call. = FALSE)
-  bytes <- readBin(path, "raw", n = file.info(path)$size)
-  text <- rawToChar(bytes)
-  if (!grepl("^[0-9]+\\.[0-9]+\\.[0-9]+\\n$", text)) {
-    stop("VERSION must contain exactly one newline-terminated SemVer value.", call. = FALSE)
-  }
-  sub("\\n$", "", text)
-}
+source(file.path(get_script_dir(), "utils", "version.R"))
 
 main <- function() {
   script_dir <- get_script_dir()

@@ -8,9 +8,11 @@ test_that("Current release metadata agrees with VERSION", {
   version_lines <- readLines(version_path, warn = FALSE)
   version <- if (length(version_lines) == 1L) trimws(version_lines[[1]]) else ""
   version_bytes <- readBin(version_path, what = "raw", n = file.info(version_path)$size)
+  source(file.path(repo_root, "analysis", "utils", "version.R"))
   expect_length(version_lines, 1L)
   expect_match(version, "^[0-9]+[.][0-9]+[.][0-9]+$")
   expect_true(length(version_bytes) > 0L && identical(tail(version_bytes, 1L), as.raw(0x0a)))
+  expect_identical(read_pipeline_version(version_path), version)
   citation <- readLines(file.path(repo_root, "CITATION.cff"), warn = FALSE)
   readme <- readLines(file.path(repo_root, "README.md"), warn = FALSE)
   changelog <- readLines(file.path(repo_root, "CHANGELOG.md"), warn = FALSE)
