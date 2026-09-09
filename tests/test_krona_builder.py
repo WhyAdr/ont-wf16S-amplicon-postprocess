@@ -39,15 +39,28 @@ class KronaBuilderTests(unittest.TestCase):
     def test_xml_preserves_direct_and_clade_magnitudes(self) -> None:
         records = krona_builder.parse_krona_input(KRONA_FIXTURE)
         expected = json.loads(KRONA_EXPECTED.read_text(encoding="utf-8"))
-        root = ET.fromstring(krona_builder.build_krona_xml(records, "dataset"))
+        root = ET.fromstring(
+            krona_builder.build_krona_xml(records, "dataset", "direct_clade")
+        )
+
+        self.assertEqual(root.attrib, {
+            "collapse": expected["document"]["collapse"],
+            "key": expected["document"]["key"],
+        })
+        self.assertEqual(
+            root.find("attributes").attrib["magnitude"],
+            expected["document"]["magnitudeAttribute"],
+        )
 
         self.assertEqual(
-            [(attribute.attrib["display"], attribute.text)
+            [[attribute.attrib["display"], attribute.text]
              for attribute in root.findall("attributes/attribute")],
-            [("Total", "magnitude"), ("Unassigned", "magnitudeUnassigned")],
+            expected["document"]["attributes"],
         )
+        self.assertEqual(root.findtext("datasets/dataset"), expected["document"]["datasetLabel"])
         dataset = root.find("node")
         self.assertIsNotNone(dataset)
+        self.assertEqual(dataset.attrib["name"], expected["document"]["rootName"])
         self.assertEqual(dataset.findtext("magnitude/val"), str(expected["dataset"]["magnitude"]))
         self.assertEqual(
             dataset.findtext("magnitudeUnassigned/val"),
@@ -154,6 +167,8 @@ class KronaBuilderTests(unittest.TestCase):
             self.assertIn('id="loadingImage" src="data:image/gif;base64,', text)
             self.assertIn('id="logo" src="data:image/png;base64,', text)
             self.assertIn("<krona", text)
+            self.assertIn('<krona collapse="true" key="true">', text)
+            self.assertIn('<dataset>sample input</dataset>', text)
             self.assertNotIn('<script src="http', text)
             self.assertNotIn('<link rel="shortcut icon" href="http', text)
             self.assertFalse(list(output_path.parent.glob(output_path.name + ".tmp-*")))

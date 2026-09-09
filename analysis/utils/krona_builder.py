@@ -193,14 +193,20 @@ def _append_node(parent: ET.Element, name: str, node: dict[str, object]) -> None
 
 
 def build_krona_xml(
-    records: list[tuple[int, tuple[str, ...]]], dataset_name: str
+    records: list[tuple[int, tuple[str, ...]]],
+    dataset_name: str,
+    dataset_label: str | None = None,
 ) -> bytes:
     """Return deterministic Krona 2.0-compatible XML bytes."""
 
     dataset = _require_text(dataset_name, "dataset name")
+    label = _require_text(dataset_label or dataset, "dataset label")
     tree = build_tree(records)
     validate_tree(tree)
-    root = ET.Element("krona", {"collapse": "false", "key": "false"})
+    # Match the ktImportText 2.8.1 default document state.  The root node name
+    # comes from -n, while the dataset selector label comes from the input
+    # basename when no explicit parseDataset label is supplied.
+    root = ET.Element("krona", {"collapse": "true", "key": "true"})
     attributes = ET.SubElement(root, "attributes", {"magnitude": "magnitude"})
     attribute = ET.SubElement(attributes, "attribute", {"display": "Total"})
     attribute.text = "magnitude"
@@ -209,7 +215,7 @@ def build_krona_xml(
     )
     unassigned_attribute.text = "magnitudeUnassigned"
     datasets = ET.SubElement(root, "datasets")
-    _element_text(datasets, "dataset", dataset)
+    _element_text(datasets, "dataset", label)
     _append_node(root, dataset, tree)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
 
@@ -399,7 +405,8 @@ def render(
     observed = sum(magnitude for magnitude, _labels in records)
     if observed != total:
         _fail(f"input magnitude sum ({observed}) does not equal expected total ({total})")
-    xml_bytes = build_krona_xml(records, dataset_name)
+    dataset_label = Path(input_path).stem
+    xml_bytes = build_krona_xml(records, dataset_name, dataset_label)
     atomic_write(output_path, build_html(xml_bytes, dataset_name, vendor_dir))
 
 

@@ -600,14 +600,24 @@ validate_composition_display_labels <- function(data) {
   invisible(TRUE)
 }
 
-validate_sidecar_sample_order <- function(data, expected_samples) {
-  sample_order <- vapply(expected_samples, function(sample_id) {
-    values <- unique(data$SampleOrder[data$SampleID == sample_id])
+validate_sidecar_sample_order <- function(data, expected_sample_order,
+                                          order_column = "SampleOrder") {
+  expected_sample_order <- as.character(expected_sample_order)
+  if (!length(expected_sample_order) || anyNA(expected_sample_order) ||
+      any(!nzchar(expected_sample_order)) || anyDuplicated(expected_sample_order)) {
+    stop("Expected composition sample order must contain unique non-empty sample IDs.",
+         call. = FALSE)
+  }
+  sample_order <- vapply(expected_sample_order, function(sample_id) {
+    values <- unique(data[[order_column]][data$SampleID == sample_id])
     if (length(values) != 1L) NA_real_ else as.numeric(values)
   }, numeric(1))
-  if (anyNA(sample_order) || !identical(unname(sort(as.numeric(sample_order))),
-                                         as.numeric(seq_along(expected_samples)))) {
-    stop("Composition SampleOrder is not a contiguous deterministic sample order.", call. = FALSE)
+  expected_values <- as.numeric(seq_along(expected_sample_order))
+  if (anyNA(sample_order) || any(!is.finite(sample_order)) ||
+      any(sample_order != floor(sample_order)) ||
+      !identical(unname(sample_order), expected_values)) {
+    stop(sprintf("Composition %s does not match the expected deterministic sample order.",
+                 order_column), call. = FALSE)
   }
   invisible(TRUE)
 }
@@ -625,7 +635,8 @@ validate_sidecar_taxon_sets <- function(data, expected_samples, label) {
   invisible(TRUE)
 }
 
-validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL) {
+validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL,
+                                     expected_sample_order = expected_samples) {
   if (!is.data.frame(x) || !identical(names(x), composition_stacked_columns) || !nrow(x)) {
     stop("Invalid stacked composition sidecar schema.", call. = FALSE)
   }
@@ -643,10 +654,18 @@ validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL) 
     stop("Stacked composition sidecar contains invalid abundance or flag values.", call. = FALSE)
   }
   validate_composition_display_labels(x)
-  validate_sidecar_sample_order(x, expected_samples)
+  if (!setequal(as.character(expected_sample_order), as.character(expected_samples))) {
+    stop("Expected stacked sample order does not cover the expected sample set.", call. = FALSE)
+  }
+  validate_sidecar_sample_order(x, expected_sample_order)
   validate_sidecar_taxon_sets(x, expected_samples, "Stacked composition")
+  reference_paths <- NULL
   for (sample_id in expected_samples) {
     sample <- x[x$SampleID == sample_id, , drop = FALSE]
+    if (length(unique(sample$ValidDenominator)) != 1L ||
+        length(unique(as.character(sample$Group))) != 1L) {
+      stop("Stacked composition sample metadata is inconsistent within a sample.", call. = FALSE)
+    }
     if (length(unique(sample$IsOther[sample$TaxonPath == OTHER_TAXON_PATH])) > 1L ||
         sum(sample$IsOther) > 1L ||
         any(sample$IsOther != (sample$TaxonPath == OTHER_TAXON_PATH))) {
@@ -659,10 +678,23 @@ validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL) 
     } else if (abs(sum(sample$RelativeAbundance)) > 1e-12) {
       stop("Invalid stacked composition must have zero abundance.", call. = FALSE)
     }
-    stack_order <- sort(unique(as.integer(sample$StackOrder)))
-    if (!identical(stack_order, seq_len(nrow(sample)))) {
-      stop("Stacked composition StackOrder is not contiguous.", call. = FALSE)
+    stack_order <- as.numeric(sample$StackOrder)
+    if (anyNA(stack_order) || any(!is.finite(stack_order)) ||
+        any(stack_order != floor(stack_order)) ||
+        !identical(sort(unique(stack_order)), as.numeric(seq_len(nrow(sample))))) {
+      stop("Stacked composition StackOrder is not a contiguous integer order.", call. = FALSE)
     }
+    ordered_paths <- as.character(sample$TaxonPath[order(stack_order)])
+    if (is.null(reference_paths)) reference_paths <- ordered_paths
+    if (!identical(ordered_paths, reference_paths)) {
+      stop("Stacked composition TaxonPath-to-StackOrder mapping differs across samples.",
+           call. = FALSE)
+    }
+  }
+  mean_counts <- vapply(split(x$MeanRelativeAbundance, x$TaxonPath),
+                        function(values) length(unique(as.numeric(values))), integer(1))
+  if (any(mean_counts != 1L)) {
+    stop("Stacked composition mean abundance is inconsistent for a TaxonPath.", call. = FALSE)
   }
   invisible(TRUE)
 }
@@ -679,14 +711,46 @@ validate_group_sidecar <- function(group, sample, expected_rank = NULL) {
     stop("Group composition sidecar has duplicate group/taxon keys.", call. = FALSE)
   }
   validate_composition_display_labels(group)
-  sample_info <- unique(sample[, c("SampleID", "Group", "ValidDenominator"), drop = FALSE])
+  sample_info <- unique(sample[, c("SampleID", "Group", "GroupOrder", "ValidDenominator"), drop = FALSE])
   if (anyDuplicated(sample_info$SampleID) || anyNA(sample_info$ValidDenominator)) {
     stop("Sample composition data cannot establish group denominator status.", call. = FALSE)
   }
-  for (g in unique(as.character(group$Group))) {
+  sample_group_order <- as.numeric(sample_info$GroupOrder)
+  sample_groups <- as.character(sample_info$Group)
+  group_order_values <- lapply(split(sample_group_order, sample_groups), unique)
+  if (any(vapply(group_order_values, length, integer(1)) != 1L)) {
+    stop("Samples in the same composition group have conflicting GroupOrder values.",
+         call. = FALSE)
+  }
+  group_order_by_name <- vapply(group_order_values, function(values) values[1], numeric(1))
+  expected_groups <- names(group_order_by_name)[order(group_order_by_name)]
+  expected_group_values <- stats::setNames(seq_along(expected_groups), expected_groups)
+  if (anyNA(sample_group_order) || any(!is.finite(sample_group_order)) ||
+      any(sample_group_order != floor(sample_group_order)) ||
+      !identical(unname(group_order_by_name[expected_groups]),
+                 as.numeric(seq_along(expected_groups))) ||
+      !setequal(as.character(unique(group$Group)), expected_groups)) {
+    stop("Group composition does not cover the deterministic sample group set.", call. = FALSE)
+  }
+  sample_reference <- sample[sample$SampleID == sample_info$SampleID[1], , drop = FALSE]
+  sample_reference <- as.character(sample_reference$TaxonPath[order(sample_reference$StackOrder)])
+  for (g in expected_groups) {
     g_samples <- sample_info$SampleID[sample_info$Group == g]
     g_valid <- sample_info$ValidDenominator[sample_info$Group == g]
     g_rows <- group[group$Group == g, , drop = FALSE]
+    group_order <- unique(as.numeric(g_rows$GroupOrder))
+    stack_order <- as.numeric(g_rows$StackOrder)
+    if (length(group_order) != 1L || anyNA(group_order) ||
+        !identical(unname(group_order), as.numeric(expected_group_values[[g]])) ||
+        anyNA(stack_order) || any(!is.finite(stack_order)) ||
+        any(stack_order != floor(stack_order)) ||
+        !identical(sort(unique(stack_order)), as.numeric(seq_len(nrow(g_rows)))) ||
+        !identical(as.character(g_rows$TaxonPath[order(stack_order)]), sample_reference)) {
+      stop("Group composition order or TaxonPath coverage is inconsistent.", call. = FALSE)
+    }
+    if (any(g_rows$IsOther != (g_rows$TaxonPath == OTHER_TAXON_PATH))) {
+      stop("Group composition sidecar has an invalid Other row.", call. = FALSE)
+    }
     if (any(g_rows$SamplesTotal != length(g_samples)) ||
         any(g_rows$SamplesUsed != sum(g_valid)) ||
         any(g_rows$SamplesExcludedZeroClassified != sum(!g_valid))) {
@@ -723,7 +787,8 @@ validate_group_sidecar <- function(group, sample, expected_rank = NULL) {
   invisible(TRUE)
 }
 
-validate_heatmap_sidecar <- function(x, expected_samples, cfg, expected_rank = NULL) {
+validate_heatmap_sidecar <- function(x, expected_samples, cfg, expected_rank = NULL,
+                                     expected_sample_order = expected_samples) {
   if (!is.data.frame(x) || !identical(names(x), composition_heatmap_columns) || !nrow(x)) {
     stop("Invalid heatmap composition sidecar schema.", call. = FALSE)
   }
@@ -750,15 +815,17 @@ validate_heatmap_sidecar <- function(x, expected_samples, cfg, expected_rank = N
   }
   include_other <- isTRUE(cfg$composition$heatmap_include_other)
   top_n <- as.integer(cfg$composition$heatmap_top_n_taxa)
-  column_orders <- vapply(expected_samples, function(sample_id) {
-    values <- unique(x$ColumnOrder[x$SampleID == sample_id])
-    if (length(values) != 1L) NA_integer_ else as.integer(values)
-  }, integer(1))
-  if (anyNA(column_orders) || !identical(unname(sort(column_orders)), seq_along(expected_samples))) {
-    stop("Heatmap ColumnOrder is not a contiguous deterministic sample order.", call. = FALSE)
+  if (!setequal(as.character(expected_sample_order), as.character(expected_samples))) {
+    stop("Expected heatmap sample order does not cover the expected sample set.", call. = FALSE)
   }
+  validate_sidecar_sample_order(x, expected_sample_order, order_column = "ColumnOrder")
+  reference_paths <- NULL
   for (sample_id in expected_samples) {
     sample <- x[x$SampleID == sample_id, , drop = FALSE]
+    if (length(unique(sample$ValidDenominator)) != 1L ||
+        length(unique(as.character(sample$Group))) != 1L) {
+      stop("Heatmap composition sample metadata is inconsistent within a sample.", call. = FALSE)
+    }
     if (sum(sample$IsOther) > 1L || any(sample$IsOther != (sample$TaxonPath == OTHER_TAXON_PATH))) {
       stop("Heatmap composition sidecar has duplicate or inconsistent Other rows.", call. = FALSE)
     }
@@ -777,8 +844,16 @@ validate_heatmap_sidecar <- function(x, expected_samples, cfg, expected_rank = N
     if (sum(!sample$IsOther) > top_n) {
       stop("Heatmap composition exceeds the configured named taxon limit.", call. = FALSE)
     }
-    if (!identical(sort(unique(as.integer(sample$RowOrder))), seq_len(nrow(sample)))) {
-      stop("Heatmap row or column order is not contiguous.", call. = FALSE)
+    row_order <- as.numeric(sample$RowOrder)
+    if (anyNA(row_order) || any(!is.finite(row_order)) ||
+        any(row_order != floor(row_order)) ||
+        !identical(sort(unique(row_order)), as.numeric(seq_len(nrow(sample))))) {
+      stop("Heatmap RowOrder is not a contiguous integer order.", call. = FALSE)
+    }
+    ordered_paths <- as.character(sample$TaxonPath[order(row_order)])
+    if (is.null(reference_paths)) reference_paths <- ordered_paths
+    if (!identical(ordered_paths, reference_paths)) {
+      stop("Heatmap TaxonPath-to-RowOrder mapping differs across samples.", call. = FALSE)
     }
   }
   if (identical(transformed, "none")) {
@@ -889,7 +964,7 @@ run_taxa_composition <- function(context) {
   }
 
   # Preserve the historical horizontal single-sample plots and their names.
-  if (length(samples) == 1L) {
+  if (length(samples) == 1L && class_totals[samples[1]] > 0) {
     s_col <- samples[1]
     phylum_rel <- rank_tables[["phylum"]]$rel %>%
       select(Taxon, all_of(s_col)) %>% rename(rel = all_of(s_col)) %>% arrange(desc(rel))
@@ -945,6 +1020,15 @@ run_taxa_composition <- function(context) {
     p_path <- file.path(comp_dir, "04d_species_composition.png")
     save_plot(p_path, p_species, width = 9, height = 6)
     all_outputs <- c(all_outputs, p_path)
+  } else if (length(samples) == 1L) {
+    legacy_skip <- data.frame(
+      SampleID = samples[1],
+      Reason = "Legacy single-sample composition plots are undefined because ClassifiedReads is zero.",
+      stringsAsFactors = FALSE
+    )
+    legacy_skip_path <- file.path(comp_dir, "04_legacy_single_sample_skipped.tsv")
+    write_composition_table(legacy_skip, legacy_skip_path, c("SampleID", "Reason"))
+    all_outputs <- c(all_outputs, legacy_skip_path)
   }
 
   plot_meta <- plot_metadata(samples, context$metadata, valid_samples = valid_samples)
@@ -982,7 +1066,13 @@ run_taxa_composition <- function(context) {
     display_long <- display_long[, c("Rank", setdiff(names(display_long), "Rank")), drop = FALSE]
     display_long_full <- display_long
     display_long <- display_long[, stacked_sidecar_columns, drop = FALSE]
-    validate_stacked_sidecar(display_long, samples, expected_rank = rk)
+    sample_order <- if (length(samples) > 1L) {
+      ordered_cohort_samples(samples, context$metadata)$sample_order
+    } else samples
+    validate_stacked_sidecar(
+      display_long, samples, expected_rank = rk,
+      expected_sample_order = sample_order
+    )
     stacked_path <- file.path(comp_dir, sprintf("04_%s_stacked.tsv", rk))
     write_composition_table(display_long, stacked_path, stacked_sidecar_columns)
     all_outputs <- c(all_outputs, stacked_path)
@@ -990,7 +1080,6 @@ run_taxa_composition <- function(context) {
     tax_paths <- unique(display_long$TaxonPath[order(display_long$StackOrder)])
     tax_labels <- display_long$DisplayTaxon[match(tax_paths, display_long$TaxonPath)]
     colors <- composition_colors(tax_paths, tax_labels)
-    sample_order <- if (length(samples) > 1L) ordered_cohort_samples(samples, context$metadata)$sample_order else samples
     group_order <- if (length(samples) > 1L) ordered_cohort_samples(samples, context$metadata)$group_order else NULL
     plot <- build_stacked_taxa_plot(display_long, colors, sample_order, group_order,
                                     single = length(samples) == 1L, rank = rk)
@@ -1046,7 +1135,8 @@ run_taxa_composition <- function(context) {
       next
     }
     validate_heatmap_sidecar(
-      prepared$sidecar, samples, cfg, expected_rank = rk
+      prepared$sidecar, samples, cfg, expected_rank = rk,
+      expected_sample_order = prepared$sample_order
     )
     heatmap_tsv <- file.path(comp_dir, sprintf("04_heatmap_%s.tsv", rk))
     write_composition_table(prepared$sidecar, heatmap_tsv,

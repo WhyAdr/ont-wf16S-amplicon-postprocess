@@ -18,6 +18,11 @@ All notable changes to this project are documented in this file.
 - Add deterministic display-label resolution, sidecar/release invariant checks,
   exact non-symlink vendor inventories, atomic failure regressions, and a
   mutation-free requested-Krona CI preflight.
+- Reject inconsistent per-sample validity and order metadata, exercise a real
+  zero-classified cohort through publication/release verification, and align
+  builtin Krona document defaults with pinned `ktImportText` 2.8.1 output.
+- Allow positive-total zero-classified samples through supported modules while
+  withholding undefined legacy single-sample composition figures.
 
 ## [0.4.5] - 2026-09-09
 

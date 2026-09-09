@@ -179,6 +179,14 @@ When a cohort group has no valid samples, its group-mean rows remain present wit
 undefined. Other group means are arithmetic means of valid per-sample classified-
 read proportions, not read-depth-pooled proportions.
 
+A positive-total sample with zero classified reads can be processed when the
+requested modules are limited to `qc`, `composition`, and `kreport`. Modules
+whose statistics require a positive classified denominator (`alpha`, `beta`,
+`ordination`, `shared`, and `faprotax`) fail preflight with the affected sample
+and module names instead of receiving undefined input.
+For a single zero-classified sample, the historical `04a`-`04d` composition
+figures are also withheld and `04_legacy_single_sample_skipped.tsv` records why.
+
 ### FAPROTAX Functional Inference (opt-in)
 
 Request the module explicitly with `--modules faprotax`, or include `faprotax`

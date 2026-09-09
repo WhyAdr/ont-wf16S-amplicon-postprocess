@@ -483,11 +483,6 @@ read_abundance_table <- function(path, tax_col = "tax", aggregate_cols = c("tota
     if (tot_reads == 0) {
       stop(sprintf("Sample '%s' has 0 total reads in abundance table.", s), call. = FALSE)
     }
-    uncl_reads <- sum(count_mat[unclass_indices, s])
-    class_reads <- tot_reads - uncl_reads
-    if (class_reads == 0) {
-      stop(sprintf("Sample '%s' has 0 classified reads.", s), call. = FALSE)
-    }
   }
 
   # Parse taxonomy data frame with 8 ranks
@@ -841,6 +836,21 @@ build_context <- function(cfg) {
     ClassifiedReads = colSums(count_matrix[-unclass_idx, , drop = FALSE]),
     stringsAsFactors = FALSE
   )
+  zero_classified <- sample_stats$SampleID[sample_stats$ClassifiedReads == 0]
+  zero_unsupported_modules <- intersect(
+    as.character(cfg$cli$modules %||% character(0)),
+    c("alpha", "beta", "ordination", "shared", "faprotax")
+  )
+  if (length(zero_classified) && length(zero_unsupported_modules)) {
+    stop(sprintf(
+      paste(
+        "Sample(s) with 0 classified reads are supported only by qc, composition, and kreport;",
+        "remove unsupported module(s) %s or exclude sample(s) %s."
+      ),
+      paste(zero_unsupported_modules, collapse = ", "),
+      paste(zero_classified, collapse = ", ")
+    ), call. = FALSE)
+  }
 
   # 3. Mode resolution
   configured_mode <- cfg$mode

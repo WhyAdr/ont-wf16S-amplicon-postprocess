@@ -96,6 +96,18 @@ assert_display_labels <- function(data) {
   }
 }
 
+assert_exact_sample_order <- function(data, expected_order, column, label) {
+  observed <- vapply(expected_order, function(sample_id) {
+    values <- unique(as.numeric(data[[column]][data$SampleID == sample_id]))
+    if (length(values) != 1L) NA_real_ else values
+  }, numeric(1))
+  expected <- as.numeric(seq_along(expected_order))
+  if (anyNA(observed) || any(!is.finite(observed)) ||
+      any(observed != floor(observed)) || !identical(unname(observed), expected)) {
+    stop(sprintf("%s does not match the expected deterministic sample order.", label))
+  }
+}
+
 stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(manifest$mode %in% c("single", "cohort"))
 stopifnot(identical(manifest$schema_version, 2L))
@@ -220,28 +232,36 @@ reconciliation <- read.delim(
   file.path(root, "01_QC/classification_reconciliation.tsv"),
   check.names = FALSE
 )
+stopifnot(!anyDuplicated(reconciliation$SampleID))
+stopifnot(setequal(as.character(reconciliation$SampleID), release_samples))
 stopifnot("ReconciliationPass" %in% names(reconciliation))
 stopifnot(all(reconciliation$ReconciliationPass == TRUE))
 
 # 2. Accounting & Investigation verification
 accounting <- read.delim(file.path(root, "01_QC/00_read_accounting.tsv"), check.names = FALSE)
-stopifnot(nrow(accounting) == 1L)
+stopifnot(nrow(accounting) == length(release_samples), !anyDuplicated(accounting$SampleID))
+stopifnot(setequal(as.character(accounting$SampleID), release_samples))
 
 investigation <- read.delim(file.path(root, "01_QC/00_read_investigation.tsv"), check.names = FALSE)
-stopifnot(nrow(investigation) == 1L)
-
-if (isTRUE(investigation$BamstatsAvailable[1]) && isTRUE(investigation$AssignmentAvailable[1])) {
-  stopifnot(investigation$BamstatsC0Matched == accounting$C_TaxID0)
-  stopifnot(investigation$IdentityOnlyFailed + investigation$RefCoverageOnlyFailed +
-            investigation$BothFailed == investigation$BamstatsC0Matched)
-  stopifnot(investigation$IdentityOnlyFailed > 0L)
-  stopifnot(investigation$RefCoverageOnlyFailed > 0L)
-  stopifnot(investigation$BothFailed > 0L)
-} else {
-  stopifnot(is.na(investigation$BamstatsC0Matched))
-  stopifnot(is.na(investigation$IdentityOnlyFailed))
-  stopifnot(is.na(investigation$RefCoverageOnlyFailed))
-  stopifnot(is.na(investigation$BothFailed))
+stopifnot(nrow(investigation) == length(release_samples),
+          !anyDuplicated(investigation$SampleID))
+stopifnot(setequal(as.character(investigation$SampleID), release_samples))
+for (sample_id in release_samples) {
+  inv <- investigation[investigation$SampleID == sample_id, , drop = FALSE]
+  acc <- accounting[accounting$SampleID == sample_id, , drop = FALSE]
+  if (isTRUE(inv$BamstatsAvailable[1]) && isTRUE(inv$AssignmentAvailable[1])) {
+    stopifnot(inv$BamstatsC0Matched == acc$C_TaxID0)
+    stopifnot(inv$IdentityOnlyFailed + inv$RefCoverageOnlyFailed +
+                inv$BothFailed == inv$BamstatsC0Matched)
+    stopifnot(inv$IdentityOnlyFailed > 0L)
+    stopifnot(inv$RefCoverageOnlyFailed > 0L)
+    stopifnot(inv$BothFailed > 0L)
+  } else {
+    stopifnot(is.na(inv$BamstatsC0Matched))
+    stopifnot(is.na(inv$IdentityOnlyFailed))
+    stopifnot(is.na(inv$RefCoverageOnlyFailed))
+    stopifnot(is.na(inv$BothFailed))
+  }
 }
 
 # 3. Composition table verification
@@ -250,6 +270,12 @@ composition <- read.delim(
 )
 stopifnot(!anyNA(composition))
 stopifnot(composition$ClassifiedReads + composition$UnclassifiedReads == composition$TotalReads)
+stopifnot(!anyDuplicated(composition$SampleID),
+          setequal(as.character(composition$SampleID), release_samples))
+composition_accounting <- accounting[match(composition$SampleID, accounting$SampleID), , drop = FALSE]
+stopifnot(composition$TotalReads == composition_accounting$AbundanceTotal)
+stopifnot(composition$ClassifiedReads == composition_accounting$AbundanceClassified)
+stopifnot(composition$UnclassifiedReads == composition_accounting$AbundanceUnclassified)
 
 # 3a. Multi-rank composition artifacts and sidecar schemas
 resolved_config <- yaml::read_yaml(file.path(root, "resolved_config.yml"))
@@ -275,6 +301,9 @@ assert_composition_sidecar <- function(path, expected_columns, rank, kind) {
   table
 }
 assert_sidecar_display_labels <- function(table) {
+  label_counts <- vapply(split(as.character(table$DisplayTaxon), table$TaxonPath),
+                         function(values) length(unique(values)), integer(1))
+  if (any(label_counts != 1L)) stop("Composition display labels vary within a TaxonPath.")
   by_path <- table[!duplicated(table$TaxonPath), c("TaxonPath", "DisplayTaxon"), drop = FALSE]
   if (anyDuplicated(by_path$DisplayTaxon)) stop("Composition display labels are not unique by TaxonPath.")
   other <- by_path$TaxonPath == "__OTHER__"
@@ -298,13 +327,30 @@ assert_composition_pair <- function(rank) {
   assert_sample_taxon_sets(table, release_samples, "stacked composition")
   stopifnot(all(is.finite(table$RelativeAbundance)), all(table$RelativeAbundance >= 0),
             all(table$RelativeAbundance <= 1), all(is.finite(table$MeanRelativeAbundance)))
+  group_by_sample <- vapply(release_samples, function(sample_id) {
+    values <- unique(as.character(table$Group[table$SampleID == sample_id]))
+    if (length(values) != 1L) NA_character_ else values
+  }, character(1))
+  stopifnot(!anyNA(group_by_sample), all(nzchar(group_by_sample)))
+  expected_groups <- unique(unname(group_by_sample))
+  expected_sample_order <- unlist(lapply(expected_groups, function(group_name) {
+    release_samples[group_by_sample == group_name]
+  }), use.names = FALSE)
+  assert_exact_sample_order(table, expected_sample_order, "SampleOrder", "Stacked SampleOrder")
+  expected_validity <- accounting$AbundanceClassified[match(release_samples, accounting$SampleID)] > 0
+  names(expected_validity) <- release_samples
+  reference_paths <- NULL
   for (sample_id in release_samples) {
     sample <- table[table$SampleID == sample_id, , drop = FALSE]
     valid <- sample$ValidDenominator
     stopifnot(length(unique(valid)) == 1L)
+    stopifnot(identical(isTRUE(valid[1]), isTRUE(expected_validity[[sample_id]])))
     stopifnot(sum(sample$IsOther) <= 1L)
     stopifnot(all(sample$IsOther == (sample$TaxonPath == "__OTHER__")))
     stopifnot(identical(sort(unique(as.integer(sample$StackOrder))), seq_len(nrow(sample))))
+    ordered_paths <- as.character(sample$TaxonPath[order(sample$StackOrder)])
+    if (is.null(reference_paths)) reference_paths <- ordered_paths
+    stopifnot(identical(ordered_paths, reference_paths))
     if (isTRUE(valid[1])) {
       stopifnot(abs(sum(sample$RelativeAbundance) - 1) < 1e-8)
     } else {
@@ -325,8 +371,14 @@ assert_composition_pair <- function(rank) {
     stopifnot(identical(names(groups), group_columns), nrow(groups) > 0L)
     assert_unique_key(groups, c("Group", "TaxonPath"), "group composition")
     assert_sidecar_display_labels(groups)
-    for (group_name in unique(as.character(groups$Group))) {
+    stopifnot(setequal(as.character(unique(groups$Group)), expected_groups))
+    for (group_index in seq_along(expected_groups)) {
+      group_name <- expected_groups[group_index]
       group <- groups[groups$Group == group_name, , drop = FALSE]
+      stopifnot(length(unique(group$GroupOrder)) == 1L,
+                unique(as.numeric(group$GroupOrder)) == group_index)
+      stopifnot(identical(as.character(group$TaxonPath[order(group$StackOrder)]),
+                          reference_paths))
       group_samples <- unique(table$SampleID[table$Group == group_name])
       valid_samples <- group_samples[vapply(group_samples, function(id) {
         isTRUE(table$ValidDenominator[match(id, table$SampleID)])
@@ -374,15 +426,24 @@ assert_heatmap_pair <- function(rank) {
             all(table$RelativeAbundance <= 1), all(is.finite(table$TransformedValue)))
   include_other <- isTRUE(composition_cfg$heatmap_include_other)
   top_n <- as.integer(composition_cfg$heatmap_top_n_taxa)
-  column_orders <- vapply(release_samples, function(sample_id) {
-    values <- unique(table$ColumnOrder[table$SampleID == sample_id])
-    if (length(values) != 1L) NA_integer_ else as.integer(values)
-  }, integer(1))
-  stopifnot(!anyNA(column_orders), identical(unname(sort(column_orders)), seq_along(release_samples)))
+  group_by_sample <- vapply(release_samples, function(sample_id) {
+    values <- unique(as.character(table$Group[table$SampleID == sample_id]))
+    if (length(values) != 1L) NA_character_ else values
+  }, character(1))
+  stopifnot(!anyNA(group_by_sample), all(nzchar(group_by_sample)))
+  expected_groups <- unique(unname(group_by_sample))
+  expected_sample_order <- unlist(lapply(expected_groups, function(group_name) {
+    release_samples[group_by_sample == group_name]
+  }), use.names = FALSE)
+  assert_exact_sample_order(table, expected_sample_order, "ColumnOrder", "Heatmap ColumnOrder")
+  expected_validity <- accounting$AbundanceClassified[match(release_samples, accounting$SampleID)] > 0
+  names(expected_validity) <- release_samples
+  reference_paths <- NULL
   for (sample_id in release_samples) {
     sample <- table[table$SampleID == sample_id, , drop = FALSE]
     valid <- sample$ValidDenominator
     stopifnot(length(unique(valid)) == 1L)
+    stopifnot(identical(isTRUE(valid[1]), isTRUE(expected_validity[[sample_id]])))
     stopifnot(sum(sample$IsOther) <= 1L)
     stopifnot(all(sample$IsOther == (sample$TaxonPath == "__OTHER__")))
     stopifnot(sum(!sample$IsOther) <= top_n)
@@ -394,6 +455,9 @@ assert_heatmap_pair <- function(rank) {
       stopifnot(!any(sample$IsOther & sample$RelativeAbundance > 0))
     }
     stopifnot(identical(sort(unique(as.integer(sample$RowOrder))), seq_len(nrow(sample))))
+    ordered_paths <- as.character(sample$TaxonPath[order(sample$RowOrder)])
+    if (is.null(reference_paths)) reference_paths <- ordered_paths
+    stopifnot(identical(ordered_paths, reference_paths))
   }
   if (identical(as.character(composition_cfg$heatmap_transform), "none")) {
     stopifnot(all(is.na(table$PseudoCount)))
@@ -555,12 +619,12 @@ if (isTRUE(manifest$cli$krona)) {
     stopifnot(grepl("^[0-9a-f]{64}$", as.character(record$tsv_sha256)))
     stopifnot(identical(sha256_file(tsv_path), as.character(record$tsv_sha256)))
     totals <- read_krona_totals(tsv_path)
-    stopifnot(totals$total == accounting_row$TotalReads)
-    stopifnot(totals$classified == accounting_row$ClassifiedReads)
-    stopifnot(totals$unclassified == accounting_row$UnclassifiedReads)
-    stopifnot(as.numeric(record$total_reads) == accounting_row$TotalReads)
-    stopifnot(as.numeric(record$classified_reads) == accounting_row$ClassifiedReads)
-    stopifnot(as.numeric(record$unclassified_reads) == accounting_row$UnclassifiedReads)
+    stopifnot(totals$total == accounting_row$AbundanceTotal)
+    stopifnot(totals$classified == accounting_row$AbundanceClassified)
+    stopifnot(totals$unclassified == accounting_row$AbundanceUnclassified)
+    stopifnot(as.numeric(record$total_reads) == accounting_row$AbundanceTotal)
+    stopifnot(as.numeric(record$classified_reads) == accounting_row$AbundanceClassified)
+    stopifnot(as.numeric(record$unclassified_reads) == accounting_row$AbundanceUnclassified)
     stopifnot(as.numeric(record$emitted_magnitude_sum) == totals$total)
 
     if (identical(html_status, "rendered")) {
@@ -728,6 +792,30 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
   stopifnot(composition$TotalReads == 5L)
   stopifnot(composition$ClassifiedReads == 1L)
   stopifnot(composition$UnclassifiedReads == 4L)
+} else if (identical(manifest$project_name, "synthetic_zero_classified_cohort")) {
+  stopifnot(identical(manifest$mode, "cohort"))
+  stopifnot(identical(manifest$upstream_contract$wf_agent, "epi2melabs/wf-16s"))
+  stopifnot(identical(as.integer(manifest$taxonomy$unresolved_count), 0L))
+  stopifnot(identical(as.integer(manifest$taxonomy$conflicts_count), 0L))
+  expected_ids <- c("S_valid_A", "S_valid_B", "S_zero")
+  stopifnot(identical(release_samples, expected_ids))
+  expected_total <- c(S_valid_A = 4, S_valid_B = 4, S_zero = 4)
+  expected_classified <- c(S_valid_A = 2, S_valid_B = 3, S_zero = 0)
+  expected_unclassified <- c(S_valid_A = 2, S_valid_B = 1, S_zero = 4)
+  accounting_index <- match(expected_ids, accounting$SampleID)
+  composition_index <- match(expected_ids, composition$SampleID)
+  stopifnot(identical(as.numeric(accounting$AbundanceTotal[accounting_index]),
+                      as.numeric(expected_total)))
+  stopifnot(identical(as.numeric(accounting$AbundanceClassified[accounting_index]),
+                      as.numeric(expected_classified)))
+  stopifnot(identical(as.numeric(accounting$AbundanceUnclassified[accounting_index]),
+                      as.numeric(expected_unclassified)))
+  stopifnot(identical(as.numeric(composition$TotalReads[composition_index]),
+                      as.numeric(expected_total)))
+  stopifnot(identical(as.numeric(composition$ClassifiedReads[composition_index]),
+                      as.numeric(expected_classified)))
+  stopifnot(identical(as.numeric(composition$UnclassifiedReads[composition_index]),
+                      as.numeric(expected_unclassified)))
 } else if (identical(manifest$mode, "cohort")) {
   # Cohort release fixtures are intentionally data-agnostic here. The common
   # reconciliation, composition, and module-contract checks above remain

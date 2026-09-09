@@ -1,4 +1,15 @@
 {
+  "document": {
+    "collapse": "true",
+    "key": "true",
+    "magnitudeAttribute": "magnitude",
+    "attributes": [
+      ["Total", "magnitude"],
+      ["Unassigned", "magnitudeUnassigned"]
+    ],
+    "datasetLabel": "direct_clade",
+    "rootName": "dataset"
+  },
   "dataset": {
     "magnitude": 9,
     "magnitudeUnassigned": 0
@@ -19,6 +30,7 @@
     "upstream": "marbl/Krona",
     "tag": "v2.8.1",
     "commit": "106dedb36b6c80445c6bacbd53d745a2388de273",
-    "normalization": "semantic direct/clade model; no KronaTools invocation in CI"
+    "command": "KronaTools/scripts/ImportText.pl -o direct_clade.upstream.html -n dataset direct_clade.tsv",
+    "normalization": "Document defaults and semantic direct/clade model generated once with pinned KronaTools; absent leaf magnitudeUnassigned is normalized to leaf magnitude; no KronaTools invocation in CI"
   }
 }

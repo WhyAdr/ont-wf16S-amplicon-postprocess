@@ -1,0 +1,38 @@
+schema_version: 1
+project_name: "synthetic_zero_classified_cohort"
+mode: "cohort"
+seed: 42
+
+input:
+  abundance_table: "abundance_table_species.tsv"
+  metadata: "metadata.tsv"
+  params_json: "params.json"
+  wf16s_output_root: "."
+  tax_column: "tax"
+  aggregate_columns: ["total"]
+  include_samples: null
+  assignments:
+    S_valid_A: "reads_assignments/S_valid_A.assignments.tsv"
+    S_valid_B: "reads_assignments/S_valid_B.assignments.tsv"
+    S_zero: "reads_assignments/S_zero.assignments.tsv"
+
+output:
+  base_dir: "output_synthetic_zero_classified_cohort"
+
+composition:
+  top_n_taxa: 5
+  stacked_bar_ranks: ["genus"]
+  stacked_bar_max_taxa: 5
+  stacked_bar_min_taxa: 1
+  stacked_bar_min_mean_relative: 0
+  heatmap_ranks: ["genus"]
+  heatmap_top_n_taxa: 5
+  heatmap_include_other: true
+  heatmap_transform: "log10_relative"
+
+taxonomy:
+  cache: "taxonomy_cache.json"
+  network_mode: "cache_only"
+  unresolved_policy: "error"
+  email_env: "NCBI_EMAIL"
+  api_key_env: "NCBI_API_KEY"

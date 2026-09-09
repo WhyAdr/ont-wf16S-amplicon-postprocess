@@ -1,0 +1,26 @@
+{
+  "classifier": "minimap2",
+  "database_set": "ncbi_16s_18s_28s_ITS",
+  "taxonomic_rank": "S",
+  "min_percent_identity": 90.0,
+  "min_ref_coverage": 90.0,
+  "min_len": 1200,
+  "max_len": 1800,
+  "min_read_qual": 10.0,
+  "abundance_threshold": 1.0,
+  "database_sets": {
+    "ncbi_16s_18s_28s_ITS": {
+      "reference": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS.fna",
+      "database": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ncbi_16s_18s_28s_ITS_kraken2.tar.gz",
+      "ref2taxid": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/ref2taxid.ncbi_16s_18s_28s_ITS.tsv",
+      "taxonomy": "s3://ont-open-data/workflow-databases/wf-metagenomics-dbs/ncbi_16s_18s_28s_ITS/new_taxdump_2025-01-01.zip"
+    }
+  },
+  "output_unclassified": true,
+  "include_read_assignments": true,
+  "wf": {
+    "agent": "epi2melabs/wf-16s",
+    "version": "v1.0.0",
+    "revision": "zero-classified-test"
+  }
+}

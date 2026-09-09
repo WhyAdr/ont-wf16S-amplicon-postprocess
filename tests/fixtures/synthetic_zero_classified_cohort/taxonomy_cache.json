@@ -1,0 +1,18 @@
+{
+  "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown": 0,
+  "Bacteria": 2,
+  "Bacteria;Bacillati": 1783272,
+  "Bacteria;Bacillati;Bacillota": 1239,
+  "Bacteria;Bacillati;Bacillota;Bacilli": 91061,
+  "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales": 1385,
+  "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae": 186817,
+  "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus": 1386,
+  "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus subtilis": 1423,
+  "Bacteria;Pseudomonadati": 3379134,
+  "Bacteria;Pseudomonadati;Pseudomonadota": 1224,
+  "Bacteria;Pseudomonadati;Pseudomonadota;Gammaproteobacteria": 1236,
+  "Bacteria;Pseudomonadati;Pseudomonadota;Gammaproteobacteria;Pseudomonadales": 72274,
+  "Bacteria;Pseudomonadati;Pseudomonadota;Gammaproteobacteria;Pseudomonadales;Pseudomonadaceae": 135621,
+  "Bacteria;Pseudomonadati;Pseudomonadota;Gammaproteobacteria;Pseudomonadales;Pseudomonadaceae;Pseudomonas": 286,
+  "Bacteria;Pseudomonadati;Pseudomonadota;Gammaproteobacteria;Pseudomonadales;Pseudomonadaceae;Pseudomonas;Pseudomonas aeruginosa": 287
+}

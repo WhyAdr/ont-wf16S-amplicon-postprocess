@@ -87,6 +87,16 @@ jobs:
           Rscript analysis/00_run_pipeline.R --config tests/fixtures/synthetic_minimap2/config.yml --output-dir "ci bamstats output"
           Rscript tests/verify_release_run.R "ci bamstats output"
 
+      - name: Run zero-classified cohort release integration
+        shell: bash
+        run: |
+          Rscript analysis/00_run_pipeline.R \
+            --config tests/fixtures/synthetic_zero_classified_cohort/config.yml \
+            --modules qc,composition,kreport \
+            --output-dir "ci zero classified cohort output" \
+            --krona
+          Rscript tests/verify_release_run.R "ci zero classified cohort output"
+
       - name: Check committed whitespace
         if: runner.os == 'Linux'
         shell: bash

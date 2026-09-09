@@ -293,6 +293,38 @@ test_that("Abundance table errors if rank count is not 8", {
   expect_error(read_abundance_table(file_path), "expected 8 ranks, found 6")
 })
 
+test_that("abundance parsing preserves a positive-total zero-classified sample", {
+  root <- tempfile("zero_classified_abundance_")
+  dir.create(root)
+  path <- file.path(root, "abundance.tsv")
+  table <- data.frame(
+    tax = c(
+      "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown",
+      "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus subtilis"
+    ),
+    Valid = c(1, 2), Zero = c(3, 0), total = c(4, 2),
+    check.names = FALSE, stringsAsFactors = FALSE
+  )
+  write.table(table, path, sep = "\t", row.names = FALSE, quote = FALSE)
+  parsed <- read_abundance_table(path)
+  expect_equal(sum(parsed$count_matrix[, "Zero"]), 3)
+  expect_equal(sum(parsed$count_matrix[-parsed$unclass_index, "Zero"]), 0)
+})
+
+test_that("zero-classified samples fail before denominator-dependent modules", {
+  config_path <- file.path(
+    "..", "..", "tests", "fixtures", "synthetic_zero_classified_cohort", "config.yml"
+  )
+  cfg <- load_config(
+    config_path,
+    list(modules = "alpha", output_dir = tempfile("zero_classified_unsupported_"))
+  )
+  expect_error(
+    build_context(cfg),
+    "supported only by qc, composition, and kreport.*alpha.*S_zero"
+  )
+})
+
 test_that("Abundance table rejects empty or padded rank cells", {
   root <- tempfile("bad_rank_cells_")
   dir.create(root)
