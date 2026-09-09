@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-09
+
 ### Added
 
 - Deterministic classified-read-relative phylum, family, and genus stacked bars,

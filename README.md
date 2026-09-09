@@ -130,7 +130,7 @@ implied.
 
 ### Composition figures and sidecars
 
-Version 0.4.5 adds deterministic classified-read-relative composition figures
+This release adds deterministic classified-read-relative composition figures
 at phylum, family, and genus ranks. The new vertical stacked bars are written
 as matching PNG/TSV pairs:
 
