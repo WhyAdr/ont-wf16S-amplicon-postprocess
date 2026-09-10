@@ -52,7 +52,11 @@ def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
             else:
                 import fcntl
                 try:
-                    fcntl.flock(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # R's filelock package uses POSIX record locks on Unix.
+                    # lockf() uses that same fcntl lock family; flock() does
+                    # not contend with it on Linux and would allow concurrent
+                    # R/Python cache writers.
+                    fcntl.lockf(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fd = candidate_fd
                     acquired = True
                     break
@@ -94,7 +98,7 @@ def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
                     msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    fcntl.lockf(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
             try:
