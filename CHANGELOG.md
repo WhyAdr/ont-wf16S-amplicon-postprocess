@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-10
+
+### Added
+
+- Expand alpha diversity through a single metric registry with ACE, Heip,
+  Smith-Wilson Evar, McIntosh, explicitly ordered Rényi/Hill metrics, canonical
+  long resample output, definitions/status sidecars, and deterministic `02b`
+  through `02d` figure contracts.
+- Add an optional rooted-tree and explicit `TaxonPath`-to-tip contract for Faith
+  PD, PSR, and PSE, with input hashes, pruning provenance, strict mapping, and an
+  explicit skipped record instead of a fabricated or stale `02e` figure.
+- Add a tree-enabled release fixture and independent rooted-PD/PSR/PSE verifier;
+  extra tips are excluded without collapsing the original root stem.
+- Add bidirectional R/Python taxonomy-lock contention tests and shared
+  transaction identities across taxonomy journals, publication journals,
+  provenance, and manifests.
+
+### Changed
+
+- Relocate local `wf-16s` producer results beneath `wf16s-inputs/`, historical
+  scripts and analysis artifacts beneath `archived/`, and implementation plans
+  and review notes beneath `patch/`; keep only the compact Ambar Ayunda input
+  contract tracked for regression coverage.
+
 ### Fixed
 
 - Keep zero-classified samples undefined in composition heatmaps: sidecars retain
@@ -23,6 +47,18 @@ All notable changes to this project are documented in this file.
   builtin Krona document defaults with pinned `ktImportText` 2.8.1 output.
 - Allow positive-total zero-classified samples through supported modules while
   withholding undefined legacy single-sample composition figures.
+- Pin the Krona vendor text assets to LF bytes on every checkout and align the
+  recorded SHA-256 inventory with those committed bytes.
+- Validate composition display labels against the complete authoritative rank
+  map even when collision partners are filtered out.
+- Compare builtin Krona HTML against its TSV by exact dataset/sample identity,
+  taxonomy paths, direct counts, clade counts, sibling uniqueness, and
+  unclassified allocation during release verification.
+- Exercise the Krona correspondence verifier with fail-closed label, count,
+  path, sibling, dataset, sample, and unclassified-allocation mutations.
+- Retain taxonomy recovery journals when rollback or backup cleanup is
+  incomplete, and require matching run transaction identity before forward
+  recovery.
 
 ## [0.4.5] - 2026-09-09
 

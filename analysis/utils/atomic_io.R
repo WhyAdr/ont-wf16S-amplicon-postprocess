@@ -469,14 +469,31 @@ get_taxonomy_journal_path <- function(cache_path) {
          ".wf16s_transaction.json")
 }
 
+new_transaction_id <- function() {
+  entropy <- paste(
+    utc_timestamp_now(), Sys.getpid(), tempfile("wf16s_txn_"),
+    sep = "|"
+  )
+  paste0("tx-", digest::digest(entropy, algo = "sha256", serialize = FALSE))
+}
+
+valid_transaction_id <- function(value) {
+  is.character(value) && length(value) == 1L && !is.na(value) &&
+    grepl("^tx-[0-9a-f]{64}$", value)
+}
+
 write_taxonomy_journal <- function(cache_path, backup, output_root, original_sha256,
-                                   candidate_sha256, phase) {
+                                   candidate_sha256, phase, transaction_id = NULL) {
+  if (!is.null(transaction_id) && !valid_transaction_id(transaction_id)) {
+    stop("Invalid taxonomy transaction_id.", call. = FALSE)
+  }
   payload <- list(
     cache_path = normalizePath(cache_path, winslash = "/", mustWork = FALSE),
     backup = normalizePath(backup, winslash = "/", mustWork = FALSE),
     output_root = normalizePath(output_root, winslash = "/", mustWork = FALSE),
     original_sha256 = original_sha256,
     candidate_sha256 = candidate_sha256,
+    transaction_id = transaction_id,
     phase = phase,
     timestamp = utc_timestamp_now(),
     pid = Sys.getpid()
@@ -496,8 +513,10 @@ remove_file_checked <- function(path, context) {
 }
 
 cleanup_taxonomy_journal <- function(cache_path, backup = NULL) {
-  remove_file_checked(get_taxonomy_journal_path(cache_path), "taxonomy transaction journal")
+  # Delete the expendable backup first. If that cleanup fails, retain the
+  # journal so operators still have an authoritative recovery record.
   if (!is.null(backup)) remove_file_checked(backup, "taxonomy-cache backup")
+  remove_file_checked(get_taxonomy_journal_path(cache_path), "taxonomy transaction journal")
   invisible(TRUE)
 }
 
@@ -509,7 +528,7 @@ recover_taxonomy_journal <- function(cache_path) {
   required <- c("cache_path", "backup", "output_root", "original_sha256",
                 "candidate_sha256", "phase")
   if (is.null(journal) || length(setdiff(required, names(journal))) ||
-      !journal$phase %in% c("prepared", "candidate_committed")) {
+      !journal$phase %in% c("prepared", "candidate_committed", "output_published")) {
     stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: corrupt taxonomy journal at '%s'.",
                  journal_path), call. = FALSE)
   }
@@ -531,6 +550,17 @@ recover_taxonomy_journal <- function(cache_path) {
   }
   current_sha256 <- compute_file_hash(cache_path)
   final_valid <- manifest_is_valid_run(journal$output_root)
+  final_manifest <- if (final_valid) tryCatch(jsonlite::fromJSON(
+    file.path(journal$output_root, "run_manifest.json"), simplifyVector = FALSE
+  ), error = function(e) NULL) else NULL
+  transaction_matches <- is.null(journal$transaction_id) ||
+    (!is.null(final_manifest) && identical(final_manifest$transaction_id,
+                                           journal$transaction_id))
+  if (final_valid && !transaction_matches) {
+    stop(sprintf(
+      "E_TAXONOMY_RECOVERY_REQUIRED: completed output transaction identity does not match journal '%s'.",
+      journal_path), call. = FALSE)
+  }
   candidate_file <- file.path(journal$output_root, "07_Kreport",
                               "resolved_taxonomy_cache.json")
   final_has_candidate <- final_valid && file.exists(candidate_file) &&
@@ -581,12 +611,17 @@ get_output_journal_path <- function(final_root) {
   file.path(parent, sprintf(".%s.wf16s_journal.json", root_hash))
 }
 
-write_publication_journal <- function(final_root, stage = NULL, backup = NULL, phase = "prepared") {
+write_publication_journal <- function(final_root, stage = NULL, backup = NULL,
+                                      phase = "prepared", transaction_id = NULL) {
+  if (!is.null(transaction_id) && !valid_transaction_id(transaction_id)) {
+    stop("Invalid publication transaction_id.", call. = FALSE)
+  }
   journal_path <- get_output_journal_path(final_root)
   payload <- list(
     final_root = canonicalize_root_path(final_root),
     stage = if (!is.null(stage)) normalizePath(stage, winslash = "/", mustWork = FALSE) else NULL,
     backup = if (!is.null(backup)) normalizePath(backup, winslash = "/", mustWork = FALSE) else NULL,
+    transaction_id = transaction_id,
     phase = phase,
     timestamp = utc_timestamp_now(),
     pid = Sys.getpid()
@@ -658,6 +693,15 @@ recover_publication_journal <- function(final_root) {
   backup <- journal$backup
   has_final <- dir.exists(final_root)
   final_valid <- has_final && manifest_is_valid_run(final_root)
+  if (final_valid && !is.null(journal$transaction_id)) {
+    final_manifest <- tryCatch(jsonlite::fromJSON(
+      file.path(final_root, "run_manifest.json"), simplifyVector = FALSE
+    ), error = function(e) NULL)
+    if (is.null(final_manifest) ||
+        !identical(final_manifest$transaction_id, journal$transaction_id)) {
+      final_valid <- FALSE
+    }
+  }
   has_backup <- !is.null(backup) && dir.exists(backup)
   backup_valid <- has_backup && manifest_is_valid_run(backup)
 
@@ -682,13 +726,13 @@ recover_publication_journal <- function(final_root) {
   }
 }
 
-publish_staged_run <- function(stage, final_root) {
+publish_staged_run <- function(stage, final_root, transaction_id = NULL) {
   parent <- dirname(final_root)
   backup <- tempfile(pattern = paste0(".", basename(final_root), ".previous-"), tmpdir = parent)
   had_prior <- dir.exists(final_root)
 
   write_publication_journal(final_root, stage = stage, backup = if (had_prior) backup else NULL,
-                            phase = "prepared")
+                            phase = "prepared", transaction_id = transaction_id)
 
   committed <- FALSE
   on.exit({
@@ -709,7 +753,8 @@ publish_staged_run <- function(stage, final_root) {
     if (!file.rename(final_root, backup)) {
       stop("Could not preserve the prior completed run.", call. = FALSE)
     }
-    write_publication_journal(final_root, stage = stage, backup = backup, phase = "prior_moved")
+    write_publication_journal(final_root, stage = stage, backup = backup, phase = "prior_moved",
+                              transaction_id = transaction_id)
   }
 
   if (!file.rename(stage, final_root)) {
@@ -717,7 +762,7 @@ publish_staged_run <- function(stage, final_root) {
   }
   committed <- TRUE
   write_publication_journal(final_root, stage = stage, backup = if (had_prior) backup else NULL,
-                            phase = "stage_published")
+                            phase = "stage_published", transaction_id = transaction_id)
 
   if (had_prior && dir.exists(backup)) {
     remove_tree_checked(backup, "prior-run backup")

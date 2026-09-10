@@ -59,6 +59,7 @@ jobs:
         run: |
           Rscript tests/testthat.R
           python -m unittest -v tests/test_krona_builder.py
+          python -m unittest -v tests/test_krona_correspondence.py
           python -m unittest -v tests/test_ncbi_taxonomy.py tests/test_check_committed_whitespace.py
 
       - name: Validate without filesystem mutation
@@ -96,6 +97,16 @@ jobs:
             --output-dir "ci zero classified cohort output" \
             --krona
           Rscript tests/verify_release_run.R "ci zero classified cohort output"
+
+      - name: Run phylogenetic alpha release integration
+        shell: bash
+        run: |
+          Rscript analysis/00_run_pipeline.R \
+            --config tests/fixtures/synthetic_phylogenetic/config.yml \
+            --modules qc,alpha,composition,kreport \
+            --output-dir "ci phylogenetic output" \
+            --krona
+          Rscript tests/verify_release_run.R "ci phylogenetic output"
 
       - name: Check committed whitespace
         if: runner.os == 'Linux'

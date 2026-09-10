@@ -585,10 +585,16 @@ composition_heatmap_columns <- c(
   "IsOther", "RowOrder", "ColumnOrder", "ValidDenominator"
 )
 
-validate_composition_display_labels <- function(data) {
+validate_composition_display_labels <- function(data, authoritative_map = NULL) {
   paths <- unique(as.character(data$TaxonPath[data$TaxonPath != OTHER_TAXON_PATH]))
   if (length(paths)) {
-    map <- make_taxon_display_map(data.frame(TaxonPath = paths, stringsAsFactors = FALSE))
+    map <- authoritative_map %||%
+      make_taxon_display_map(data.frame(TaxonPath = paths, stringsAsFactors = FALSE))
+    if (!is.data.frame(map) || !identical(names(map), c("TaxonPath", "DisplayTaxon")) ||
+        anyDuplicated(map$TaxonPath) || anyDuplicated(map$DisplayTaxon) ||
+        length(setdiff(paths, map$TaxonPath))) {
+      stop("Authoritative composition display map is invalid or incomplete.", call. = FALSE)
+    }
     expected <- map$DisplayTaxon[match(as.character(data$TaxonPath), map$TaxonPath)]
   } else {
     expected <- rep(NA_character_, nrow(data))
@@ -636,7 +642,8 @@ validate_sidecar_taxon_sets <- function(data, expected_samples, label) {
 }
 
 validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL,
-                                     expected_sample_order = expected_samples) {
+                                     expected_sample_order = expected_samples,
+                                     authoritative_map = NULL) {
   if (!is.data.frame(x) || !identical(names(x), composition_stacked_columns) || !nrow(x)) {
     stop("Invalid stacked composition sidecar schema.", call. = FALSE)
   }
@@ -653,7 +660,7 @@ validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL,
       anyNA(x$ValidDenominator) || anyNA(x$IsOther)) {
     stop("Stacked composition sidecar contains invalid abundance or flag values.", call. = FALSE)
   }
-  validate_composition_display_labels(x)
+  validate_composition_display_labels(x, authoritative_map)
   if (!setequal(as.character(expected_sample_order), as.character(expected_samples))) {
     stop("Expected stacked sample order does not cover the expected sample set.", call. = FALSE)
   }
@@ -699,7 +706,8 @@ validate_stacked_sidecar <- function(x, expected_samples, expected_rank = NULL,
   invisible(TRUE)
 }
 
-validate_group_sidecar <- function(group, sample, expected_rank = NULL) {
+validate_group_sidecar <- function(group, sample, expected_rank = NULL,
+                                   authoritative_map = NULL) {
   if (!is.data.frame(group) || !identical(names(group), composition_group_columns) || !nrow(group) ||
       !is.data.frame(sample)) {
     stop("Invalid group composition sidecar schema.", call. = FALSE)
@@ -710,7 +718,7 @@ validate_group_sidecar <- function(group, sample, expected_rank = NULL) {
   if (anyDuplicated(paste(group$Group, group$TaxonPath, sep = "\r"))) {
     stop("Group composition sidecar has duplicate group/taxon keys.", call. = FALSE)
   }
-  validate_composition_display_labels(group)
+  validate_composition_display_labels(group, authoritative_map)
   sample_info <- unique(sample[, c("SampleID", "Group", "GroupOrder", "ValidDenominator"), drop = FALSE])
   if (anyDuplicated(sample_info$SampleID) || anyNA(sample_info$ValidDenominator)) {
     stop("Sample composition data cannot establish group denominator status.", call. = FALSE)
@@ -788,7 +796,8 @@ validate_group_sidecar <- function(group, sample, expected_rank = NULL) {
 }
 
 validate_heatmap_sidecar <- function(x, expected_samples, cfg, expected_rank = NULL,
-                                     expected_sample_order = expected_samples) {
+                                     expected_sample_order = expected_samples,
+                                     authoritative_map = NULL) {
   if (!is.data.frame(x) || !identical(names(x), composition_heatmap_columns) || !nrow(x)) {
     stop("Invalid heatmap composition sidecar schema.", call. = FALSE)
   }
@@ -807,7 +816,7 @@ validate_heatmap_sidecar <- function(x, expected_samples, cfg, expected_rank = N
   if (any(x$IsOther != (x$TaxonPath == OTHER_TAXON_PATH))) {
     stop("Heatmap composition sidecar has an invalid Other row.", call. = FALSE)
   }
-  validate_composition_display_labels(x)
+  validate_composition_display_labels(x, authoritative_map)
   validate_sidecar_taxon_sets(x, expected_samples, "Heatmap composition")
   transformed <- as.character(unique(x$Transform))
   if (length(transformed) != 1L || !transformed %in% c("none", "log10_relative")) {
@@ -1036,6 +1045,7 @@ run_taxa_composition <- function(context) {
   group_sidecar_columns <- composition_group_columns
 
   for (rk in stacked_ranks) {
+    authoritative_map <- make_taxon_display_map(rank_tables[[rk]]$rel)
     selection <- select_display_taxa(
       rank_tables[[rk]]$rel, samples, valid_samples,
       min_mean = cfg$composition$stacked_bar_min_mean_relative,
@@ -1071,7 +1081,7 @@ run_taxa_composition <- function(context) {
     } else samples
     validate_stacked_sidecar(
       display_long, samples, expected_rank = rk,
-      expected_sample_order = sample_order
+      expected_sample_order = sample_order, authoritative_map = authoritative_map
     )
     stacked_path <- file.path(comp_dir, sprintf("04_%s_stacked.tsv", rk))
     write_composition_table(display_long, stacked_path, stacked_sidecar_columns)
@@ -1094,7 +1104,8 @@ run_taxa_composition <- function(context) {
       group_means$Rank <- rk
       group_means <- group_means[, c("Rank", setdiff(names(group_means), "Rank")), drop = FALSE]
       group_means <- group_means[, group_sidecar_columns, drop = FALSE]
-      validate_group_sidecar(group_means, display_long_full, expected_rank = rk)
+      validate_group_sidecar(group_means, display_long_full, expected_rank = rk,
+                             authoritative_map = authoritative_map)
       group_path <- file.path(comp_dir, sprintf("04_%s_group_mean_stacked.tsv", rk))
       write_composition_table(group_means, group_path, group_sidecar_columns)
       all_outputs <- c(all_outputs, group_path)
@@ -1122,6 +1133,7 @@ run_taxa_composition <- function(context) {
   }
 
   for (rk in heatmap_ranks) {
+    authoritative_map <- make_taxon_display_map(rank_tables[[rk]]$rel)
     prepared <- prepare_heatmap_data(
       rank_tables[[rk]]$rel, samples, plot_meta,
       top_n = cfg$composition$heatmap_top_n_taxa,
@@ -1136,7 +1148,8 @@ run_taxa_composition <- function(context) {
     }
     validate_heatmap_sidecar(
       prepared$sidecar, samples, cfg, expected_rank = rk,
-      expected_sample_order = prepared$sample_order
+      expected_sample_order = prepared$sample_order,
+      authoritative_map = authoritative_map
     )
     heatmap_tsv <- file.path(comp_dir, sprintf("04_heatmap_%s.tsv", rk))
     write_composition_table(prepared$sidecar, heatmap_tsv,

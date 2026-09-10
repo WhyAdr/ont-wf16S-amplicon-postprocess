@@ -18,13 +18,13 @@ from collections import Counter
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent
 RUNS = {
-    "BAER": ROOT / "wf-16s_BAER-NCBI",
-    "BANAE": ROOT / "wf-16s_BANAE-NCBI",
-    "BLEA": ROOT / "wf-16s_BLEA-NCBI",
-    "BGRN": ROOT / "wf-16s_BGRN-NCBI",
+    "BAER": ROOT / "wf16s-inputs" / "wf-16s_BAER-NCBI",
+    "BANAE": ROOT / "wf16s-inputs" / "wf-16s_BANAE-NCBI",
+    "BLEA": ROOT / "wf16s-inputs" / "wf-16s_BLEA-NCBI",
+    "BGRN": ROOT / "wf16s-inputs" / "wf-16s_BGRN-NCBI",
 }
 RANKS = (
     "superkingdom",

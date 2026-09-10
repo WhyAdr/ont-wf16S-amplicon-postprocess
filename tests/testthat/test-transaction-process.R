@@ -11,11 +11,10 @@ runner <- file.path(repo_root, "analysis", "00_run_pipeline.R")
 rscript <- Sys.which("Rscript")
 
 run_transaction_process <- function(args, wd, env = character(0)) {
-  child_env <- c(
-    Sys.getenv(),
-    R_LIBS_USER = .libPaths()[1],
-    env
-  )
+  child_env <- Sys.getenv()
+  child_env[["R_LIBS_USER"]] <- .libPaths()[1]
+  child_env[["RENV_CONFIG_AUTOLOADER_ENABLED"]] <- "FALSE"
+  if (length(env)) child_env[names(env)] <- env
   processx::run(
     rscript,
     c(runner, "--allow-dirty", "--allow-unlocked", args),

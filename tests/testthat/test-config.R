@@ -47,6 +47,10 @@ test_that("load_config loads default config.yml and resolves relative paths to c
   expect_equal(cfg$composition$stacked_bar_ranks, c("phylum", "family", "genus"))
   expect_equal(cfg$composition$heatmap_ranks, c("phylum", "family", "genus"))
   expect_null(cfg$composition$heatmap_rank)
+  expect_equal(cfg$alpha$hill_orders, c(0, 1, 2))
+  expect_equal(cfg$alpha$renyi_orders, 1)
+  expect_null(cfg$input$phylogenetic_tree)
+  expect_null(cfg$input$phylogenetic_tip_map)
 })
 
 test_that("Krona CLI opt-in is recorded in config and manifest settings", {
@@ -177,4 +181,20 @@ test_that("Configuration rejects base seeds outside R's supported integer range"
   cfg <- get_default_config()
   cfg$seed <- .Machine$integer.max + 1
   expect_error(validate_config(cfg), "Invalid configuration value 'seed'")
+})
+
+test_that("alpha q orders and phylogenetic input pairing fail closed", {
+  cfg <- get_default_config()
+  cfg$alpha$hill_orders <- c(0, 1, 1)
+  expect_error(validate_config(cfg), "alpha.hill_orders")
+  cfg <- get_default_config()
+  cfg$alpha$renyi_orders <- c(0, 2)
+  expect_error(validate_config(cfg), "must include q=1")
+  cfg <- get_default_config()
+  cfg$input$phylogenetic_tip_map <- "map.tsv"
+  expect_error(validate_config(cfg), "requires.*phylogenetic_tree")
+
+  cfg <- get_default_config()
+  cfg$alpha$resample_depth <- .Machine$integer.max + 1
+  expect_error(validate_config(cfg), "alpha.resample_depth")
 })

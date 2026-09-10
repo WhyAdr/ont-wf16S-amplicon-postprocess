@@ -247,6 +247,38 @@ test_that("taxonomy journal recovery is content-addressed and fail-closed", {
   remove_file_checked(backup, "test backup")
 })
 
+test_that("taxonomy recovery requires matching transaction identity when recorded", {
+  root <- tempfile("taxonomy_txn_identity_")
+  dir.create(root)
+  cache <- file.path(root, "taxonomy.json")
+  backup <- file.path(root, ".taxonomy.backup")
+  output <- file.path(root, "output")
+  writeLines('{"original":1}', cache)
+  file.copy(cache, backup)
+  original_hash <- compute_file_hash(cache)
+  candidate <- file.path(root, "candidate.json")
+  writeLines('{"candidate":2}', candidate)
+  candidate_hash <- compute_file_hash(candidate)
+  transaction_id <- new_transaction_id()
+  write_taxonomy_journal(
+    cache, backup, output, original_hash, candidate_hash, "candidate_committed",
+    transaction_id = transaction_id
+  )
+  # A valid final output from another transaction must never close this journal.
+  write_revision2_output(output)
+  manifest_path <- file.path(output, "run_manifest.json")
+  final_manifest <- jsonlite::fromJSON(manifest_path, simplifyVector = FALSE)
+  final_manifest$transaction_id <- new_transaction_id()
+  jsonlite::write_json(final_manifest, manifest_path, auto_unbox = TRUE,
+                       pretty = TRUE, null = "null")
+  writeBin(readBin(candidate, "raw", n = file.info(candidate)$size), cache)
+  expect_error(recover_taxonomy_journal(cache), "transaction identity")
+  expect_true(file.exists(get_taxonomy_journal_path(cache)))
+  expect_true(file.exists(backup))
+  remove_file_checked(backup, "test backup")
+  remove_file_checked(get_taxonomy_journal_path(cache), "test journal")
+})
+
 test_that("recover_publication_journal restores prior completed run when final is missing", {
   root <- tempfile("journal_rec_")
   parent <- dirname(root)

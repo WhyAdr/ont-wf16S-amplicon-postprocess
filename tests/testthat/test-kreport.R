@@ -205,9 +205,9 @@ test_that("external Krona renderer failures preserve prior output and clean part
 })
 
 test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
-  ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
-  cache_path <- file.path("..", "..", "output_AAy", "taxonomy_cache.json")
-  asgn_path <- file.path("..", "..", "output_AAy", "reads_assignments",
+  ab_path <- file.path("..", "..", "wf16s-inputs", "output_AAy", "abundance_table_species.tsv")
+  cache_path <- file.path("..", "..", "wf16s-inputs", "output_AAy", "taxonomy_cache.json")
+  asgn_path <- file.path("..", "..", "wf16s-inputs", "output_AAy", "reads_assignments",
                          "AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv")
 
   skip_if_not(file.exists(ab_path), "Abundance table not found")
@@ -220,7 +220,7 @@ test_that("Real Ambar Ayunda fixture builds valid .kreport and runs offline", {
   cfg$config_dir <- normalizePath(file.path("..", ".."), winslash = "/")
   cfg$pipeline_root <- cfg$config_dir
   cfg$input$abundance_table <- ab_path
-  cfg$input$params_json <- file.path("..", "..", "output_AAy", "params.json")
+  cfg$input$params_json <- file.path("..", "..", "wf16s-inputs", "output_AAy", "params.json")
   cfg$taxonomy$cache <- cache_path
   cfg$input$assignments <- list(AmbarAyunda_minimap2_16S = asgn_path)
   cfg$output$base_dir <- out_dir

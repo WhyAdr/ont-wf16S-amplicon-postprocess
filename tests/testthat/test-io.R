@@ -421,8 +421,8 @@ test_that("Assignments parser retains validation contracts while streaming", {
 })
 
 test_that("Real Ambar Ayunda fixture satisfies all Section 2.2 invariants", {
-  ab_path <- file.path("..", "..", "output_AAy", "abundance_table_species.tsv")
-  asgn_path <- file.path("..", "..", "output_AAy", "reads_assignments",
+  ab_path <- file.path("..", "..", "wf16s-inputs", "output_AAy", "abundance_table_species.tsv")
+  asgn_path <- file.path("..", "..", "wf16s-inputs", "output_AAy", "reads_assignments",
                          "AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv")
 
   skip_if_not(file.exists(ab_path), "Real abundance table not found")

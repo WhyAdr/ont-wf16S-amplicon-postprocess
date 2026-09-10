@@ -6,12 +6,27 @@
 *.fasta.gz
 *.sam
 
-# Pipeline heavy directories / reports
-output_AAy/bams/
-output_AAy/unclassified/
-output_AAy/igv_reference/
-output_AAy/execution/
-output_AAy/wf-16s-report.html
+# Local wf-16s producer bundles are inputs, not release artifacts. Keep only
+# the compact Ambar Ayunda regression contract under version control.
+/wf16s-inputs/*
+!/wf16s-inputs/output_AAy/
+!/wf16s-inputs/output_AAy/abundance_table_species.tsv
+!/wf16s-inputs/output_AAy/alignment_tables/
+!/wf16s-inputs/output_AAy/alignment_tables/AmbarAyunda_minimap2_16S-alignment-stats.tsv
+!/wf16s-inputs/output_AAy/igv.json
+!/wf16s-inputs/output_AAy/params.json
+!/wf16s-inputs/output_AAy/reads_assignments/
+!/wf16s-inputs/output_AAy/reads_assignments/AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv
+!/wf16s-inputs/output_AAy/taxonomy_cache.json
+!/wf16s-inputs/output_AAy/versions_all.txt
+/wf16s-inputs/output_AAy/bams/
+/wf16s-inputs/output_AAy/execution/
+/wf16s-inputs/output_AAy/igv_reference/
+/wf16s-inputs/output_AAy/unclassified/
+/wf16s-inputs/output_AAy/wf-16s-report.html
+
+# Separate read-only producer example checkout (contains its own .git data).
+/ATW_Sesame_Greenhouse-Examples/
 
 # R & Python temporary files
 .Rhistory

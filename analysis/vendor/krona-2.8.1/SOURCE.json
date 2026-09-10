@@ -8,7 +8,7 @@
   "files": [
     {
       "path": "LICENSE.txt",
-      "sha256": "a9842218710304179c463bdcc24999958a95daaf6d2d79d461c2a0901dd42d7a"
+      "sha256": "4615d14ac674b80dde947bc269e2adc5d46177dd86d157a8faeb3cc1f327a945"
     },
     {
       "path": "img/favicon.ico",
@@ -28,7 +28,7 @@
     },
     {
       "path": "src/krona-2.0.js",
-      "sha256": "ffca7a7fc49a17d311b925f206769e3f3b101b8857251dab95ecc3441f95ff76"
+      "sha256": "0a0e403f000e2cbfae9154fd769ee788d7d74eed62fb1d01bb88e04957e7e2d5"
     }
   ]
 }

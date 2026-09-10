@@ -65,6 +65,14 @@ inventory_inputs <- function(cfg, bamstats = NULL) {
   if (!is.null(cfg$input$metadata)) {
     records$metadata <- fingerprint_file(cfg$input$metadata, "input.metadata")
   }
+  if (!is.null(cfg$input$phylogenetic_tree)) {
+    records$phylogenetic_tree <- fingerprint_file(
+      cfg$input$phylogenetic_tree, "input.phylogenetic_tree")
+  }
+  if (!is.null(cfg$input$phylogenetic_tip_map)) {
+    records$phylogenetic_tip_map <- fingerprint_file(
+      cfg$input$phylogenetic_tip_map, "input.phylogenetic_tip_map")
+  }
   if (!is.null(cfg$taxonomy$cache)) {
     records$taxonomy_cache <- fingerprint_file(cfg$taxonomy$cache, "taxonomy.cache")
   }
@@ -92,7 +100,8 @@ assert_inputs_unchanged <- function(inventory, allow_taxonomy_cache_change = FAL
                                      taxonomy_cache_expected_sha256 = NULL,
                                      allow_taxonomy_mtime_change = FALSE) {
   flatten <- c(
-    inventory[c("config_file", "abundance_table", "params_json", "metadata", "taxonomy_cache")],
+    inventory[c("config_file", "abundance_table", "params_json", "metadata", "taxonomy_cache",
+                "phylogenetic_tree", "phylogenetic_tip_map")],
     inventory$assignments,
     inventory$bamstats
   )
@@ -309,6 +318,7 @@ validate_output_root <- function(cfg, repo_root, extra_paths = character(0)) {
     preflight_error("E_OUTPUT_UNSAFE", sprintf("unsafe output root '%s'", output))
   }
   inputs <- c(cfg$input$abundance_table, cfg$input$metadata, cfg$input$params_json,
+              cfg$input$phylogenetic_tree, cfg$input$phylogenetic_tip_map,
               cfg$taxonomy$cache, unlist(cfg$input$assignments, use.names = FALSE), extra_paths)
   input_paths <- normalizePath(inputs[!is.na(inputs) & nzchar(inputs)], winslash = "/", mustWork = FALSE)
   overlaps <- function(left, right) {
@@ -330,6 +340,23 @@ validate_output_root <- function(cfg, repo_root, extra_paths = character(0)) {
 run_module_preflight <- function(context, modules) {
   cfg <- context$config
   warnings <- character(0)
+  if ("alpha" %in% modules) {
+    registry <- alpha_metric_registry(context$config$alpha$hill_orders,
+                                      context$config$alpha$renyi_orders)
+    class_matrix <- context$count_matrix[-context$unclass_index, , drop = FALSE]
+    positive_paths <- context$taxonomy$TaxonPath[-context$unclass_index][rowSums(class_matrix) > 0]
+    phylogeny <- prepare_alpha_phylogeny(context$config, positive_paths)
+    metric_count <- nrow(registry) - if (isTRUE(phylogeny$enabled)) 0L else 3L
+    expected_rows <- as.numeric(length(context$samples)) *
+      as.numeric(context$config$alpha$resample_iterations) *
+      as.numeric(metric_count)
+    maximum_rows <- as.numeric(context$config$resource_budgets$max_rarefaction_rows %||% 1e7)
+    if (expected_rows > maximum_rows && !isTRUE(context$config$cli$allow_large_workload)) {
+      preflight_error("E_RESOURCE_BUDGET", sprintf(
+        "alpha long-table workload %.0f rows exceeds max_rarefaction_rows %.0f; use --allow-large-workload to override",
+        expected_rows, maximum_rows))
+    }
+  }
   if ("qc" %in% modules) {
     for (sample_id in names(context$assignment_data)) {
       bamstats <- context$bamstats[[sample_id]]

@@ -87,7 +87,10 @@ class TaxonomyResolverTests(unittest.TestCase):
 
     def test_deferred_refresh_writes_candidate_without_mutating_source_cache(self):
         before = hashlib.sha256(self.cache.read_bytes()).hexdigest()
-        args = self.args(mode="refresh") + ["--defer-cache-commit", "--cache-lock-held"]
+        args = self.args(mode="refresh") + [
+            "--defer-cache-commit", "--cache-lock-held",
+            "--cache-lock-owner-pid", str(os.getpid()),
+        ]
         with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
              mock.patch("sys.argv", args):
             self.assertEqual(taxonomy.main(), 0)

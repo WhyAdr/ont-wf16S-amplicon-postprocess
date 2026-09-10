@@ -925,7 +925,9 @@ build_context <- function(cfg) {
     abundance_table = compute_file_hash(cfg$input$abundance_table),
     metadata = compute_file_hash(cfg$input$metadata),
     params_json = compute_file_hash(cfg$input$params_json),
-    taxonomy_cache = compute_file_hash(cfg$taxonomy$cache)
+    taxonomy_cache = compute_file_hash(cfg$taxonomy$cache),
+    phylogenetic_tree = compute_file_hash(cfg$input$phylogenetic_tree),
+    phylogenetic_tip_map = compute_file_hash(cfg$input$phylogenetic_tip_map)
   )
   if (!is.null(assignments_map)) {
     for (s in names(assignments_map)) {

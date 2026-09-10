@@ -5,6 +5,7 @@
 source(file.path("..", "..", "analysis", "utils", "config.R"))
 source(file.path("..", "..", "analysis", "utils", "io.R"))
 source(file.path("..", "..", "analysis", "utils", "metrics.R"))
+source(file.path("..", "..", "analysis", "utils", "alpha_phylogeny.R"))
 source(file.path("..", "..", "analysis", "utils", "plotting.R"))
 source(file.path("..", "..", "analysis", "02_alpha_diversity.R"))
 source(file.path("..", "..", "analysis", "03_beta_diversity.R"))

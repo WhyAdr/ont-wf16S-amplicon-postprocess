@@ -427,9 +427,25 @@ def main():
     parser.add_argument("--online-preflight", action="store_true")
     parser.add_argument("--defer-cache-commit", action="store_true")
     parser.add_argument("--cache-lock-held", action="store_true")
+    parser.add_argument("--cache-lock-owner-pid", type=int)
+    parser.add_argument("--transaction-id")
     args = parser.parse_args()
 
     try:
+        if args.cache_lock_held:
+            if args.mode != "refresh" or not args.defer_cache_commit:
+                raise ValueError("--cache-lock-held requires deferred refresh mode.")
+            if args.cache_lock_owner_pid not in {os.getpid(), os.getppid()}:
+                raise ValueError(
+                    "--cache-lock-held requires --cache-lock-owner-pid matching this process or its parent."
+                )
+        elif args.cache_lock_owner_pid is not None:
+            raise ValueError("--cache-lock-owner-pid requires --cache-lock-held.")
+        if args.transaction_id is not None and not re.fullmatch(
+                r"tx-[0-9a-f]{64}", args.transaction_id):
+            raise ValueError(
+                "--transaction-id must be tx- followed by 64 lowercase hex characters."
+            )
         expected_inputs = {}
         for specification in args.expected_input:
             if "\t" in specification:
@@ -555,6 +571,7 @@ def main():
 
             provenance = {
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "transaction_id": args.transaction_id,
                 "mode": args.mode,
                 "tool": TOOL_NAME,
                 "abundance_sha256": compute_sha256(args.abundance),

@@ -92,6 +92,13 @@ validate_manifest_v2_revision1 <- function(manifest, physical_root = NULL) {
     "package_versions", "environment", "output_root")
   missing <- setdiff(required, names(manifest))
   if (length(missing)) manifest_fail("<root>", paste("missing required key(s):", paste(missing, collapse = ", ")))
+
+  if (!is.null(manifest$transaction_id)) {
+    assert_manifest_scalar(manifest$transaction_id, "transaction_id", "character")
+    if (!grepl("^tx-[0-9a-f]{64}$", manifest$transaction_id)) {
+      manifest_fail("transaction_id", "expected tx- followed by 64 lowercase hex characters.")
+    }
+  }
   assert_manifest_scalar(manifest$pipeline, "pipeline", "character")
   assert_manifest_scalar(manifest$pipeline_version, "pipeline_version", "character")
   if (!grepl("^[0-9]+[.][0-9]+[.][0-9]+$", manifest$pipeline_version)) {
@@ -263,6 +270,13 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
   missing <- setdiff(required, names(manifest))
   if (length(missing)) manifest_fail("<root>", paste("missing required key(s):", paste(missing, collapse = ", ")))
 
+  if (!is.null(manifest$transaction_id)) {
+    assert_manifest_scalar(manifest$transaction_id, "transaction_id", "character")
+    if (!grepl("^tx-[0-9a-f]{64}$", manifest$transaction_id)) {
+      manifest_fail("transaction_id", "expected tx- followed by 64 lowercase hex characters.")
+    }
+  }
+
   assert_manifest_scalar(manifest$pipeline, "pipeline", "character")
   if (!identical(manifest$pipeline, "ont-wf16s-postprocess")) {
     manifest_fail("pipeline", "expected 'ont-wf16s-postprocess'.")
@@ -348,6 +362,11 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
     validate_manifest_fingerprint(manifest$inputs$metadata, "inputs.metadata")
   } else if (!is.null(manifest$inputs$metadata)) {
     validate_manifest_fingerprint(manifest$inputs$metadata, "inputs.metadata")
+  }
+  for (field in c("phylogenetic_tree", "phylogenetic_tip_map")) {
+    if (!is.null(manifest$inputs[[field]])) {
+      validate_manifest_fingerprint(manifest$inputs[[field]], paste0("inputs.", field))
+    }
   }
   validate_manifest_input_collection(manifest$inputs$assignments, "inputs.assignments")
   validate_manifest_input_collection(manifest$inputs$bamstats, "inputs.bamstats")

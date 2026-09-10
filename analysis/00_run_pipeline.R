@@ -27,7 +27,7 @@ main <- function() {
 
   source(file.path(script_dir, "utils", "dependencies.R"))
   check_dependencies()
-  for (file in c("cli.R", "config.R", "io.R", "metrics.R", "plotting.R", "manifest.R",
+  for (file in c("cli.R", "config.R", "io.R", "metrics.R", "alpha_phylogeny.R", "plotting.R", "manifest.R",
                  "kreport.R", "atomic_io.R", "module_result.R", "preflight.R")) {
     source(file.path(script_dir, "utils", file))
   }
@@ -127,6 +127,8 @@ if (isTRUE(cfg$cli$validate_only)) {
 }
 
 final_root <- normalizePath(cfg$output$base_dir, winslash = "/", mustWork = FALSE)
+transaction_id <- new_transaction_id()
+context$transaction_id <- transaction_id
 
 # Acquire exclusive output lock before reading/staging prior output
 output_lock <- tryCatch(acquire_output_lock(final_root),
@@ -142,7 +144,7 @@ tryCatch(recover_publication_journal(final_root),
 prior_manifest <- tryCatch(validate_prior_output(final_root, cfg$cli$overwrite),
                            error = function(e) fatal("Output validation error", e))
 
-taxonomy_cache_state <- "unchanged" # unchanged, candidate_committed, restored, published
+taxonomy_cache_state <- "unchanged" # unchanged, candidate_committed, restored, output_published, committed
 taxonomy_cache_backup_file <- NULL
 taxonomy_cache_original_sha256 <- full_inventory$taxonomy_cache$sha256
 taxonomy_cache_original_size <- full_inventory$taxonomy_cache$size_bytes
@@ -160,13 +162,21 @@ if (identical(cfg$taxonomy$network_mode, "refresh") && !is.null(taxonomy_cache_p
 # preparing the run stage cannot strand unjournaled recovery material.
 on.exit({
   if (identical(taxonomy_cache_state, "candidate_committed")) {
-    tryCatch(restore_taxonomy_cache(), error = function(e) {
+    rollback_ok <- tryCatch({
+      restore_taxonomy_cache()
+      TRUE
+    }, error = function(e) {
       warning(sprintf("Taxonomy source-cache rollback failed: %s", conditionMessage(e)),
               call. = FALSE)
+      FALSE
     })
-  }
-  if (!is.null(taxonomy_cache_backup_file) && file.exists(taxonomy_cache_backup_file)) {
-    tryCatch(cleanup_taxonomy_journal(taxonomy_cache_path, taxonomy_cache_backup_file),
+    if (!isTRUE(rollback_ok)) {
+      warning("E_TAXONOMY_RECOVERY_REQUIRED: journal and backup retained.", call. = FALSE)
+    }
+  } else if (identical(taxonomy_cache_state, "unchanged") &&
+             !is.null(taxonomy_cache_backup_file) && file.exists(taxonomy_cache_backup_file) &&
+             !file.exists(get_taxonomy_journal_path(taxonomy_cache_path))) {
+    tryCatch(remove_file_checked(taxonomy_cache_backup_file, "unused taxonomy-cache backup"),
              error = function(e) warning(conditionMessage(e), call. = FALSE))
   }
 }, add = TRUE)
@@ -185,6 +195,7 @@ update_taxonomy_provenance <- function(root, restored = FALSE) {
     taxonomy_cache_committed_sha256
   }
   provenance$source_cache_sha256_committed <- provenance$source_cache_sha256_after
+  provenance$transaction_id <- transaction_id
   atomic_write_json(provenance, provenance_path)
   invisible(TRUE)
 }
@@ -339,7 +350,8 @@ for (module_name in requested_modules) {
     }
     tryCatch(write_taxonomy_journal(
       taxonomy_cache_path, taxonomy_cache_backup_file, final_root,
-      taxonomy_cache_original_sha256, taxonomy_cache_committed_sha256, "prepared"
+      taxonomy_cache_original_sha256, taxonomy_cache_committed_sha256, "prepared",
+      transaction_id = transaction_id
     ), error = function(e) fatal("Taxonomy journal error", e))
     tryCatch(atomic_replace(taxonomy_cache_path, function(temp) {
       if (!file.copy(candidate_cache, temp, overwrite = TRUE)) {
@@ -351,7 +363,7 @@ for (module_name in requested_modules) {
     tryCatch(write_taxonomy_journal(
       taxonomy_cache_path, taxonomy_cache_backup_file, final_root,
       taxonomy_cache_original_sha256, taxonomy_cache_committed_sha256,
-      "candidate_committed"
+      "candidate_committed", transaction_id = transaction_id
     ), error = function(e) fatal("Taxonomy journal error", e))
     tryCatch(update_taxonomy_provenance(module_stage, restored = FALSE),
              error = function(e) fatal("Taxonomy provenance update error", e))
@@ -428,6 +440,17 @@ for (name in names(module_results)) {
 taxonomy_provenance_path <- file.path(stage, "07_Kreport", "taxonomy_provenance.json")
 taxonomy_provenance <- if (file.exists(taxonomy_provenance_path))
   jsonlite::fromJSON(taxonomy_provenance_path, simplifyVector = FALSE) else list()
+alpha_phylogeny_path <- file.path(stage, "02_Alpha_Diversity",
+                                  "alpha_phylogeny_status.tsv")
+alpha_phylogeny <- if (file.exists(alpha_phylogeny_path)) {
+  status <- read.delim(alpha_phylogeny_path, check.names = FALSE,
+                       stringsAsFactors = FALSE)
+  if (nrow(status) != 1L) {
+    fatal("Alpha phylogeny provenance error",
+          simpleError("alpha_phylogeny_status.tsv must contain exactly one row."))
+  }
+  as.list(status[1, , drop = FALSE])
+} else NULL
 unresolved_path <- file.path(stage, "07_Kreport", "unresolved_taxids.tsv")
 unresolved_count <- if (file.exists(unresolved_path)) max(0L, length(readLines(unresolved_path)) - 1L) else NA_integer_
 python <- tryCatch(find_python(), error = function(e) NA_character_)
@@ -468,6 +491,7 @@ artifacts_list <- lapply(sort(owned), function(rel_path) {
 
 manifest <- list(
   pipeline = "ont-wf16s-postprocess", pipeline_version = pipeline_version,
+  transaction_id = transaction_id,
   git_commit = source_info$git_commit, git_dirty = source_info$git_dirty,
   source_digest_sha256 = source_info$source_digest_sha256,
   schema_version = 2L, schema_revision = 2L, config_schema_version = cfg$schema_version,
@@ -489,7 +513,10 @@ manifest <- list(
   taxonomy = list(network_mode = cfg$taxonomy$network_mode,
     unresolved_policy = cfg$taxonomy$unresolved_policy, unresolved_count = unresolved_count,
     conflicts_count = taxonomy_provenance$conflicts_count %||% NA_integer_,
+    transaction_id = transaction_id,
+    source_cache_candidate_sha256 = taxonomy_cache_committed_sha256,
     resolution_source_counts = taxonomy_provenance$resolution_source_counts %||% NULL),
+  alpha = list(phylogeny = alpha_phylogeny),
   interpreter = list(r = R.version.string, platform = R.version$platform, python = python_version),
   environment = lock_info,
   package_versions = json_array(lapply(names(deps), function(package) list(
@@ -510,15 +537,21 @@ if (any_failed && !is.null(prior_manifest)) {
   stage_active <- FALSE
   stop("[FATAL] Transaction aborted; the previous completed output was preserved.", call. = FALSE)
 }
-tryCatch(publish_staged_run(stage, final_root),
+tryCatch(publish_staged_run(stage, final_root, transaction_id = transaction_id),
          error = function(e) fatal("Output publication failed", e))
 stage_active <- FALSE
 if (identical(taxonomy_cache_state, "candidate_committed")) {
-  taxonomy_cache_state <- "published"
+  taxonomy_cache_state <- "output_published"
+  tryCatch(write_taxonomy_journal(
+    taxonomy_cache_path, taxonomy_cache_backup_file, final_root,
+    taxonomy_cache_original_sha256, taxonomy_cache_committed_sha256,
+    "output_published", transaction_id = transaction_id
+  ), error = function(e) fatal("Taxonomy transaction closure failed", e))
   tryCatch({
     cleanup_taxonomy_journal(taxonomy_cache_path, taxonomy_cache_backup_file)
     taxonomy_cache_backup_file <- NULL
   }, error = function(e) fatal("Taxonomy transaction cleanup failed", e))
+  taxonomy_cache_state <- "committed"
 }
 if (any_failed) {
   stop(sprintf("[FATAL] Failed run manifest published: %s", file.path(final_root, "run_manifest.json")),

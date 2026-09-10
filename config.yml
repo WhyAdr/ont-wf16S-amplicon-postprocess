@@ -4,14 +4,14 @@ mode: "auto"                  # auto, single, or cohort
 seed: 42
 
 input:
-  abundance_table: "output_AAy/abundance_table_species.tsv"
+  abundance_table: "wf16s-inputs/output_AAy/abundance_table_species.tsv"
   metadata: null
-  params_json: "output_AAy/params.json"
+  params_json: "wf16s-inputs/output_AAy/params.json"
   tax_column: "tax"
   aggregate_columns: ["total"]
   include_samples: null       # null means all non-aggregate sample columns
   assignments:
-    AmbarAyunda_minimap2_16S: "output_AAy/reads_assignments/AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv"
+    AmbarAyunda_minimap2_16S: "wf16s-inputs/output_AAy/reads_assignments/AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv"
 
 output:
   base_dir: "output"
@@ -57,7 +57,7 @@ shared_taxa:
   group_prevalence: 0.5
 
 taxonomy:
-  cache: "output_AAy/taxonomy_cache.json"
+  cache: "wf16s-inputs/output_AAy/taxonomy_cache.json"
   network_mode: "cache_only"  # online refresh requires --refresh-taxonomy
   unresolved_policy: "warn"  # warn or error
   email_env: "NCBI_EMAIL"

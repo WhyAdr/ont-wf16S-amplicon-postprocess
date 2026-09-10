@@ -47,7 +47,9 @@ run_kreport <- function(context) {
     "--provenance", prov_json
   )
   if (identical(network_mode, "refresh")) {
-    cmd_args <- c(cmd_args, "--defer-cache-commit", "--cache-lock-held")
+    cmd_args <- c(cmd_args, "--defer-cache-commit", "--cache-lock-held",
+                  "--cache-lock-owner-pid", as.character(Sys.getpid()),
+                  "--transaction-id", context$transaction_id)
   }
   assignment_paths <- unname(unlist(context$assignments, use.names = FALSE))
   if (length(assignment_paths) > 0L) {

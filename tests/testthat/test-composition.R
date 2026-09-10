@@ -73,6 +73,30 @@ test_that("Composition collapse conserves valid classified-read abundance", {
   expect_true(all(collapsed$TaxonPath[collapsed$IsOther] == "__OTHER__"))
 })
 
+test_that("filtered taxa retain labels from the complete authoritative rank map", {
+  table <- composition_rank_fixture()
+  authoritative <- make_taxon_display_map(table)
+  metadata <- data.frame(
+    SampleID = c("S2", "S10", "S1"), Group = c("B", "A", "B"),
+    ValidDenominator = c(TRUE, TRUE, FALSE), stringsAsFactors = FALSE
+  )
+  collapsed <- collapse_rank_for_display(
+    table, "Bacteria;P1;Shared", c("S2", "S10", "S1"), metadata
+  )
+  expected <- authoritative$DisplayTaxon[
+    authoritative$TaxonPath == "Bacteria;P1;Shared"
+  ]
+  expect_true(all(collapsed$DisplayTaxon[
+    collapsed$TaxonPath == "Bacteria;P1;Shared"
+  ] == expected))
+  expect_silent(validate_composition_display_labels(collapsed, authoritative))
+
+  wrong <- collapsed
+  wrong$DisplayTaxon[wrong$TaxonPath == "Bacteria;P1;Shared"] <- "Shared"
+  expect_error(validate_composition_display_labels(wrong, authoritative),
+               "inconsistent with TaxonPath")
+})
+
 test_that("Cohort order, arithmetic group means, and heatmap contracts are explicit", {
   table <- composition_rank_fixture()
   metadata <- data.frame(

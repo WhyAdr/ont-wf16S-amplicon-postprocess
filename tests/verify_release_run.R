@@ -112,6 +112,8 @@ stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(manifest$mode %in% c("single", "cohort"))
 stopifnot(identical(manifest$schema_version, 2L))
 stopifnot(identical(manifest$schema_revision, 2L))
+stopifnot(is.character(manifest$transaction_id), length(manifest$transaction_id) == 1L,
+          grepl("^tx-[0-9a-f]{64}$", manifest$transaction_id))
 stopifnot(identical(manifest$config_schema_version, 1L))
 stopifnot(identical(manifest$pipeline_version, expected_pipeline_version))
 validate_manifest_v2(manifest, physical_root = root)
@@ -126,6 +128,7 @@ stopifnot(identical(manifest$cli$allow_unlocked, FALSE))
 stopifnot(grepl("^R version 4[.]", manifest$interpreter$r))
 stopifnot(grepl("Python 3[.]12", manifest$interpreter$python))
 stopifnot(identical(manifest$cli$refresh_taxonomy, FALSE))
+stopifnot(identical(manifest$taxonomy$transaction_id, manifest$transaction_id))
 stopifnot(identical(manifest$upstream_contract$classifier, "minimap2"))
 stopifnot(identical(manifest$upstream_contract$database_set, "ncbi_16s_18s_28s_ITS"))
 stopifnot(identical(manifest$upstream_contract$taxonomic_rank, "S"))
@@ -280,6 +283,295 @@ stopifnot(composition$UnclassifiedReads == composition_accounting$AbundanceUncla
 # 3a. Multi-rank composition artifacts and sidecar schemas
 resolved_config <- yaml::read_yaml(file.path(root, "resolved_config.yml"))
 composition_cfg <- resolved_config$composition
+
+# 3a. Alpha outputs are independently recomputed from the immutable abundance
+# input. Rarefaction iterations are sensitivity replicates, never biological
+# replicates for group inference.
+abundance_path <- as.character(manifest$inputs$abundance_table$path)
+stopifnot(file.exists(abundance_path), identical(sha256_file(abundance_path),
+                                                  manifest$inputs$abundance_table$sha256))
+raw_abundance <- read.delim(abundance_path, check.names = FALSE,
+                            stringsAsFactors = FALSE)
+tax_column <- as.character(resolved_config$input$tax_column)
+stopifnot(tax_column %in% names(raw_abundance),
+          all(release_samples %in% names(raw_abundance)))
+unclassified <- grepl("^Unclassified(?:;|$)", raw_abundance[[tax_column]],
+                      ignore.case = TRUE, perl = TRUE)
+stopifnot(sum(unclassified) == 1L)
+if (identical(manifest$modules$alpha$status, "completed")) {
+  classified_counts <- as.matrix(raw_abundance[!unclassified, release_samples, drop = FALSE])
+  storage.mode(classified_counts) <- "numeric"
+  rownames(classified_counts) <- as.character(raw_abundance[[tax_column]][!unclassified])
+  stopifnot(all(is.finite(classified_counts)), all(classified_counts >= 0),
+            all(classified_counts == floor(classified_counts)))
+
+  q_token <- function(q) {
+    value <- format(q, scientific = FALSE, trim = TRUE, digits = 15)
+    value <- sub("[.]0+$", "", value)
+    value <- sub("([.][0-9]*[1-9])0+$", "\\1", value)
+    gsub("[.]", "p", value)
+  }
+  q_label <- function(q) format(q, scientific = FALSE, trim = TRUE, digits = 15)
+  hill_orders <- as.numeric(unlist(resolved_config$alpha$hill_orders))
+  renyi_orders <- as.numeric(unlist(resolved_config$alpha$renyi_orders))
+  tree_path <- resolved_config$input$phylogenetic_tree %||% NULL
+  tip_map_path <- resolved_config$input$phylogenetic_tip_map %||% NULL
+  phylo_enabled <- !is.null(tree_path)
+  expected_keys <- c(
+    "richness", "shannon", "ens", "simpson", "invsimpson", "fisher_alpha",
+    "chao1", "ace", "pielou", "berger_parker", "heip", "evar", "mcintosh",
+    paste0("renyi_q", vapply(renyi_orders, q_token, character(1))),
+    paste0("hill_q", vapply(hill_orders, q_token, character(1))),
+    if (phylo_enabled) c("faith_pd", "psr", "pse") else character(0)
+  )
+  expected_labels <- c(
+    "Richness (S)", "Shannon (H)", "ENS (e^H)", "Simpson (D)",
+    "Inv. Simpson", "Fisher's alpha", "Chao1", "ACE",
+    "Pielou's evenness (J)", "Berger-Parker index", "Heip's evenness",
+    "Smith-Wilson Evar", "McIntosh diversity index",
+    sprintf("R\u00e9nyi entropy (q=%s)", vapply(renyi_orders, q_label, character(1))),
+    sprintf("Hill number (q=%s)", vapply(hill_orders, q_label, character(1))),
+    if (phylo_enabled) c("Faith PD", "PSR", "PSE") else character(0)
+  )
+  names(expected_labels) <- expected_keys
+
+  phylo_contract <- NULL
+  if (phylo_enabled) {
+    stopifnot(file.exists(tree_path), !dir.exists(tree_path),
+              !is.null(manifest$inputs$phylogenetic_tree),
+              identical(sha256_file(tree_path), manifest$inputs$phylogenetic_tree$sha256))
+    tree <- ape::read.tree(tree_path)
+    stopifnot(inherits(tree, "phylo"), ape::is.rooted(tree),
+              length(tree$tip.label) > 0L, !anyNA(tree$tip.label),
+              all(nzchar(tree$tip.label)), !anyDuplicated(tree$tip.label),
+              !is.null(tree$edge.length), length(tree$edge.length) == nrow(tree$edge),
+              all(is.finite(tree$edge.length)), all(tree$edge.length >= 0))
+    positive_paths <- rownames(classified_counts)[rowSums(classified_counts) > 0]
+    if (is.null(tip_map_path)) {
+      map <- data.frame(TaxonPath = positive_paths, TipLabel = positive_paths,
+                        stringsAsFactors = FALSE)
+      stopifnot(is.null(manifest$inputs$phylogenetic_tip_map))
+    } else {
+      stopifnot(file.exists(tip_map_path), !dir.exists(tip_map_path),
+                !is.null(manifest$inputs$phylogenetic_tip_map),
+                identical(sha256_file(tip_map_path),
+                          manifest$inputs$phylogenetic_tip_map$sha256))
+      header <- strsplit(readLines(tip_map_path, n = 1L, warn = FALSE), "\t",
+                         fixed = TRUE)[[1]]
+      stopifnot(identical(header, c("TaxonPath", "TipLabel")))
+      map <- read.delim(tip_map_path, sep = "\t", quote = "", comment.char = "",
+                        check.names = FALSE, stringsAsFactors = FALSE,
+                        colClasses = "character")
+      stopifnot(nrow(map) > 0L, !anyNA(map), all(nzchar(map$TaxonPath)),
+                all(nzchar(map$TipLabel)), !anyDuplicated(map$TaxonPath),
+                !anyDuplicated(map$TipLabel),
+                !any(grepl("^Unclassified(?:;|$)", map$TaxonPath, perl = TRUE)))
+    }
+    stopifnot(all(positive_paths %in% map$TaxonPath))
+    mapping <- stats::setNames(map$TipLabel, map$TaxonPath)
+    retained_tips <- unique(unname(mapping[positive_paths]))
+    stopifnot(!anyNA(retained_tips), all(retained_tips %in% tree$tip.label))
+    original_tip_count <- length(tree$tip.label)
+    extra_tips <- setdiff(tree$tip.label, retained_tips)
+    phylo_contract <- list(
+      tree = tree, mapping = mapping, original_tip_count = original_tip_count,
+      retained_tip_count = length(retained_tips), pruned_tip_count = length(extra_tips)
+    )
+  }
+
+  independent_phylo <- function(counts) {
+    counts <- counts[counts > 0]
+    tips <- unname(phylo_contract$mapping[names(counts)])
+    stopifnot(length(tips) == length(counts), !anyNA(tips),
+              all(tips %in% phylo_contract$tree$tip.label))
+    tree <- phylo_contract$tree
+    active <- match(tips, tree$tip.label)
+    included <- rep(FALSE, nrow(tree$edge))
+    repeat {
+      hit <- which(tree$edge[, 2] %in% active & !included)
+      if (!length(hit)) break
+      included[hit] <- TRUE
+      active <- unique(c(active, tree$edge[hit, 1]))
+    }
+    faith <- sum(tree$edge.length[included])
+    S <- length(counts)
+    psr <- pse <- NA_real_
+    if (S > 1L) {
+      covariance <- ape::vcv.phylo(tree, corr = TRUE)[tips, tips, drop = FALSE]
+      psv <- (S * sum(diag(covariance)) - sum(covariance)) / (S * (S - 1))
+      psr <- psv * S
+      abundance <- as.numeric(counts)
+      N <- sum(abundance)
+      numerator <- N * sum(diag(covariance) * abundance) -
+        as.numeric(t(abundance) %*% covariance %*% abundance)
+      denominator <- N^2 - N * mean(abundance)
+      if (is.finite(denominator) && denominator > 0) pse <- numerator / denominator
+    }
+    c(faith_pd = faith, psr = psr, pse = pse)
+  }
+
+  independent_alpha <- function(counts) {
+    counts <- round(counts[counts > 0])
+    N <- sum(counts)
+    S <- length(counts)
+    if (!N) return(stats::setNames(rep(NA_real_, length(expected_keys)), expected_keys))
+    p <- counts / N
+    H <- -sum(p * log(p))
+    estimate <- tryCatch(suppressWarnings(vegan::estimateR(counts)),
+                         error = function(e) rep(NA_real_, 5L))
+    fisher <- tryCatch(suppressWarnings(as.numeric(vegan::fisher.alpha(counts))),
+                       error = function(e) NA_real_)
+    value <- c(
+      richness = S, shannon = H, ens = exp(H), simpson = 1 - sum(p^2),
+      invsimpson = 1 / sum(p^2), fisher_alpha = fisher,
+      chao1 = unname(estimate["S.chao1"]), ace = unname(estimate["S.ACE"]),
+      pielou = if (S > 1L) H / log(S) else NA_real_,
+      berger_parker = max(counts) / N,
+      heip = if (S > 1L) (exp(H) - 1) / (S - 1) else NA_real_,
+      evar = if (S > 1L) 1 - (2 / pi) * atan(mean((log(counts) - mean(log(counts)))^2)) else NA_real_,
+      mcintosh = if (N > 1L) (N - sqrt(sum(counts^2))) / (N - sqrt(N)) else NA_real_
+    )
+    renyi <- function(q) if (q == 1) H else log(sum(p^q)) / (1 - q)
+    for (q in renyi_orders) value[[paste0("renyi_q", q_token(q))]] <- renyi(q)
+    for (q in hill_orders) value[[paste0("hill_q", q_token(q))]] <- exp(renyi(q))
+    if (phylo_enabled) value <- c(value, independent_phylo(counts))
+    value[expected_keys]
+  }
+
+  alpha_table <- read.delim(file.path(root, "02_Alpha_Diversity", "alpha_diversity.tsv"),
+                            check.names = FALSE, stringsAsFactors = FALSE)
+  status_table <- read.delim(file.path(root, "02_Alpha_Diversity", "alpha_metric_status.tsv"),
+                             check.names = FALSE, stringsAsFactors = FALSE)
+  definitions <- read.delim(file.path(root, "02_Alpha_Diversity", "alpha_metric_definitions.tsv"),
+                            check.names = FALSE, stringsAsFactors = FALSE)
+  stopifnot(!anyDuplicated(definitions$MetricKey),
+            identical(definitions$MetricKey[seq_along(expected_keys)], expected_keys),
+            identical(as.character(definitions$MetricLabel[seq_along(expected_keys)]),
+                      unname(expected_labels)))
+  assert_unique_key(status_table, c("SampleID", "MetricKey"), "full-depth alpha status")
+  stopifnot(setequal(status_table$SampleID, release_samples),
+            all(expected_keys %in% status_table$MetricKey),
+            !any(is.nan(status_table$Value)),
+            !any(is.infinite(status_table$Value), na.rm = TRUE))
+  full_column_labels <- c(
+    richness = "Observed species richness (S)",
+    chao1 = "Chao1 (estimated richness)", shannon = "Shannon (H)",
+    ens = "Effective number of species (e^H)",
+    simpson = "Simpson's D (1-sum p^2)", invsimpson = "Inverse Simpson",
+    pielou = "Pielou's evenness (J)", fisher_alpha = "Fisher's alpha",
+    berger_parker = "Berger-Parker dominance", ace = "ACE",
+    heip = "Heip's evenness", evar = "Smith-Wilson Evar",
+    mcintosh = "McIntosh diversity index"
+  )
+  for (sample_id in release_samples) {
+    expected <- independent_alpha(classified_counts[, sample_id])
+    actual_status <- status_table[status_table$SampleID == sample_id, ]
+    actual <- stats::setNames(actual_status$Value, actual_status$MetricKey)
+    for (key in expected_keys) {
+      if (is.finite(expected[[key]])) {
+        stopifnot(isTRUE(actual_status$Valid[actual_status$MetricKey == key]),
+                  isTRUE(all.equal(actual[[key]], expected[[key]], tolerance = 1e-10)))
+      } else {
+        row <- actual_status[actual_status$MetricKey == key, ]
+        stopifnot(nrow(row) == 1L, !isTRUE(row$Valid), is.na(row$Value), nzchar(row$Reason))
+      }
+      column <- if (key %in% names(full_column_labels)) {
+        full_column_labels[[key]]
+      } else {
+        expected_labels[[key]]
+      }
+      if (column %in% names(alpha_table)) {
+        observed <- alpha_table[alpha_table$SampleID == sample_id, column]
+        if (is.finite(expected[[key]])) stopifnot(isTRUE(all.equal(observed, expected[[key]], tolerance = 1e-10)))
+        else stopifnot(is.na(observed))
+      }
+    }
+  }
+
+  long <- read.delim(file.path(root, "02_Alpha_Diversity", "rarefaction_resamples_long.tsv"),
+                     check.names = FALSE, stringsAsFactors = FALSE)
+  expected_long_columns <- c("SampleID", "iteration", "subsample_depth", "MetricKey",
+                             "MetricLabel", "Parameter", "Value", "Valid", "Reason")
+  stopifnot(identical(names(long), expected_long_columns),
+            !anyDuplicated(long[c("SampleID", "iteration", "MetricKey")]),
+            setequal(long$SampleID, release_samples),
+            identical(unique(as.integer(long$subsample_depth)),
+                      as.integer(min(resolved_config$alpha$resample_depth,
+                        max(1L, floor(min(colSums(classified_counts)) *
+                                      resolved_config$alpha$resample_fraction_cap))))),
+            setequal(unique(long$MetricKey), expected_keys),
+            nrow(long) == length(release_samples) * resolved_config$alpha$resample_iterations *
+              length(expected_keys),
+            !any(is.nan(long$Value)), !any(is.infinite(long$Value), na.rm = TRUE),
+            all(nzchar(long$Reason[!long$Valid])))
+  stopifnot(all(as.character(long$MetricLabel) == unname(expected_labels[long$MetricKey])))
+
+  plot_registry <- read.delim(file.path(root, "02_Alpha_Diversity", "alpha_plot_registry.tsv"),
+                              check.names = FALSE, stringsAsFactors = FALSE)
+  expected_02b <- c("richness", "shannon", "ens", "simpson", "invsimpson", "fisher_alpha")
+  expected_02c <- c("chao1", "ace", "pielou", "berger_parker")
+  expected_02d <- c("heip", "evar", "mcintosh", "renyi_q1")
+  expected_02e <- c(paste0("hill_q", vapply(hill_orders, q_token, character(1))),
+                    "faith_pd", "psr", "pse")
+  stopifnot(identical(plot_registry$MetricKey[plot_registry$FigureKey == "02b"], expected_02b),
+            identical(plot_registry$MetricKey[plot_registry$FigureKey == "02c"], expected_02c),
+            identical(plot_registry$MetricKey[plot_registry$FigureKey == "02d"], expected_02d),
+            identical(plot_registry$MetricKey[plot_registry$FigureKey == "02e"], expected_02e),
+            all(plot_registry$WidthIn == 10), all(plot_registry$HeightIn == 7),
+            all(plot_registry$DPI == 150),
+            all(plot_registry$Status %in% c("Completed", "Ineligible", "Skipped")))
+
+  png_dimensions <- function(path) {
+    connection <- file(path, open = "rb")
+    on.exit(close(connection))
+    signature <- readBin(connection, what = "raw", n = 8L)
+    stopifnot(identical(as.integer(signature),
+                        c(137L, 80L, 78L, 71L, 13L, 10L, 26L, 10L)))
+    chunk_length <- readBin(connection, what = "integer", n = 1L, size = 4L,
+                            signed = TRUE, endian = "big")
+    chunk_type <- rawToChar(readBin(connection, what = "raw", n = 4L))
+    stopifnot(chunk_length == 13L, identical(chunk_type, "IHDR"))
+    c(width = readBin(connection, what = "integer", n = 1L, size = 4L,
+                      signed = TRUE, endian = "big"),
+      height = readBin(connection, what = "integer", n = 1L, size = 4L,
+                       signed = TRUE, endian = "big"))
+  }
+  for (figure in unique(plot_registry$FigureFile[plot_registry$Status == "Completed"])) {
+    path <- file.path(root, "02_Alpha_Diversity", figure)
+    stopifnot(file.exists(path), file.info(path)$size > 0,
+              identical(unname(png_dimensions(path)), c(1500L, 1050L)))
+  }
+  phylo_status <- read.delim(file.path(root, "02_Alpha_Diversity", "alpha_phylogeny_status.tsv"),
+                             check.names = FALSE, stringsAsFactors = FALSE)
+  stopifnot(nrow(phylo_status) == 1L)
+  stopifnot(!is.null(manifest$alpha$phylogeny),
+            identical(as.character(manifest$alpha$phylogeny$Status),
+                      as.character(phylo_status$Status[[1]])))
+  if (phylo_enabled) {
+    stopifnot(identical(phylo_status$Status[[1]], "Completed"),
+              identical(as.character(phylo_status$TreeSHA256[[1]]), sha256_file(tree_path)),
+              identical(as.character(manifest$alpha$phylogeny$TreeSHA256),
+                        sha256_file(tree_path)),
+              as.integer(phylo_status$OriginalTipCount[[1]]) == phylo_contract$original_tip_count,
+              as.integer(phylo_status$RetainedTipCount[[1]]) == phylo_contract$retained_tip_count,
+              as.integer(phylo_status$PrunedTipCount[[1]]) == phylo_contract$pruned_tip_count,
+              identical(as.character(phylo_status$PruningMethod[[1]]),
+                        "extra tips excluded from metric traversal; original root retained"),
+              !file.exists(file.path(root, "02_Alpha_Diversity", "alpha_phylogeny_skipped.tsv")),
+              file.exists(file.path(root, "02_Alpha_Diversity", "02e_resample_boxplots_phylogenetic.png")))
+    if (!is.null(tip_map_path)) {
+      stopifnot(identical(as.character(phylo_status$TipMapSHA256[[1]]),
+                          sha256_file(tip_map_path)))
+    }
+  } else {
+    stopifnot(identical(phylo_status$Status[[1]], "Skipped"),
+              all(plot_registry$Status[plot_registry$FigureKey == "02e"] == "Skipped"))
+    stopifnot(file.exists(file.path(root, "02_Alpha_Diversity", "alpha_phylogeny_skipped.tsv")),
+              !file.exists(file.path(root, "02_Alpha_Diversity", "02e_resample_boxplots_phylogenetic.png")))
+  }
+}
+
+# 3b. Multi-rank composition artifacts and sidecar schemas
 stacked_sidecar_columns <- c(
   "Rank", "TaxonPath", "DisplayTaxon", "SampleID", "Group",
   "RelativeAbundance", "MeanRelativeAbundance", "IsOther",
@@ -339,6 +631,17 @@ assert_composition_pair <- function(rank) {
   assert_exact_sample_order(table, expected_sample_order, "SampleOrder", "Stacked SampleOrder")
   expected_validity <- accounting$AbundanceClassified[match(release_samples, accounting$SampleID)] > 0
   names(expected_validity) <- release_samples
+  rank_names <- c("superkingdom", "kingdom", "phylum", "class", "order",
+                  "family", "genus", "species")
+  rank_index <- match(rank, rank_names)
+  stopifnot(!is.na(rank_index))
+  classified_lineages <- strsplit(as.character(raw_abundance[[tax_column]][!unclassified]),
+                                  ";", fixed = TRUE)
+  stopifnot(all(lengths(classified_lineages) == 8L))
+  rank_paths <- vapply(classified_lineages, function(parts) {
+    paste(parts[seq_len(rank_index)], collapse = ";")
+  }, character(1))
+  rank_counts <- rowsum(classified_counts, rank_paths, reorder = FALSE)
   reference_paths <- NULL
   for (sample_id in release_samples) {
     sample <- table[table$SampleID == sample_id, , drop = FALSE]
@@ -356,7 +659,29 @@ assert_composition_pair <- function(rank) {
     } else {
       stopifnot(abs(sum(sample$RelativeAbundance)) < 1e-12)
     }
+    named_paths <- as.character(sample$TaxonPath[!sample$IsOther])
+    expected_named <- rank_counts[named_paths, sample_id, drop = TRUE] /
+      sum(classified_counts[, sample_id])
+    expected_named[is.na(expected_named)] <- 0
+    stopifnot(isTRUE(all.equal(
+      as.numeric(sample$RelativeAbundance[!sample$IsOther]),
+      as.numeric(expected_named), tolerance = 1e-12, check.attributes = FALSE
+    )))
+    if (any(sample$IsOther)) {
+      stopifnot(abs(sample$RelativeAbundance[sample$IsOther] -
+                      (if (isTRUE(valid[1])) 1 - sum(expected_named) else 0)) < 1e-12)
+    }
   }
+  mean_by_path <- vapply(reference_paths, function(path) {
+    valid_values <- table$RelativeAbundance[table$TaxonPath == path & table$ValidDenominator]
+    if (length(valid_values)) mean(valid_values) else NA_real_
+  }, numeric(1))
+  observed_means <- vapply(reference_paths, function(path) {
+    values <- unique(table$MeanRelativeAbundance[table$TaxonPath == path])
+    if (length(values) != 1L) NA_real_ else values
+  }, numeric(1))
+  stopifnot(isTRUE(all.equal(observed_means, mean_by_path, tolerance = 1e-12,
+                             check.attributes = FALSE)))
   if (identical(manifest$mode, "cohort")) {
     group_tsv <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_group_mean_stacked.tsv", rank))
     group_png <- file.path(root, "04_Taxa_Composition", sprintf("04_%s_group_mean_stacked.png", rank))
@@ -438,6 +763,16 @@ assert_heatmap_pair <- function(rank) {
   assert_exact_sample_order(table, expected_sample_order, "ColumnOrder", "Heatmap ColumnOrder")
   expected_validity <- accounting$AbundanceClassified[match(release_samples, accounting$SampleID)] > 0
   names(expected_validity) <- release_samples
+  rank_names <- c("superkingdom", "kingdom", "phylum", "class", "order",
+                  "family", "genus", "species")
+  rank_index <- match(rank, rank_names)
+  stopifnot(!is.na(rank_index))
+  classified_lineages <- strsplit(as.character(raw_abundance[[tax_column]][!unclassified]),
+                                  ";", fixed = TRUE)
+  rank_paths <- vapply(classified_lineages, function(parts) {
+    paste(parts[seq_len(rank_index)], collapse = ";")
+  }, character(1))
+  rank_counts <- rowsum(classified_counts, rank_paths, reorder = FALSE)
   reference_paths <- NULL
   for (sample_id in release_samples) {
     sample <- table[table$SampleID == sample_id, , drop = FALSE]
@@ -453,6 +788,18 @@ assert_heatmap_pair <- function(rank) {
     } else {
       stopifnot(abs(sum(sample$RelativeAbundance)) < 1e-12)
       stopifnot(!any(sample$IsOther & sample$RelativeAbundance > 0))
+    }
+    named_paths <- as.character(sample$TaxonPath[!sample$IsOther])
+    expected_named <- rank_counts[named_paths, sample_id, drop = TRUE] /
+      sum(classified_counts[, sample_id])
+    expected_named[is.na(expected_named)] <- 0
+    stopifnot(isTRUE(all.equal(
+      as.numeric(sample$RelativeAbundance[!sample$IsOther]),
+      as.numeric(expected_named), tolerance = 1e-12, check.attributes = FALSE
+    )))
+    if (any(sample$IsOther)) {
+      stopifnot(abs(sample$RelativeAbundance[sample$IsOther] -
+                      (if (isTRUE(valid[1])) 1 - sum(expected_named) else 0)) < 1e-12)
     }
     stopifnot(identical(sort(unique(as.integer(sample$RowOrder))), seq_len(nrow(sample))))
     ordered_paths <- as.character(sample$TaxonPath[order(sample$RowOrder)])
@@ -558,41 +905,16 @@ if (isTRUE(manifest$cli$krona)) {
     )
   }
 
-  verify_builtin_krona_html <- function(path, expected_total) {
+  verify_builtin_krona_html <- function(path, tsv_path, sample_id, expected_total) {
     python <- find_python()
-    python_code <- paste(
-      "import sys",
-      "import re",
-      "from pathlib import Path",
-      "from xml.etree import ElementTree as ET",
-      "text = Path(sys.argv[1]).read_text(encoding='utf-8')",
-      "starts = list(re.finditer(r'<krona(?:\\s[^>]*)?>', text))",
-      "if len(starts) != 1 or text.count('</krona>') != 1:",
-      "    raise ValueError('expected exactly one Krona XML fragment')",
-      "start = starts[0].start()",
-      "end = text.index('</krona>', start) + len('</krona>')",
-      "document = ET.fromstring(text[start:end])",
-      "dataset_nodes = document.findall('./node')",
-      "if len(dataset_nodes) != 1:",
-      "    raise ValueError('expected exactly one dataset node')",
-      "def integer(node, path):",
-      "    value = node.findtext(path)",
-      "    if value is None or not value.isdigit() or (len(value) > 1 and value[0] == '0'):",
-      "        raise ValueError(f'non-canonical integer at {path}')",
-      "    return int(value)",
-      "def check(node):",
-      "    clade = integer(node, './magnitude/val')",
-      "    direct = integer(node, './magnitudeUnassigned/val')",
-      "    child_clades = sum(check(child) for child in node.findall('./node'))",
-      "    if clade < direct or clade != direct + child_clades:",
-      "        raise ValueError('Krona clade/direct arithmetic mismatch')",
-      "    return clade",
-      "print(check(dataset_nodes[0]))",
-      sep = "\n"
-    )
+    verifier <- file.path(repo_root, "analysis", "utils",
+                          "verify_krona_correspondence.py")
+    stopifnot(file.exists(verifier))
     result <- processx::run(
       python,
-      args = c("-c", python_code, path),
+      args = c(verifier, "--html", path, "--tsv", tsv_path,
+               "--sample-id", sample_id, "--expected-total",
+               as.character(expected_total)),
       error_on_status = FALSE
     )
     if (!identical(result$status, 0L)) {
@@ -639,7 +961,7 @@ if (isTRUE(manifest$cli$krona)) {
         html_text <- paste(readLines(html_path, warn = FALSE), collapse = "\n")
         stopifnot(!grepl("<(script|link|img)[^>]+(src|href)=['\"]https?://", html_text,
                          ignore.case = TRUE, perl = TRUE))
-        verify_builtin_krona_html(html_path, totals$total)
+        verify_builtin_krona_html(html_path, tsv_path, sample_id, totals$total)
       }
     } else {
       stopifnot(is.null(record$html_path))
@@ -695,6 +1017,15 @@ if (identical(manifest$project_name, "AmbarAyunda_16S_Amplicon")) {
     "01_QC/classification_reconciliation.tsv", "01_QC/read_length_by_status.tsv",
     "02_Alpha_Diversity/alpha_diversity.tsv", "02_Alpha_Diversity/02_richness_overview.tsv",
     "02_Alpha_Diversity/rarefaction_curve.tsv", "02_Alpha_Diversity/rarefaction_resamples.tsv",
+    "02_Alpha_Diversity/rarefaction_resamples_long.tsv",
+    "02_Alpha_Diversity/alpha_metric_definitions.tsv",
+    "02_Alpha_Diversity/alpha_metric_status.tsv",
+    "02_Alpha_Diversity/alpha_phylogeny_status.tsv",
+    "02_Alpha_Diversity/alpha_phylogeny_skipped.tsv",
+    "02_Alpha_Diversity/alpha_plot_registry.tsv",
+    "02_Alpha_Diversity/02b_resample_boxplots.png",
+    "02_Alpha_Diversity/02c_resample_boxplots_estimators_evenness.png",
+    "02_Alpha_Diversity/02d_resample_boxplots_evenness_entropy.png",
     "04_Taxa_Composition/classification_fraction.tsv",
     "07_Kreport/AmbarAyunda_minimap2_16S.kreport", "07_Kreport/taxonomy_resolution.tsv",
     "07_Kreport/taxonomy_resolution_sources.tsv", "07_Kreport/unresolved_taxids.tsv",

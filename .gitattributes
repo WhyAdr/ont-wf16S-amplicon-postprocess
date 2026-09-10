@@ -1,1 +1,5 @@
 VERSION text eol=lf
+analysis/vendor/krona-2.8.1/LICENSE.txt text eol=lf
+analysis/vendor/krona-2.8.1/SOURCE.json text eol=lf
+analysis/vendor/krona-2.8.1/src/krona-2.0.js text eol=lf
+analysis/vendor/krona-2.8.1/img/* binary

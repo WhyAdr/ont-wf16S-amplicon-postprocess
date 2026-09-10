@@ -69,6 +69,14 @@ validate_config <- function(cfg) {
   assert_nonempty_string(cfg$input$abundance_table, "input.abundance_table")
   assert_nonempty_string(cfg$input$params_json, "input.params_json")
   assert_nonempty_string(cfg$input$tax_column, "input.tax_column")
+  for (key in c("phylogenetic_tree", "phylogenetic_tip_map")) {
+    if (!is.null(cfg$input[[key]])) {
+      assert_nonempty_string(cfg$input[[key]], paste0("input.", key))
+    }
+  }
+  if (is.null(cfg$input$phylogenetic_tree) && !is.null(cfg$input$phylogenetic_tip_map)) {
+    stop("'input.phylogenetic_tip_map' requires 'input.phylogenetic_tree'.", call. = FALSE)
+  }
   assert_nonempty_string(cfg$output$base_dir, "output.base_dir")
   if (!is.list(cfg$krona)) {
     stop("'krona' must be a configuration mapping.", call. = FALSE)
@@ -138,10 +146,24 @@ validate_config <- function(cfg) {
     }
   }
   assert_scalar_number(cfg$alpha$rarefaction_points, "alpha.rarefaction_points", lower = 2, upper = 1000, integer = TRUE)
-  assert_scalar_number(cfg$alpha$resample_depth, "alpha.resample_depth", lower = 1, upper = 9007199254740991, integer = TRUE)
+  assert_scalar_number(cfg$alpha$resample_depth, "alpha.resample_depth", lower = 1,
+                       upper = .Machine$integer.max, integer = TRUE)
   assert_scalar_number(cfg$alpha$resample_fraction_cap, "alpha.resample_fraction_cap",
                        lower = 0, upper = 1, lower_open = TRUE)
   assert_scalar_number(cfg$alpha$resample_iterations, "alpha.resample_iterations", lower = 1, upper = 10000, integer = TRUE)
+  validate_alpha_order_config <- function(value, name) {
+    if (!is.numeric(value) || !length(value) || anyNA(value) ||
+        any(!is.finite(value)) || any(value < 0) || anyDuplicated(value)) {
+      stop(sprintf("'%s' must contain unique, finite, non-negative q orders.", name),
+           call. = FALSE)
+    }
+  }
+  validate_alpha_order_config(cfg$alpha$hill_orders, "alpha.hill_orders")
+  validate_alpha_order_config(cfg$alpha$renyi_orders, "alpha.renyi_orders")
+  if (!any(cfg$alpha$renyi_orders == 1)) {
+    stop("'alpha.renyi_orders' must include q=1 for the fixed 02d figure contract.",
+         call. = FALSE)
+  }
   assert_scalar_number(cfg$composition$top_n_taxa, "composition.top_n_taxa", lower = 1, upper = 10000, integer = TRUE)
   validate_rank_vector <- function(value, name) {
     if (!is.character(value) || length(value) == 0L || anyNA(value) ||
@@ -255,14 +277,16 @@ get_default_config <- function() {
     mode = "auto",
     seed = 42L,
     input = list(
-      abundance_table = "output_AAy/abundance_table_species.tsv",
+      abundance_table = "wf16s-inputs/output_AAy/abundance_table_species.tsv",
       metadata = NULL,
-      params_json = "output_AAy/params.json",
+      params_json = "wf16s-inputs/output_AAy/params.json",
       wf16s_output_root = NULL,
       tax_column = "tax",
       aggregate_columns = c("total"),
       include_samples = NULL,
-      assignments = NULL
+      assignments = NULL,
+      phylogenetic_tree = NULL,
+      phylogenetic_tip_map = NULL
     ),
     output = list(
       base_dir = "output"
@@ -277,7 +301,9 @@ get_default_config <- function() {
       rarefaction_points = 25L,
       resample_depth = 50000L,
       resample_fraction_cap = 0.90,
-      resample_iterations = 100L
+      resample_iterations = 100L,
+      hill_orders = c(0, 1, 2),
+      renyi_orders = c(1)
     ),
     composition = list(
       top_n_taxa = 15L,
@@ -324,7 +350,7 @@ get_default_config <- function() {
       max_rarefaction_rows = 10000000L
     ),
     taxonomy = list(
-      cache = "output_AAy/taxonomy_cache.json",
+      cache = "wf16s-inputs/output_AAy/taxonomy_cache.json",
       network_mode = "cache_only",
       unresolved_policy = "warn",
       email_env = "NCBI_EMAIL",
@@ -448,6 +474,8 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   cfg$input$metadata <- resolve_path(cfg$input$metadata, config_dir)
   cfg$input$params_json <- resolve_path(cfg$input$params_json, config_dir)
   cfg$input$wf16s_output_root <- resolve_path(cfg$input$wf16s_output_root, config_dir)
+  cfg$input$phylogenetic_tree <- resolve_path(cfg$input$phylogenetic_tree, config_dir)
+  cfg$input$phylogenetic_tip_map <- resolve_path(cfg$input$phylogenetic_tip_map, config_dir)
 
   if (!is.null(cfg$input$assignments) && is.list(cfg$input$assignments)) {
     for (s in names(cfg$input$assignments)) {

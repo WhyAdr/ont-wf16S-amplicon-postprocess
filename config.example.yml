@@ -15,14 +15,14 @@ seed: 42
 
 input:
   # Path to wf-16s abundance_table_species.tsv (required)
-  abundance_table: "output_AAy/abundance_table_species.tsv"
+  abundance_table: "wf16s-inputs/output_AAy/abundance_table_species.tsv"
 
   # Leave null for the tracked one-sample demonstration. For a real cohort,
   # provide metadata whose SampleID set exactly matches the abundance columns.
   metadata: null
 
   # Required producer contract and threshold provenance
-  params_json: "output_AAy/params.json"
+  params_json: "wf16s-inputs/output_AAy/params.json"
 
   # Optional root for per-sample bamstats.readstats.tsv.gz discovery (null in CI)
   wf16s_output_root: null
@@ -39,7 +39,12 @@ input:
   # Optional per-sample Minimap2 read assignments files
   # If null, abundance-only modules run and QC read-length diagnostics are skipped
   assignments:
-    AmbarAyunda_minimap2_16S: "output_AAy/reads_assignments/AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv"
+    AmbarAyunda_minimap2_16S: "wf16s-inputs/output_AAy/reads_assignments/AmbarAyunda_minimap2_16S_lineages.minimap2.assignments.tsv"
+
+  # Optional phylogenetic alpha-diversity inputs. If no mapping is supplied,
+  # tree tip labels must exactly equal the classified TaxonPath strings.
+  phylogenetic_tree: null
+  phylogenetic_tip_map: null
 
 output:
   # Base output directory (all module subdirectories derived automatically)
@@ -57,6 +62,8 @@ alpha:
   resample_depth: 50000
   resample_fraction_cap: 0.90
   resample_iterations: 100
+  hill_orders: [0, 1, 2]
+  renyi_orders: [1]
 
 composition:
   top_n_taxa: 15
@@ -99,7 +106,7 @@ shared_taxa:
   group_prevalence: 0.5
 
 taxonomy:
-  cache: "output_AAy/taxonomy_cache.json"
+  cache: "wf16s-inputs/output_AAy/taxonomy_cache.json"
   # YAML is deliberately offline-only. Use --refresh-taxonomy for an online run.
   network_mode: "cache_only"
   unresolved_policy: "warn"  # 'warn' or 'error'

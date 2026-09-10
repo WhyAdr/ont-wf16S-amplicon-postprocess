@@ -3,8 +3,8 @@ message: "If you use this software, please cite it using the metadata below."
 title: "ONT wf-16S Amplicon Post-Processing Pipeline"
 authors:
   - name: "WhyAdr"
-version: 0.4.5
-date-released: "2026-09-09"
+version: 0.4.6
+date-released: "2026-09-10"
 license: MIT
 repository-code: "https://github.com/WhyAdr/ont-wf16S-amplicon-postprocess"
 url: "https://github.com/WhyAdr/ont-wf16S-amplicon-postprocess"

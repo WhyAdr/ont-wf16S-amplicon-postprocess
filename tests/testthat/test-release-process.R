@@ -31,10 +31,14 @@ write_process_config <- function(root, sample_names = "S1", mode = "auto",
 }
 
 run_pipeline_process <- function(args, wd) {
+  child_env <- Sys.getenv()
+  child_env[["R_LIBS_USER"]] <- .libPaths()[1]
+  child_env[["RENV_CONFIG_AUTOLOADER_ENABLED"]] <- "FALSE"
   processx::run(
     rscript,
     c(runner, "--allow-dirty", "--allow-unlocked", args),
     wd = wd,
+    env = child_env,
     error_on_status = FALSE,
     echo = FALSE,
     timeout = 120000

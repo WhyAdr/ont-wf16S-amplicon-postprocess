@@ -4,15 +4,15 @@ mode: "single"
 seed: 42
 
 input:
-  abundance_table: "wf-16s_Helga16SrRNA/output/abundance_table_species.tsv"
+  abundance_table: "wf16s-inputs/wf-16s_Helga16SrRNA/output/abundance_table_species.tsv"
   metadata: null
-  params_json: "wf-16s_Helga16SrRNA/output/params.json"
-  wf16s_output_root: "wf-16s_Helga16SrRNA/output"
+  params_json: "wf16s-inputs/wf-16s_Helga16SrRNA/output/params.json"
+  wf16s_output_root: "wf16s-inputs/wf-16s_Helga16SrRNA/output"
   tax_column: "tax"
   aggregate_columns: ["total"]
   include_samples: null
   assignments:
-    Helga-16SrRNA-NCBI: "wf-16s_Helga16SrRNA/output/reads_assignments/Helga-16SrRNA-NCBI_lineages.minimap2.assignments.tsv"
+    Helga-16SrRNA-NCBI: "wf16s-inputs/wf-16s_Helga16SrRNA/output/reads_assignments/Helga-16SrRNA-NCBI_lineages.minimap2.assignments.tsv"
 
 output:
   base_dir: "output_Helga"
@@ -50,7 +50,7 @@ shared_taxa:
   group_prevalence: 0.5
 
 taxonomy:
-  cache: "output_AAy/taxonomy_cache.json"
+  cache: "wf16s-inputs/output_AAy/taxonomy_cache.json"
   network_mode: "cache_only"
   unresolved_policy: "warn"
   email_env: "NCBI_EMAIL"
