@@ -33,6 +33,8 @@ All notable changes to this project are documented in this file.
 - Use the same POSIX record-lock family in R and Python taxonomy-cache writers,
   plus an explicit Python in-process guard, preserving cross-runtime and
   re-entrant exclusion on Linux as well as Windows.
+- Build release-verifier classified-count inputs independently of the optional
+  alpha module so composition-only and zero-classified runs remain verifiable.
 - Keep zero-classified samples undefined in composition heatmaps: sidecars retain
   finite zero abundances, exclude invalid samples from selection, clustering, and
   pseudocount derivation, and mark the plotted column as undefined.

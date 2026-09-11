@@ -298,13 +298,12 @@ stopifnot(tax_column %in% names(raw_abundance),
 unclassified <- grepl("^Unclassified(?:;|$)", raw_abundance[[tax_column]],
                       ignore.case = TRUE, perl = TRUE)
 stopifnot(sum(unclassified) == 1L)
+classified_counts <- as.matrix(raw_abundance[!unclassified, release_samples, drop = FALSE])
+storage.mode(classified_counts) <- "numeric"
+rownames(classified_counts) <- as.character(raw_abundance[[tax_column]][!unclassified])
+stopifnot(all(is.finite(classified_counts)), all(classified_counts >= 0),
+          all(classified_counts == floor(classified_counts)))
 if (identical(manifest$modules$alpha$status, "completed")) {
-  classified_counts <- as.matrix(raw_abundance[!unclassified, release_samples, drop = FALSE])
-  storage.mode(classified_counts) <- "numeric"
-  rownames(classified_counts) <- as.character(raw_abundance[[tax_column]][!unclassified])
-  stopifnot(all(is.finite(classified_counts)), all(classified_counts >= 0),
-            all(classified_counts == floor(classified_counts)))
-
   q_token <- function(q) {
     value <- format(q, scientific = FALSE, trim = TRUE, digits = 15)
     value <- sub("[.]0+$", "", value)
