@@ -12,6 +12,7 @@ import re
 import socket
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -24,12 +25,22 @@ MAX_READ_LENGTH = 2147483647
 PLACEHOLDER_NAMES = {"unknown", "unclassified", "uncultured", "unidentified"}
 READ_LENGTH_RE = re.compile(r"^[0-9]+$|^[0-9]+\|[1-9][0-9]*$")
 EXPECTED_RANKS = ("superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species")
+_ACTIVE_CACHE_LOCKS = set()
+_ACTIVE_CACHE_LOCKS_GUARD = threading.Lock()
 
 
 @contextlib.contextmanager
 def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
     lock_path = cache_path + ".lock"
     os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+    lock_identity = os.path.normcase(os.path.realpath(lock_path))
+    with _ACTIVE_CACHE_LOCKS_GUARD:
+        if lock_identity in _ACTIVE_CACHE_LOCKS:
+            raise SystemExit(
+                f"[taxonomy] ERROR: E_TAXONOMY_CACHE_BUSY: cache lock "
+                f"'{lock_path}' is already held by this process"
+            )
+        _ACTIVE_CACHE_LOCKS.add(lock_identity)
     deadline = time.time() + timeout
     fd = None
     acquired = False
@@ -67,6 +78,8 @@ def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
         time.sleep(poll_interval)
 
     if not acquired:
+        with _ACTIVE_CACHE_LOCKS_GUARD:
+            _ACTIVE_CACHE_LOCKS.discard(lock_identity)
         owner_info = "unknown"
         if os.path.exists(lock_path):
             try:
@@ -105,6 +118,8 @@ def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
                 os.close(fd)
             except OSError:
                 pass
+            with _ACTIVE_CACHE_LOCKS_GUARD:
+                _ACTIVE_CACHE_LOCKS.discard(lock_identity)
             # Keep a stable lock inode. Unlinking after unlock is unsafe on POSIX:
             # a waiter can acquire the old inode while a third process creates and
             # locks a new file at the same pathname.
