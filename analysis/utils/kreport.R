@@ -7,6 +7,10 @@ suppressMessages(library(jsonlite))
 RANKS_8 <- c("superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species")
 RANK_CODES_8 <- c("D", "K", "P", "C", "O", "F", "G", "S")
 
+kreport_sort_key <- function(value) {
+  paste(sprintf("%02x", as.integer(charToRaw(enc2utf8(value)))), collapse = "")
+}
+
 build_kreport_tree <- function(lineages_str, counts) {
   lineages <- strsplit(lineages_str, ";")
   counts <- round(as.numeric(counts))
@@ -58,7 +62,11 @@ build_kreport_tree <- function(lineages_str, counts) {
   dfs_order <- function(parent) {
     children <- nodes_df[nodes_df$parent_path == parent, , drop = FALSE]
     if (nrow(children) == 0) return(character(0))
-    children <- children[order(-children$reads_clade, children$name), ]
+    children <- children[order(
+      -children$reads_clade,
+      vapply(children$name, kreport_sort_key, character(1)),
+      method = "radix"
+    ), ]
     res <- character(0)
     for (idx in seq_len(nrow(children))) {
       c_path <- children$path[idx]
