@@ -363,11 +363,19 @@ class TaxonomyResolverTests(unittest.TestCase):
             os.symlink(self.cache, alias)
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"cache symlink unavailable: {exc}")
+        expected_lock = pathlib.Path(
+            os.path.realpath(os.path.abspath(str(alias))) + ".lock"
+        )
+        target_lock = pathlib.Path(
+            os.path.realpath(os.path.abspath(str(self.cache))) + ".lock"
+        )
         self.assertEqual(
-            os.path.normcase(os.path.realpath(str(alias) + ".lock")),
-            os.path.normcase(os.path.realpath(str(self.cache) + ".lock")),
+            os.path.normcase(str(expected_lock)),
+            os.path.normcase(str(target_lock)),
         )
         with taxonomy.acquire_cache_lock(str(alias), timeout=0.2):
+            self.assertTrue(target_lock.is_file())
+            self.assertFalse(pathlib.Path(str(alias) + ".lock").exists())
             with self.assertRaises(SystemExit):
                 with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
                     pass
