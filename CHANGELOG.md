@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-09-13
+
+### Added
+
+- Add manifest schema v2 revision 3 with an auditable producer-source
+  inventory, explicit Krona/Pavian export state, and strict release flags.
+- Add an opt-in, stdlib-only offline Kraken-report explorer with deterministic
+  JSON/HTML payloads, CSP/network hardening, resolution-status joins, and an
+  independent correspondence verifier.
+- Add independent release metadata and annotated-tag validation tooling.
+
+### Changed
+
+- Keep `.kreport` as the official Pavian interoperability artifact while
+  placing the original built-in explorer under the existing `kreport` module.
+- Always emit `taxonomy_resolution.tsv`, including a deterministic header-only
+  file for all-unclassified runs; make taxonomy and publication journals
+  interruption-safe and alias-aware.
+
+### Fixed
+
+- Make deterministic kreport sibling ordering independent of the host locale.
+- Close Python cache-lock candidates and process-local guards on interruption,
+  exceptions, and canonical cache aliases.
+
 ## [0.4.6] - 2026-09-10
 
 ### Added

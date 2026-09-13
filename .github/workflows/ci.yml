@@ -53,6 +53,7 @@ jobs:
         run: |
           Rscript -e "files <- list.files('analysis', pattern='[.]R$', recursive=TRUE, full.names=TRUE); invisible(lapply(files, parse))"
           python -m compileall -q analysis tests
+          python tests/check_release_metadata.py
 
       - name: Run unit and regression tests
         shell: bash
@@ -60,6 +61,8 @@ jobs:
           Rscript tests/testthat.R
           python -m unittest -v tests/test_krona_builder.py
           python -m unittest -v tests/test_krona_correspondence.py
+          python -m unittest -v tests/test_kraken_report_viewer.py
+          python -m unittest -v tests/test_kraken_viewer_correspondence.py
           python -m unittest -v tests/test_ncbi_taxonomy.py tests/test_check_committed_whitespace.py
 
       - name: Validate without filesystem mutation
@@ -80,12 +83,22 @@ jobs:
           test ! -e "ci krona validation output"
           git diff --exit-code
 
+      - name: Validate requested Pavian integration without filesystem mutation
+        shell: bash
+        run: |
+          test ! -e "ci pavian validation output"
+          Rscript analysis/00_run_pipeline.R \
+            --config config.yml \
+            --output-dir "ci pavian validation output" \
+            --validate-only --pavian
+          test ! -e "ci pavian validation output"
+
       - name: Run full release integration
         shell: bash
         run: |
-          Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci integration output" --krona
+          Rscript analysis/00_run_pipeline.R --config config.yml --output-dir "ci integration output" --krona --pavian
           Rscript tests/verify_release_run.R "ci integration output"
-          Rscript analysis/00_run_pipeline.R --config tests/fixtures/synthetic_minimap2/config.yml --output-dir "ci bamstats output"
+          Rscript analysis/00_run_pipeline.R --config tests/fixtures/synthetic_minimap2/config.yml --output-dir "ci bamstats output" --pavian
           Rscript tests/verify_release_run.R "ci bamstats output"
 
       - name: Run zero-classified cohort release integration
@@ -95,7 +108,7 @@ jobs:
             --config tests/fixtures/synthetic_zero_classified_cohort/config.yml \
             --modules qc,composition,kreport \
             --output-dir "ci zero classified cohort output" \
-            --krona
+            --krona --pavian
           Rscript tests/verify_release_run.R "ci zero classified cohort output"
 
       - name: Run phylogenetic alpha release integration
@@ -124,6 +137,11 @@ jobs:
             base="$(git rev-parse HEAD^ 2>/dev/null || git hash-object -t tree /dev/null)"
           fi
           git diff --check "$base" HEAD
+
+      - name: Check exact annotated tag metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: python tests/check_release_metadata.py --require-tag "${GITHUB_REF_NAME}"
 
   faprotax:
     name: ${{ matrix.os }} / R 4.5.3 / Python 3.12 (FAPROTAX)
