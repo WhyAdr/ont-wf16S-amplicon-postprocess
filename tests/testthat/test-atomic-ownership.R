@@ -31,7 +31,7 @@ write_legacy_output <- function(root, add_extra = FALSE) {
   jsonlite::write_json(manifest, file.path(root, "run_manifest.json"), auto_unbox = TRUE)
 }
 
-write_revision2_output <- function(root, declared_root = root) {
+write_revision2_output <- function(root, declared_root = root, transaction_id = NULL) {
   dir.create(root, recursive = TRUE, showWarnings = FALSE)
   cfg_file <- file.path(root, "resolved_config.yml")
   session_file <- file.path(root, "session_info.txt")
@@ -72,6 +72,7 @@ write_revision2_output <- function(root, declared_root = root) {
   )
   manifest <- list(
     pipeline = "ont-wf16s-postprocess", pipeline_version = "0.4.3",
+    transaction_id = transaction_id,
     schema_version = 2L, schema_revision = 2L, config_schema_version = 1L,
     run_status = "completed", start_time = "2026-09-07T00:00:00Z",
     end_time = "2026-09-07T00:00:01Z", duration_seconds = 1,
@@ -211,7 +212,7 @@ test_that("taxonomy journal recovery is content-addressed and fail-closed", {
   root <- tempfile("taxonomy_txn_")
   dir.create(root)
   cache <- file.path(root, "taxonomy.json")
-  backup <- file.path(root, ".taxonomy.backup")
+  backup <- file.path(root, ".wf16s_tax_backup_test")
   output <- file.path(root, "output")
   original <- charToRaw("{\"original\":1}\n")
   candidate <- charToRaw("{\"candidate\":2}\n")
@@ -222,7 +223,8 @@ test_that("taxonomy journal recovery is content-addressed and fail-closed", {
   writeBin(candidate, candidate_file)
   candidate_hash <- compute_file_hash(candidate_file)
 
-  write_taxonomy_journal(cache, backup, output, original_hash, candidate_hash, "prepared")
+  write_taxonomy_journal(cache, backup, output, original_hash, candidate_hash, "prepared",
+                         transaction_id = new_transaction_id())
   expect_true(recover_taxonomy_journal(cache))
   expect_false(file.exists(get_taxonomy_journal_path(cache)))
   expect_false(file.exists(backup))
@@ -231,7 +233,7 @@ test_that("taxonomy journal recovery is content-addressed and fail-closed", {
   writeBin(original, backup)
   writeBin(candidate, cache)
   write_taxonomy_journal(cache, backup, output, original_hash, candidate_hash,
-                         "candidate_committed")
+                         "candidate_committed", transaction_id = new_transaction_id())
   expect_true(recover_taxonomy_journal(cache))
   expect_identical(readBin(cache, "raw", n = file.info(cache)$size), original)
   expect_false(file.exists(get_taxonomy_journal_path(cache)))
@@ -239,7 +241,7 @@ test_that("taxonomy journal recovery is content-addressed and fail-closed", {
   writeBin(original, backup)
   writeLines("external revision", cache)
   write_taxonomy_journal(cache, backup, output, original_hash, candidate_hash,
-                         "candidate_committed")
+                         "candidate_committed", transaction_id = new_transaction_id())
   expect_error(recover_taxonomy_journal(cache), "E_TAXONOMY_CACHE_CHANGED")
   expect_true(file.exists(get_taxonomy_journal_path(cache)))
   expect_true(file.exists(backup))
@@ -251,7 +253,7 @@ test_that("taxonomy recovery requires matching transaction identity when recorde
   root <- tempfile("taxonomy_txn_identity_")
   dir.create(root)
   cache <- file.path(root, "taxonomy.json")
-  backup <- file.path(root, ".taxonomy.backup")
+  backup <- file.path(root, ".wf16s_tax_backup_test")
   output <- file.path(root, "output")
   writeLines('{"original":1}', cache)
   file.copy(cache, backup)
@@ -282,9 +284,10 @@ test_that("taxonomy recovery requires matching transaction identity when recorde
 test_that("recover_publication_journal restores prior completed run when final is missing", {
   root <- tempfile("journal_rec_")
   parent <- dirname(root)
-  backup <- tempfile("journal_bak_", tmpdir = parent)
+  backup <- tempfile(pattern = paste0(".", basename(root), ".previous-"), tmpdir = parent)
   write_revision2_output(backup, declared_root = root)
-  write_publication_journal(root, stage = NULL, backup = backup, phase = "prior_moved")
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "prior_moved",
+                            transaction_id = new_transaction_id())
 
   expect_false(dir.exists(root))
   expect_true(dir.exists(backup))
@@ -299,10 +302,12 @@ test_that("recover_publication_journal restores prior completed run when final i
 test_that("recover_publication_journal cleans up backup when final is already valid", {
   root <- tempfile("journal_clean_")
   parent <- dirname(root)
-  backup <- tempfile("journal_bak_", tmpdir = parent)
-  write_revision2_output(root)
+  backup <- tempfile(pattern = paste0(".", basename(root), ".previous-"), tmpdir = parent)
+  transaction_id <- new_transaction_id()
+  write_revision2_output(root, transaction_id = transaction_id)
   write_revision2_output(backup, declared_root = root)
-  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published")
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published",
+                            transaction_id = transaction_id)
 
   expect_true(dir.exists(root))
   expect_true(dir.exists(backup))
@@ -317,10 +322,11 @@ test_that("recover_publication_journal cleans up backup when final is already va
 test_that("recovery rejects minimal or tampered completed manifests", {
   root <- tempfile("journal_strict_manifest_")
   parent <- dirname(root)
-  backup <- tempfile("journal_bak_", tmpdir = parent)
+  backup <- tempfile(pattern = paste0(".", basename(root), ".previous-"), tmpdir = parent)
   write_legacy_output(root)
   write_revision2_output(backup)
-  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published")
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published",
+                            transaction_id = new_transaction_id())
   expect_error(recover_publication_journal(root), "E_OUTPUT_RECOVERY_REQUIRED")
   expect_true(dir.exists(backup))
   remove_publication_journal(root)
@@ -328,7 +334,8 @@ test_that("recovery rejects minimal or tampered completed manifests", {
   unlink(root, recursive = TRUE, force = TRUE)
   write_revision2_output(root)
   writeLines("tampered", file.path(root, "01_QC", "read_qc_summary.tsv"))
-  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published")
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published",
+                            transaction_id = new_transaction_id())
   expect_error(recover_publication_journal(root), "E_OUTPUT_RECOVERY_REQUIRED")
   expect_true(dir.exists(backup))
   remove_publication_journal(root)
@@ -336,7 +343,8 @@ test_that("recovery rejects minimal or tampered completed manifests", {
   unlink(root, recursive = TRUE, force = TRUE)
   write_revision2_output(root)
   writeLines("undeclared", file.path(root, "undeclared.tsv"))
-  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published")
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "stage_published",
+                            transaction_id = new_transaction_id())
   expect_error(recover_publication_journal(root), "E_OUTPUT_RECOVERY_REQUIRED")
   expect_true(dir.exists(backup))
   remove_publication_journal(root)
@@ -346,10 +354,11 @@ test_that("recovery rejects minimal or tampered completed manifests", {
 test_that("recover_publication_journal fails closed with E_OUTPUT_RECOVERY_REQUIRED", {
   root <- tempfile("journal_fail_")
   parent <- dirname(root)
-  backup <- tempfile("journal_bak_", tmpdir = parent)
+  backup <- tempfile(pattern = paste0(".", basename(root), ".previous-"), tmpdir = parent)
   dir.create(backup, recursive = TRUE)
   # Backup has no valid manifest
-  write_publication_journal(root, stage = NULL, backup = backup, phase = "prior_moved")
+  write_publication_journal(root, stage = NULL, backup = backup, phase = "prior_moved",
+                            transaction_id = new_transaction_id())
 
   expect_error(recover_publication_journal(root), "E_OUTPUT_RECOVERY_REQUIRED")
   unlink(backup, recursive = TRUE, force = TRUE)

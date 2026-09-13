@@ -431,8 +431,17 @@ release_output_lock <- function(lock_handle) {
 
 .wf16s_active_taxonomy_locks <- new.env(parent = emptyenv())
 
+taxonomy_cache_identity <- function(cache_path) {
+  if (!is.character(cache_path) || length(cache_path) != 1L || is.na(cache_path) ||
+      !nzchar(trimws(cache_path)) || !file.exists(cache_path) || dir.exists(cache_path)) {
+    stop(sprintf("Taxonomy cache must already exist as a regular file: '%s'.", cache_path),
+         call. = FALSE)
+  }
+  normalizePath(cache_path, winslash = "/", mustWork = TRUE)
+}
+
 get_taxonomy_lock_path <- function(cache_path) {
-  paste0(canonicalize_root_path(cache_path), ".lock")
+  paste0(taxonomy_cache_identity(cache_path), ".lock")
 }
 
 acquire_taxonomy_lock <- function(cache_path, timeout_ms = 10000) {
@@ -465,7 +474,7 @@ release_taxonomy_lock <- function(lock_handle) {
 }
 
 get_taxonomy_journal_path <- function(cache_path) {
-  paste0(normalizePath(cache_path, winslash = "/", mustWork = FALSE),
+  paste0(taxonomy_cache_identity(cache_path),
          ".wf16s_transaction.json")
 }
 
@@ -482,18 +491,35 @@ valid_transaction_id <- function(value) {
     grepl("^tx-[0-9a-f]{64}$", value)
 }
 
+assert_taxonomy_backup_path <- function(path, cache_identity) {
+  normalized <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  if (!paths_are_same(dirname(normalized), dirname(cache_identity)) ||
+      !startsWith(basename(normalized), ".wf16s_tax_backup_")) {
+    stop(sprintf("Invalid taxonomy recovery backup path '%s'.", path), call. = FALSE)
+  }
+  invisible(normalized)
+}
+
 write_taxonomy_journal <- function(cache_path, backup, output_root, original_sha256,
                                    candidate_sha256, phase, transaction_id = NULL) {
-  if (!is.null(transaction_id) && !valid_transaction_id(transaction_id)) {
-    stop("Invalid taxonomy transaction_id.", call. = FALSE)
+  if (!valid_transaction_id(transaction_id)) {
+    stop("Taxonomy journal requires a valid transaction_id.", call. = FALSE)
   }
+  if (!is.character(phase) || length(phase) != 1L ||
+      !phase %in% c("prepared", "candidate_committed", "output_published")) {
+    stop("Invalid taxonomy journal phase.", call. = FALSE)
+  }
+  cache_identity <- taxonomy_cache_identity(cache_path)
+  backup_path <- assert_taxonomy_backup_path(backup, cache_identity)
   payload <- list(
-    cache_path = normalizePath(cache_path, winslash = "/", mustWork = FALSE),
-    backup = normalizePath(backup, winslash = "/", mustWork = FALSE),
+    journal_schema_version = 2L,
+    cache_path = cache_identity,
+    configured_cache_path = gsub("\\\\", "/", as.character(cache_path)),
+    backup = backup_path,
     output_root = normalizePath(output_root, winslash = "/", mustWork = FALSE),
     original_sha256 = original_sha256,
     candidate_sha256 = candidate_sha256,
-    transaction_id = transaction_id,
+    transaction_id = as.character(transaction_id),
     phase = phase,
     timestamp = utc_timestamp_now(),
     pid = Sys.getpid()
@@ -532,12 +558,22 @@ recover_taxonomy_journal <- function(cache_path) {
     stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: corrupt taxonomy journal at '%s'.",
                  journal_path), call. = FALSE)
   }
-  canonical_cache <- normalizePath(cache_path, winslash = "/", mustWork = FALSE)
+  legacy <- is.null(journal$journal_schema_version)
+  if (!legacy && !identical(journal$journal_schema_version, 2L)) {
+    stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: unsupported taxonomy journal schema at '%s'.",
+                 journal_path), call. = FALSE)
+  }
+  if (!legacy && !valid_transaction_id(journal$transaction_id)) {
+    stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: taxonomy journal lacks a valid transaction_id at '%s'.",
+                 journal_path), call. = FALSE)
+  }
+  canonical_cache <- taxonomy_cache_identity(cache_path)
   recorded_cache <- normalizePath(as.character(journal$cache_path), winslash = "/",
                                   mustWork = FALSE)
   backup <- normalizePath(as.character(journal$backup), winslash = "/", mustWork = FALSE)
   if (!paths_are_same(canonical_cache, recorded_cache) ||
       !paths_are_same(dirname(canonical_cache), dirname(backup)) ||
+      !startsWith(basename(backup), ".wf16s_tax_backup_") ||
       !grepl("^[0-9a-f]{64}$", journal$original_sha256) ||
       !grepl("^[0-9a-f]{64}$", journal$candidate_sha256 %||% "")) {
     stop(sprintf("E_TAXONOMY_RECOVERY_REQUIRED: invalid taxonomy journal at '%s'.",
@@ -553,7 +589,12 @@ recover_taxonomy_journal <- function(cache_path) {
   final_manifest <- if (final_valid) tryCatch(jsonlite::fromJSON(
     file.path(journal$output_root, "run_manifest.json"), simplifyVector = FALSE
   ), error = function(e) NULL) else NULL
-  transaction_matches <- is.null(journal$transaction_id) ||
+  if (legacy && final_valid) {
+    stop(sprintf(
+      "E_TAXONOMY_RECOVERY_REQUIRED: legacy taxonomy journal has ambiguous completed-output identity at '%s'.",
+      journal_path), call. = FALSE)
+  }
+  transaction_matches <- legacy ||
     (!is.null(final_manifest) && identical(final_manifest$transaction_id,
                                            journal$transaction_id))
   if (final_valid && !transaction_matches) {
@@ -611,17 +652,41 @@ get_output_journal_path <- function(final_root) {
   file.path(parent, sprintf(".%s.wf16s_journal.json", root_hash))
 }
 
+assert_publication_temp_path <- function(path, final_root, prefix, nullable = TRUE) {
+  if (is.null(path)) {
+    if (!nullable) stop("Publication journal path is required.", call. = FALSE)
+    return(invisible(NULL))
+  }
+  normalized <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  canonical <- canonicalize_root_path(final_root)
+  expected_prefix <- paste0(".", basename(canonical), prefix)
+  if (!paths_are_same(dirname(normalized), dirname(canonical)) ||
+      !startsWith(basename(normalized), expected_prefix)) {
+    stop(sprintf("Invalid publication journal temporary path '%s'.", path), call. = FALSE)
+  }
+  invisible(normalized)
+}
+
 write_publication_journal <- function(final_root, stage = NULL, backup = NULL,
                                       phase = "prepared", transaction_id = NULL) {
-  if (!is.null(transaction_id) && !valid_transaction_id(transaction_id)) {
-    stop("Invalid publication transaction_id.", call. = FALSE)
+  if (!valid_transaction_id(transaction_id)) {
+    stop("Publication journal requires a valid transaction_id.", call. = FALSE)
   }
+  if (!is.character(phase) || length(phase) != 1L ||
+      !phase %in% c("prepared", "prior_moved", "stage_published")) {
+    stop("Invalid publication journal phase.", call. = FALSE)
+  }
+  canonical_final <- canonicalize_root_path(final_root)
+  stage_path <- assert_publication_temp_path(stage, final_root, ".staging-")
+  backup_path <- assert_publication_temp_path(backup, final_root, ".previous-")
   journal_path <- get_output_journal_path(final_root)
   payload <- list(
-    final_root = canonicalize_root_path(final_root),
-    stage = if (!is.null(stage)) normalizePath(stage, winslash = "/", mustWork = FALSE) else NULL,
-    backup = if (!is.null(backup)) normalizePath(backup, winslash = "/", mustWork = FALSE) else NULL,
-    transaction_id = transaction_id,
+    journal_schema_version = 2L,
+    final_root = canonical_final,
+    stage = stage_path,
+    backup = backup_path,
+    had_prior = !is.null(backup_path),
+    transaction_id = as.character(transaction_id),
     phase = phase,
     timestamp = utc_timestamp_now(),
     pid = Sys.getpid()
@@ -655,7 +720,7 @@ manifest_is_valid_run <- function(dir_path) {
     identical(manifest$run_status, "completed") &&
     identical(manifest$schema_version, 2L) &&
     length(manifest$schema_revision) == 1L &&
-    isTRUE(manifest$schema_revision %in% c(1L, 2L))
+    isTRUE(manifest$schema_revision %in% c(1L, 2L, 3L))
   if (!isTRUE(valid_identity)) return(FALSE)
   isTRUE(tryCatch({
     validate_manifest_v2(manifest, physical_root = dir_path)
@@ -690,10 +755,29 @@ recover_publication_journal <- function(final_root) {
     return(invisible(FALSE))
   }
 
+  legacy <- is.null(journal$journal_schema_version)
+  if (!legacy) {
+    if (!identical(journal$journal_schema_version, 2L) ||
+        !valid_transaction_id(journal$transaction_id) ||
+        !is.logical(journal$had_prior) || length(journal$had_prior) != 1L ||
+        is.na(journal$had_prior) ||
+        !journal$phase %in% c("prepared", "prior_moved", "stage_published")) {
+      stop(sprintf("E_OUTPUT_RECOVERY_REQUIRED: invalid publication journal schema at '%s'.",
+                   journal_path), call. = FALSE)
+    }
+    assert_publication_temp_path(journal$stage, final_root, ".staging-")
+    assert_publication_temp_path(journal$backup, final_root, ".previous-",
+                                 nullable = !isTRUE(journal$had_prior))
+    if (!isTRUE(journal$had_prior) && !is.null(journal$backup)) {
+      stop(sprintf("E_OUTPUT_RECOVERY_REQUIRED: journal backup disagrees with had_prior at '%s'.",
+                   journal_path), call. = FALSE)
+    }
+  }
+
   backup <- journal$backup
   has_final <- dir.exists(final_root)
   final_valid <- has_final && manifest_is_valid_run(final_root)
-  if (final_valid && !is.null(journal$transaction_id)) {
+  if (final_valid && !legacy) {
     final_manifest <- tryCatch(jsonlite::fromJSON(
       file.path(final_root, "run_manifest.json"), simplifyVector = FALSE
     ), error = function(e) NULL)
@@ -701,6 +785,10 @@ recover_publication_journal <- function(final_root) {
         !identical(final_manifest$transaction_id, journal$transaction_id)) {
       final_valid <- FALSE
     }
+  }
+  if (legacy && final_valid) {
+    stop(sprintf("E_OUTPUT_RECOVERY_REQUIRED: legacy publication journal has ambiguous completed-output identity at '%s'.",
+                 journal_path), call. = FALSE)
   }
   has_backup <- !is.null(backup) && dir.exists(backup)
   backup_valid <- has_backup && manifest_is_valid_run(backup)

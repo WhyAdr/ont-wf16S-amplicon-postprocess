@@ -29,69 +29,99 @@ _ACTIVE_CACHE_LOCKS = set()
 _ACTIVE_CACHE_LOCKS_GUARD = threading.Lock()
 
 
+def _try_lock_fd(fd):
+    """Acquire one non-blocking record lock using the cross-runtime contract."""
+    if sys.platform == "win32":
+        import msvcrt
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        # R's filelock package uses POSIX record locks on Unix.  lockf() uses
+        # that same fcntl lock family; flock() does not contend with it.
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_fd(fd):
+    if sys.platform == "win32":
+        import msvcrt
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.lockf(fd, fcntl.LOCK_UN)
+
+
+def _write_all(fd, payload):
+    """Write complete owner metadata even when os.write() is short."""
+    view = memoryview(payload)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("lock-owner metadata write made no progress")
+        view = view[written:]
+
+
+def _read_lock_owner(lock_path):
+    try:
+        with open(lock_path, "r", encoding="utf-8") as handle:
+            return handle.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 @contextlib.contextmanager
 def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
-    lock_path = cache_path + ".lock"
+    cache_identity = os.path.realpath(os.path.abspath(os.fspath(cache_path)))
+    lock_path = cache_identity + ".lock"
     os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
     lock_identity = os.path.normcase(os.path.realpath(lock_path))
-    with _ACTIVE_CACHE_LOCKS_GUARD:
-        if lock_identity in _ACTIVE_CACHE_LOCKS:
-            raise SystemExit(
-                f"[taxonomy] ERROR: E_TAXONOMY_CACHE_BUSY: cache lock "
-                f"'{lock_path}' is already held by this process"
-            )
-        _ACTIVE_CACHE_LOCKS.add(lock_identity)
-    deadline = time.time() + timeout
+    registered = False
     fd = None
-    acquired = False
-
-    while time.time() < deadline:
-        try:
-            flags = os.O_RDWR | os.O_CREAT
-            if hasattr(os, "O_BINARY"):
-                flags |= os.O_BINARY
-            candidate_fd = os.open(lock_path, flags, 0o666)
-            if sys.platform == "win32":
-                import msvcrt
-                try:
-                    msvcrt.locking(candidate_fd, msvcrt.LK_NBLCK, 1)
-                    fd = candidate_fd
-                    acquired = True
-                    break
-                except OSError:
-                    os.close(candidate_fd)
-            else:
-                import fcntl
-                try:
-                    # R's filelock package uses POSIX record locks on Unix.
-                    # lockf() uses that same fcntl lock family; flock() does
-                    # not contend with it on Linux and would allow concurrent
-                    # R/Python cache writers.
-                    fcntl.lockf(candidate_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    fd = candidate_fd
-                    acquired = True
-                    break
-                except (OSError, IOError):
-                    os.close(candidate_fd)
-        except OSError:
-            pass
-        time.sleep(poll_interval)
-
-    if not acquired:
+    try:
         with _ACTIVE_CACHE_LOCKS_GUARD:
-            _ACTIVE_CACHE_LOCKS.discard(lock_identity)
-        owner_info = "unknown"
-        if os.path.exists(lock_path):
+            if lock_identity in _ACTIVE_CACHE_LOCKS:
+                raise SystemExit(
+                    f"[taxonomy] ERROR: E_TAXONOMY_CACHE_BUSY: cache lock "
+                    f"'{lock_path}' is already held by this process"
+                )
+            _ACTIVE_CACHE_LOCKS.add(lock_identity)
+            registered = True
+
+        deadline = time.monotonic() + timeout
+        while fd is None and time.monotonic() < deadline:
+            candidate_fd = None
             try:
-                with open(lock_path, "r", encoding="utf-8") as h:
-                    owner_info = h.read().strip()
+                flags = os.O_RDWR | os.O_CREAT
+                if hasattr(os, "O_BINARY"):
+                    flags |= os.O_BINARY
+                candidate_fd = os.open(lock_path, flags, 0o666)
+                try:
+                    _try_lock_fd(candidate_fd)
+                except (OSError, IOError):
+                    pass
+                else:
+                    fd = candidate_fd
+                    candidate_fd = None
             except OSError:
                 pass
-        raise SystemExit(
-            f"[taxonomy] ERROR: E_TAXONOMY_CACHE_BUSY: cache lock '{lock_path}' is held by another process: {owner_info}"
-        )
+            finally:
+                if candidate_fd is not None:
+                    try:
+                        os.close(candidate_fd)
+                    except OSError:
+                        pass
 
-    try:
+            if fd is None:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(poll_interval, remaining))
+
+        if fd is None:
+            owner_info = _read_lock_owner(lock_path)
+            raise SystemExit(
+                f"[taxonomy] ERROR: E_TAXONOMY_CACHE_BUSY: cache lock '{lock_path}' "
+                f"is held by another process: {owner_info}"
+            )
+
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
         owner_payload = json.dumps({
@@ -99,30 +129,26 @@ def acquire_cache_lock(cache_path, timeout=10.0, poll_interval=0.05):
             "hostname": socket.gethostname(),
             "start_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
-        os.write(fd, owner_payload.encode("utf-8"))
+        _write_all(fd, owner_payload.encode("utf-8"))
         yield lock_path
     finally:
         if fd is not None:
             try:
                 os.lseek(fd, 0, os.SEEK_SET)
                 os.ftruncate(fd, 0)
-                if sys.platform == "win32":
-                    import msvcrt
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.lockf(fd, fcntl.LOCK_UN)
+                _unlock_fd(fd)
             except OSError:
                 pass
             try:
                 os.close(fd)
             except OSError:
                 pass
+        if registered:
             with _ACTIVE_CACHE_LOCKS_GUARD:
                 _ACTIVE_CACHE_LOCKS.discard(lock_identity)
-            # Keep a stable lock inode. Unlinking after unlock is unsafe on POSIX:
-            # a waiter can acquire the old inode while a third process creates and
-            # locks a new file at the same pathname.
+        # Keep a stable lock inode. Unlinking after unlock is unsafe on POSIX:
+        # a waiter can acquire the old inode while a third process creates and
+        # locks a new file at the same pathname.
 
 
 def parse_taxid(value, context="TaxID"):
@@ -482,6 +508,10 @@ def main():
 
         if not os.path.exists(args.abundance):
             raise ValueError(f"Abundance file not found: {args.abundance}")
+        if not os.path.isfile(args.cache):
+            raise ValueError(
+                f"Taxonomy cache must already exist as a regular file: {args.cache}"
+            )
         abundance_paths = read_abundance_paths(
             args.abundance, args.tax_column, expected_inputs.get(args.abundance)
         )

@@ -5,6 +5,7 @@ import os
 import pathlib
 import csv
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from urllib import request
@@ -315,6 +316,103 @@ class TaxonomyResolverTests(unittest.TestCase):
         self.assertEqual(lock_path.read_bytes(), b"")
         with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
             self.assertTrue(lock_path.is_file())
+
+    def test_interrupted_lock_acquisition_cleans_process_guard(self):
+        lock_identity = os.path.normcase(os.path.realpath(f"{self.cache}.lock"))
+        with mock.patch.object(taxonomy, "_try_lock_fd", side_effect=OSError("busy")), \
+             mock.patch.object(taxonomy.time, "sleep", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                with taxonomy.acquire_cache_lock(str(self.cache), timeout=1.0, poll_interval=0.01):
+                    pass
+
+        self.assertNotIn(lock_identity, taxonomy._ACTIVE_CACHE_LOCKS)
+        with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
+            self.assertIn(lock_identity, taxonomy._ACTIVE_CACHE_LOCKS)
+
+    def test_non_os_error_during_lock_poll_cleans_process_guard(self):
+        lock_identity = os.path.normcase(os.path.realpath(f"{self.cache}.lock"))
+        with mock.patch.object(taxonomy, "_try_lock_fd", side_effect=OSError("busy")), \
+             mock.patch.object(taxonomy.time, "sleep", side_effect=RuntimeError("injected poll failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected poll failure"):
+                with taxonomy.acquire_cache_lock(str(self.cache), timeout=1.0, poll_interval=0.01):
+                    pass
+
+        self.assertNotIn(lock_identity, taxonomy._ACTIVE_CACHE_LOCKS)
+        with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
+            pass
+
+    def test_relative_and_absolute_cache_aliases_share_lock_identity(self):
+        previous = os.getcwd()
+        os.chdir(self.work.parent)
+        try:
+            relative = os.path.relpath(self.cache, self.work.parent)
+            self.assertEqual(
+                os.path.normcase(os.path.realpath(os.path.abspath(relative) + ".lock")),
+                os.path.normcase(os.path.realpath(os.path.abspath(str(self.cache)) + ".lock")),
+            )
+            with taxonomy.acquire_cache_lock(relative, timeout=0.2):
+                with self.assertRaises(SystemExit):
+                    with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
+                        pass
+        finally:
+            os.chdir(previous)
+
+    def test_final_cache_symlink_shares_lock_identity(self):
+        alias = self.work / "cache-alias.json"
+        try:
+            os.symlink(self.cache, alias)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"cache symlink unavailable: {exc}")
+        self.assertEqual(
+            os.path.normcase(os.path.realpath(str(alias) + ".lock")),
+            os.path.normcase(os.path.realpath(str(self.cache) + ".lock")),
+        )
+        with taxonomy.acquire_cache_lock(str(alias), timeout=0.2):
+            with self.assertRaises(SystemExit):
+                with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
+                    pass
+
+    def test_parent_directory_symlink_shares_lock_identity(self):
+        real_dir = self.work / "real-cache-dir"
+        alias_dir = self.work / "alias-cache-dir"
+        real_dir.mkdir()
+        real_cache = real_dir / "cache.json"
+        real_cache.write_text("{}", encoding="utf-8")
+        try:
+            os.symlink(real_dir, alias_dir, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"directory symlink unavailable: {exc}")
+        alias_cache = alias_dir / "cache.json"
+        self.assertEqual(
+            os.path.normcase(os.path.realpath(str(alias_cache) + ".lock")),
+            os.path.normcase(os.path.realpath(str(real_cache) + ".lock")),
+        )
+
+    def test_same_process_threads_do_not_poison_active_guard(self):
+        entered = threading.Event()
+        release = threading.Event()
+        first_errors = []
+
+        def holder():
+            try:
+                with taxonomy.acquire_cache_lock(str(self.cache), timeout=1.0):
+                    entered.set()
+                    release.wait(timeout=2.0)
+            except BaseException as exc:  # pragma: no cover - diagnostic path
+                first_errors.append(exc)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        self.assertTrue(entered.wait(timeout=2.0))
+        with self.assertRaisesRegex(SystemExit, "E_TAXONOMY_CACHE_BUSY"):
+            with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
+                pass
+        release.set()
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(first_errors, [])
+        with taxonomy.acquire_cache_lock(str(self.cache), timeout=0.2):
+            pass
 
 
 if __name__ == "__main__":
