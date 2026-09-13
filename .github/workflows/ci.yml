@@ -55,6 +55,11 @@ jobs:
           python -m compileall -q analysis tests
           python tests/check_release_metadata.py
 
+      - name: Check exact annotated tag metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: python tests/check_release_metadata.py --require-tag "${GITHUB_REF_NAME}"
+
       - name: Run unit and regression tests
         shell: bash
         run: |
@@ -137,11 +142,6 @@ jobs:
             base="$(git rev-parse HEAD^ 2>/dev/null || git hash-object -t tree /dev/null)"
           fi
           git diff --check "$base" HEAD
-
-      - name: Check exact annotated tag metadata
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: python tests/check_release_metadata.py --require-tag "${GITHUB_REF_NAME}"
 
   faprotax:
     name: ${{ matrix.os }} / R 4.5.3 / Python 3.12 (FAPROTAX)
