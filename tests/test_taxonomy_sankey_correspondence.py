@@ -55,6 +55,15 @@ class TaxonomySankeyCorrespondenceTests(unittest.TestCase):
             with self.assertRaisesRegex(CorrespondenceError, "path/name mismatch|missing source ancestor"):
                 verify(payload_path, json_path, None, ["D", "K", "P"], 2, "0.4.8")
 
+    def test_hostile_sample_label_is_escaped_in_html(self):
+        payload, source_bytes = build_fixture()
+        payload["sample_id"] = '<script>alert("x")</script>&'
+        document = build_document(payload, source_bytes, ["D", "K"], 2, "0.4.8")
+        client_text = Path("analysis/utils/taxonomy_sankey_client.js").read_text(encoding="utf-8")
+        html = build_html(canonical_json_bytes(document), payload["sample_id"], client_text).decode("utf-8")
+        self.assertNotIn(payload["sample_id"], html)
+        self.assertIn("&lt;script&gt;", html)
+
 
 if __name__ == "__main__":
     unittest.main()

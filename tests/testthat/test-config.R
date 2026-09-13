@@ -72,6 +72,16 @@ test_that("Pavian CLI opt-in is recorded without adding a pipeline module", {
   expect_equal(cfg$pavian$sankey$ranks, c("D", "K", "P", "C", "O", "F", "G", "S"))
 })
 
+test_that("disabled Sankey configuration remains explicit and validated", {
+  config_path <- file.path("..", "fixtures", "synthetic_minimap2",
+                           "config_sankey_disabled.yml")
+  cfg <- load_config(config_path, cli_opts = list(modules = "kreport"))
+  expect_true(cfg$pavian$enabled)
+  expect_false(cfg$pavian$sankey$enabled)
+  expect_true(cfg$pavian$sankey$render_html)
+  expect_equal(cfg$pavian$sankey$ranks, c("D", "K", "P"))
+})
+
 test_that("Requested module parsing preserves order and rejects invalid requests", {
   expect_error(parse_requested_modules(" qc,alpha shared\tkreport "), "strict comma-separated")
   expect_error(parse_requested_modules("qc,qc"), "Duplicate module name")

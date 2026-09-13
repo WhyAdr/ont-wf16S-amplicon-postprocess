@@ -1,0 +1,33 @@
+schema_version: 1
+project_name: "synthetic_minimap2_sankey_disabled"
+mode: "single"
+seed: 42
+
+input:
+  abundance_table: "abundance_table_species.tsv"
+  metadata: null
+  params_json: "params.json"
+  wf16s_output_root: "."
+  tax_column: "tax"
+  aggregate_columns: ["total"]
+  assignments:
+    synthetic_minimap2: "reads_assignments/synthetic_minimap2_lineages.minimap2.assignments.tsv.gz"
+
+output:
+  base_dir: "output_synthetic_sankey_disabled"
+
+taxonomy:
+  cache: "taxonomy_cache.json"
+  network_mode: "cache_only"
+  unresolved_policy: "warn"
+  email_env: "NCBI_EMAIL"
+  api_key_env: "NCBI_API_KEY"
+
+pavian:
+  enabled: true
+  render_html: true
+  sankey:
+    enabled: false
+    render_html: true
+    ranks: ["D", "K", "P"]
+    max_taxa_per_rank: 2
