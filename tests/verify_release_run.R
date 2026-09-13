@@ -49,6 +49,63 @@ array_strings <- function(value, path) {
 
 sha256_file <- function(path) digest::digest(file = path, algo = "sha256")
 
+source_scope_allowed <- function(relative) {
+  if (identical(relative, "config.example.yml") ||
+      relative %in% c("VERSION", "renv.lock", ".Rprofile", "renv/activate.R",
+                      "renv/settings.json")) return(TRUE)
+  if (startsWith(relative, "analysis/vendor/krona-2.8.1/")) return(TRUE)
+  startsWith(relative, "analysis/") && grepl("[.](R|r|py|json|ya?ml)$", relative, perl = TRUE)
+}
+
+independent_source_inventory <- function(root) {
+  scope <- c("analysis", "config.example.yml", "VERSION", "renv.lock", ".Rprofile",
+             "renv/activate.R", "renv/settings.json")
+  listed <- processx::run(
+    "git", c("-c", paste0("safe.directory=", root), "-C", root, "ls-files", "--", scope),
+    error_on_status = FALSE
+  )
+  if (!identical(listed$status, 0L)) {
+    stop(sprintf("Could not enumerate maintained source files: %s", trimws(listed$stderr)))
+  }
+  relative <- strsplit(trimws(listed$stdout), "\\r?\\n", perl = TRUE)[[1]]
+  relative <- sort(relative[nzchar(relative) & vapply(relative, source_scope_allowed, logical(1))],
+                   method = "radix")
+  if (!length(relative) || anyDuplicated(relative) || anyDuplicated(tolower(relative)) ||
+      any(grepl("\\\\|(^|/)[.]{1,2}(/|$)|^/|^[A-Za-z]:|[[:cntrl:]]", relative,
+                perl = TRUE))) {
+    stop("Independent source inventory contains unsafe, duplicate, or empty paths.")
+  }
+  records <- lapply(relative, function(rel) {
+    path <- file.path(root, rel)
+    if (!file.exists(path) || dir.exists(path)) stop(sprintf("Missing maintained source file: %s", rel))
+    current <- root
+    for (part in strsplit(rel, "/", fixed = TRUE)[[1]]) {
+      current <- file.path(current, part)
+      link_target <- tryCatch(Sys.readlink(current), error = function(e) "")
+      if (length(link_target) == 1L && nzchar(link_target)) {
+        stop(sprintf("Maintained source file is symlinked: %s", rel))
+      }
+    }
+    list(path = rel, sha256 = sha256_file(path))
+  })
+  canonical_lines <- vapply(records, function(record) paste(record$path, record$sha256, sep = "\t"), character(1))
+  list(records = records,
+       digest = digest::digest(paste(canonical_lines, collapse = "\n"),
+                               algo = "sha256", serialize = FALSE))
+}
+
+assert_source_inventory_matches <- function(manifest, expected) {
+  records <- require_json_array(manifest$source_files, "source_files")
+  actual <- lapply(records, function(record) list(
+    path = as.character(record$path), sha256 = as.character(record$sha256)
+  ))
+  if (!identical(actual, expected$records)) stop("Manifest source_files does not match independent inventory.")
+  if (!identical(as.character(manifest$source_digest_sha256), expected$digest)) {
+    stop("Manifest source_digest_sha256 does not match independent inventory.")
+  }
+  invisible(TRUE)
+}
+
 resolve_run_artifact <- function(root, relative) {
   if (!is.character(relative) || length(relative) != 1L || is.na(relative) ||
       !nzchar(relative) || grepl("\\\\", relative)) {
@@ -111,7 +168,7 @@ assert_exact_sample_order <- function(data, expected_order, column, label) {
 stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(manifest$mode %in% c("single", "cohort"))
 stopifnot(identical(manifest$schema_version, 2L))
-stopifnot(identical(manifest$schema_revision, 2L))
+stopifnot(identical(manifest$schema_revision, 3L))
 stopifnot(is.character(manifest$transaction_id), length(manifest$transaction_id) == 1L,
           grepl("^tx-[0-9a-f]{64}$", manifest$transaction_id))
 stopifnot(identical(manifest$config_schema_version, 1L))
@@ -125,6 +182,8 @@ stopifnot(identical(manifest$git_commit, expected_git_commit))
 stopifnot(identical(manifest$git_dirty, FALSE))
 stopifnot(identical(manifest$cli$allow_dirty, FALSE))
 stopifnot(identical(manifest$cli$allow_unlocked, FALSE))
+stopifnot(identical(manifest$cli$allow_large_workload, FALSE))
+stopifnot(identical(manifest$cli$online_preflight, FALSE))
 stopifnot(grepl("^R version 4[.]", manifest$interpreter$r))
 stopifnot(grepl("Python 3[.]12", manifest$interpreter$python))
 stopifnot(identical(manifest$cli$refresh_taxonomy, FALSE))
@@ -134,6 +193,8 @@ stopifnot(identical(manifest$upstream_contract$database_set, "ncbi_16s_18s_28s_I
 stopifnot(identical(manifest$upstream_contract$taxonomic_rank, "S"))
 stopifnot(is.null(manifest$upstream_contract$workflow_version))
 stopifnot(is.null(manifest$upstream_contract$workflow_revision))
+independent_sources <- independent_source_inventory(repo_root)
+assert_source_inventory_matches(manifest, independent_sources)
 
 # Expected module set completeness and status verification.  The registry is
 # fixed so a release manifest cannot silently omit a maintained module.
@@ -150,6 +211,45 @@ invisible(require_json_array(manifest$package_versions, "package_versions"))
 owned_files <- array_strings(manifest$owned_outputs, "owned_outputs")
 preserved_files <- array_strings(manifest$preserved_unowned_outputs, "preserved_unowned_outputs")
 artifacts <- require_json_array(manifest$artifacts, "artifacts")
+
+verify_export_record <- function(name, record, cli_enabled, expected_provenance) {
+  if (!is.list(record) || is.null(record$enabled) || is.null(record$render_html) ||
+      !is.logical(record$enabled) || length(record$enabled) != 1L ||
+      !is.logical(record$render_html) || length(record$render_html) != 1L ||
+      !identical(isTRUE(record$enabled), isTRUE(cli_enabled))) {
+    stop(sprintf("Invalid exports.%s state.", name))
+  }
+  if (isTRUE(record$enabled)) {
+    if (!identical(as.character(record$provenance_path), expected_provenance)) {
+      stop(sprintf("Enabled exports.%s has an unexpected provenance path.", name))
+    }
+    if (!(expected_provenance %in% owned_files)) {
+      stop(sprintf("Enabled exports.%s provenance is not an owned artifact.", name))
+    }
+  } else if (!is.null(record$provenance_path)) {
+    stop(sprintf("Disabled exports.%s must use a null provenance_path.", name))
+  }
+  invisible(TRUE)
+}
+
+stopifnot(is.list(manifest$exports))
+verify_export_record("krona", manifest$exports$krona, manifest$cli$krona,
+                     "07_Kreport/krona/krona_provenance.json")
+verify_export_record("pavian", manifest$exports$pavian, manifest$cli$pavian,
+                     "07_Kreport/pavian/pavian_provenance.json")
+stopifnot(identical(as.character(manifest$exports$pavian$integration),
+                    "official_pavian_upload_plus_builtin_kraken_report_explorer"))
+stopifnot(identical(as.character(manifest$exports$pavian$official_pavian_compatibility),
+                    "kraken_report_input_contract_only"))
+owned_kreport_outputs <- array_strings(manifest$modules$kreport$outputs, "modules.kreport.outputs")
+if (!isTRUE(manifest$exports$krona$enabled) &&
+    any(startsWith(owned_kreport_outputs, "07_Kreport/krona/"))) {
+  stop("Krona outputs are owned although Krona is disabled.")
+}
+if (!isTRUE(manifest$exports$pavian$enabled) &&
+    any(startsWith(owned_kreport_outputs, "07_Kreport/pavian/"))) {
+  stop("Pavian outputs are owned although Pavian is disabled.")
+}
 artifact_paths <- vapply(artifacts, function(a) as.character(a$relative_path), character(1))
 stopifnot(setequal(tolower(artifact_paths), tolower(setdiff(owned_files, "run_manifest.json"))))
 for (art in artifacts) {
@@ -967,6 +1067,93 @@ if (isTRUE(manifest$cli$krona)) {
       stopifnot(is.null(record$html_sha256))
     }
   }
+}
+
+if (isTRUE(manifest$cli$pavian)) {
+  pavian_dir <- file.path(root, "07_Kreport", "pavian")
+  pavian_provenance_file <- file.path(pavian_dir, "pavian_provenance.json")
+  if (!file.exists(pavian_provenance_file)) {
+    stop("Pavian was enabled but '07_Kreport/pavian/pavian_provenance.json' is missing.")
+  }
+  pavian_provenance <- jsonlite::fromJSON(pavian_provenance_file, simplifyVector = FALSE)
+  stopifnot(identical(pavian_provenance$schema_version, 1L),
+            identical(pavian_provenance$path_basis, "run_dir"),
+            identical(pavian_provenance$integration,
+                      "official_pavian_upload_plus_builtin_kraken_report_explorer"),
+            identical(pavian_provenance$renderer, "builtin_kraken_report_explorer"),
+            identical(as.character(pavian_provenance$renderer_version), expected_pipeline_version),
+            identical(pavian_provenance$official_pavian_compatibility,
+                      "kraken_report_input_contract_only"),
+            identical(isTRUE(pavian_provenance$standalone_html),
+                      isTRUE(manifest$exports$pavian$render_html)))
+  expected_html_status <- if (isTRUE(manifest$exports$pavian$render_html)) "rendered" else "not_requested"
+  stopifnot(identical(as.character(pavian_provenance$html_status), expected_html_status))
+  pavian_records <- require_json_array(pavian_provenance$samples, "pavian_provenance.samples")
+  stopifnot(length(pavian_records) == length(release_samples))
+  record_ids <- vapply(pavian_records, function(record) as.character(record$sample_id), character(1))
+  stopifnot(identical(record_ids, release_samples))
+  sanitize_release_filename <- function(sample_id) gsub("[^A-Za-z0-9_.-]", "_", sample_id)
+  expected_json <- sort(paste0(vapply(release_samples, sanitize_release_filename, character(1)), ".pavian.json"))
+  expected_html <- if (isTRUE(manifest$exports$pavian$render_html)) {
+    sort(paste0(vapply(release_samples, sanitize_release_filename, character(1)), ".pavian.html"))
+  } else character(0)
+  stopifnot(identical(sort(list.files(pavian_dir, pattern = "[.]pavian[.]json$")), expected_json))
+  stopifnot(identical(sort(list.files(pavian_dir, pattern = "[.]pavian[.]html$")), expected_html))
+  resolution_file <- file.path(root, "07_Kreport", "taxonomy_resolution.tsv")
+  stopifnot(file.exists(resolution_file))
+  viewer_verifier <- file.path(repo_root, "analysis", "utils",
+                               "verify_kraken_viewer_correspondence.py")
+  stopifnot(file.exists(viewer_verifier))
+  python <- find_python()
+  for (record in pavian_records) {
+    sample_id <- as.character(record$sample_id)
+    accounting_row <- accounting[accounting$SampleID == sample_id, , drop = FALSE]
+    stopifnot(nrow(accounting_row) == 1L)
+    kreport_rel <- as.character(record$kreport_path)
+    json_rel <- as.character(record$json_path)
+    kreport_path <- resolve_run_artifact(root, kreport_rel)
+    json_path <- resolve_run_artifact(root, json_rel)
+    stopifnot(grepl("^07_Kreport/", kreport_rel), file.exists(kreport_path),
+              grepl("^07_Kreport/pavian/", json_rel), file.exists(json_path))
+    stopifnot(grepl("^[0-9a-f]{64}$", as.character(record$kreport_sha256)),
+              identical(sha256_file(kreport_path), as.character(record$kreport_sha256)))
+    stopifnot(grepl("^[0-9a-f]{64}$", as.character(record$json_sha256)),
+              identical(sha256_file(json_path), as.character(record$json_sha256)))
+    html_path <- NULL
+    html_arg <- character(0)
+    if (isTRUE(manifest$exports$pavian$render_html)) {
+      html_rel <- as.character(record$html_path)
+      html_path <- resolve_run_artifact(root, html_rel)
+      stopifnot(grepl("^07_Kreport/pavian/", html_rel), file.exists(html_path),
+                grepl("^[0-9a-f]{64}$", as.character(record$html_sha256)),
+                identical(sha256_file(html_path), as.character(record$html_sha256)))
+      html_arg <- c("--html", html_path)
+    } else {
+      stopifnot(is.null(record$html_path), is.null(record$html_sha256))
+    }
+    verifier_result <- processx::run(
+      python,
+      c(viewer_verifier, "--kreport", kreport_path, "--resolution-tsv", resolution_file,
+        "--sample-id", sample_id, "--json", json_path, html_arg,
+        "--expected-total", as.character(accounting_row$AbundanceTotal)),
+      error_on_status = FALSE
+    )
+    if (!identical(verifier_result$status, 0L)) {
+      stop(sprintf("Pavian correspondence verification failed for '%s': %s",
+                   sample_id, trimws(paste(verifier_result$stdout, verifier_result$stderr))))
+    }
+    payload <- jsonlite::fromJSON(json_path, simplifyVector = FALSE)
+    nodes <- payload$nodes %||% list()
+    statuses <- if (length(nodes)) vapply(nodes, function(node) as.character(node$status), character(1)) else character(0)
+    stopifnot(as.numeric(record$total_reads) == accounting_row$AbundanceTotal,
+              as.numeric(record$classified_reads) == accounting_row$AbundanceClassified,
+              as.numeric(record$unclassified_reads) == accounting_row$AbundanceUnclassified,
+              as.integer(record$resolved_nodes) == sum(statuses == "resolved"),
+              as.integer(record$unresolved_nodes) == sum(statuses == "unresolved"),
+              as.integer(record$conflicted_nodes) == sum(statuses == "conflicted"))
+  }
+} else {
+  stopifnot(is.null(manifest$exports$pavian$provenance_path))
 }
 
 # 4. Dataset-specific verification

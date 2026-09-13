@@ -1,5 +1,5 @@
 # =============================================================================
-# Module 07: Kraken Report (.kreport) and optional Krona export
+# Module 07: Kraken Report (.kreport), Krona export, and Pavian integration
 # =============================================================================
 
 suppressMessages({
@@ -125,6 +125,12 @@ run_kreport <- function(context) {
   krona_vendor <- NULL
   html_status <- if (render_html) "pending" else "not_requested"
   krona_records <- list()
+  pavian_cfg <- cfg$pavian %||% list(enabled = FALSE, render_html = TRUE)
+  pavian_enabled <- isTRUE(pavian_cfg$enabled)
+  pavian_render_html <- pavian_enabled && isTRUE(pavian_cfg$render_html)
+  pavian_dir <- file.path(kreport_dir, "pavian")
+  pavian_provenance_file <- file.path(pavian_dir, "pavian_provenance.json")
+  pavian_records <- list()
 
   if (krona_enabled) {
     dir.create(krona_dir, recursive = TRUE, showWarnings = FALSE)
@@ -148,6 +154,7 @@ run_kreport <- function(context) {
   lineages <- context$taxonomy$TaxonPath
 
   resolution_rows <- list()
+  sample_kreports <- list()
 
   for (s in samples) {
     counts_s <- count_matrix[, s]
@@ -167,6 +174,13 @@ run_kreport <- function(context) {
     out_file <- file.path(kreport_dir, sprintf("%s.kreport", sanitize_filename(s)))
     writeLines(kreport_lines, out_file)
     all_outputs <- c(all_outputs, out_file)
+    sample_kreports[[length(sample_kreports) + 1L]] <- list(
+      sample_id = s,
+      path = out_file,
+      total_reads = as.numeric(total_reads),
+      classified_reads = as.numeric(total_reads - uncl_reads),
+      unclassified_reads = as.numeric(uncl_reads)
+    )
 
     if (krona_enabled) {
       sample_filename <- sanitize_filename(s)
@@ -242,8 +256,96 @@ run_kreport <- function(context) {
   res_summary_file <- file.path(kreport_dir, "taxonomy_resolution.tsv")
   if (length(resolution_rows) > 0) {
     res_df <- do.call(rbind, resolution_rows)
-    write.table(res_df, res_summary_file, sep = "\t", row.names = FALSE, quote = FALSE)
-    all_outputs <- c(all_outputs, res_summary_file)
+  } else {
+    res_df <- data.frame(
+      SampleID = character(0), Depth = integer(0), RankCode = character(0),
+      NodeName = character(0), TaxonPath = character(0), TaxID = character(0),
+      Status = character(0), ResolutionSource = character(0),
+      stringsAsFactors = FALSE
+    )
+  }
+  res_df <- res_df[, c("SampleID", "Depth", "RankCode", "NodeName", "TaxonPath",
+                       "TaxID", "Status", "ResolutionSource"), drop = FALSE]
+  write.table(res_df, res_summary_file, sep = "\t", row.names = FALSE, quote = FALSE,
+              col.names = TRUE, na = "")
+  all_outputs <- c(all_outputs, res_summary_file)
+
+  if (pavian_enabled) {
+    dir.create(pavian_dir, recursive = TRUE, showWarnings = FALSE)
+    if (!dir.exists(pavian_dir)) {
+      stop(sprintf("Could not create Pavian output directory '%s'.", pavian_dir), call. = FALSE)
+    }
+    viewer_builder <- file.path(cfg$pipeline_root, "analysis", "utils", "kraken_report_viewer.py")
+    if (!file.exists(viewer_builder)) {
+      stop(sprintf("Builtin Kraken-report explorer not found: '%s'.", viewer_builder), call. = FALSE)
+    }
+    for (sample_record in sample_kreports) {
+      sample_filename <- sanitize_filename(sample_record$sample_id)
+      json_out <- file.path(pavian_dir, sprintf("%s.pavian.json", sample_filename))
+      html_out <- if (pavian_render_html) {
+        file.path(pavian_dir, sprintf("%s.pavian.html", sample_filename))
+      } else NULL
+      viewer_args <- c(
+        viewer_builder,
+        "--kreport", sample_record$path,
+        "--resolution-tsv", res_summary_file,
+        "--sample-id", sample_record$sample_id,
+        "--json-out", json_out,
+        "--expected-total", formatC(sample_record$total_reads, format = "f", digits = 0)
+      )
+      if (!is.null(html_out)) viewer_args <- c(viewer_args, "--html-out", html_out)
+      viewer_result <- processx::run(
+        command = python_cmd, args = viewer_args, echo = TRUE, error_on_status = FALSE
+      )
+      if (!identical(viewer_result$status, 0L)) {
+        detail <- trimws(paste(viewer_result$stderr, viewer_result$stdout))
+        stop(sprintf("Builtin Kraken-report explorer failed for sample '%s': %s",
+                     sample_record$sample_id, detail), call. = FALSE)
+      }
+      required_viewer_outputs <- c(json_out, html_out)
+      required_viewer_outputs <- required_viewer_outputs[!is.na(required_viewer_outputs)]
+      if (any(!file.exists(required_viewer_outputs))) {
+        stop(sprintf("Builtin Kraken-report explorer omitted output for sample '%s'.",
+                     sample_record$sample_id), call. = FALSE)
+      }
+      all_outputs <- c(all_outputs, required_viewer_outputs)
+      json_text <- jsonlite::fromJSON(json_out, simplifyVector = FALSE)
+      statuses <- vapply(json_text$nodes %||% list(), function(node) as.character(node$status), character(1))
+      pavian_records[[length(pavian_records) + 1L]] <- list(
+        sample_id = sample_record$sample_id,
+        total_reads = sample_record$total_reads,
+        classified_reads = sample_record$classified_reads,
+        unclassified_reads = sample_record$unclassified_reads,
+        resolved_nodes = sum(statuses == "resolved"),
+        unresolved_nodes = sum(statuses == "unresolved"),
+        conflicted_nodes = sum(statuses == "conflicted"),
+        kreport_path = krona_artifact_relpath(sample_record$path, cfg$output$base_dir),
+        kreport_sha256 = compute_file_hash(sample_record$path),
+        json_path = krona_artifact_relpath(json_out, cfg$output$base_dir),
+        json_sha256 = compute_file_hash(json_out),
+        html_path = if (!is.null(html_out)) krona_artifact_relpath(html_out, cfg$output$base_dir) else NULL,
+        html_sha256 = if (!is.null(html_out)) compute_file_hash(html_out) else NULL
+      )
+    }
+    pavian_provenance <- list(
+      schema_version = 1L,
+      path_basis = "run_dir",
+      integration = "official_pavian_upload_plus_builtin_kraken_report_explorer",
+      renderer = "builtin_kraken_report_explorer",
+      renderer_version = "0.4.7",
+      official_pavian_compatibility = "kraken_report_input_contract_only",
+      html_status = if (pavian_render_html) "rendered" else "not_requested",
+      standalone_html = isTRUE(pavian_render_html),
+      count_model = "direct abundance-table taxon counts plus canonical unclassified count",
+      denominator = "TotalReads",
+      classified_definition = "sum of direct positive-count classified taxonomy rows",
+      samples = json_array(pavian_records)
+    )
+    atomic_write_json(pavian_provenance, pavian_provenance_file)
+    if (!file.exists(pavian_provenance_file) || !isTRUE(file.info(pavian_provenance_file)$size > 0)) {
+      stop(sprintf("Pavian provenance was not written: '%s'.", pavian_provenance_file), call. = FALSE)
+    }
+    all_outputs <- c(all_outputs, pavian_provenance_file)
   }
 
   if (krona_enabled) {
@@ -290,13 +392,7 @@ run_kreport <- function(context) {
       render_html = render_html,
       samples = json_array(krona_records)
     )
-    jsonlite::write_json(
-      krona_provenance,
-      krona_provenance_file,
-      pretty = TRUE,
-      auto_unbox = TRUE,
-      null = "null"
-    )
+    atomic_write_json(krona_provenance, krona_provenance_file)
     if (!file.exists(krona_provenance_file) ||
         !isTRUE(file.info(krona_provenance_file)$size > 0)) {
       stop(sprintf("Krona provenance was not written: '%s'.", krona_provenance_file),

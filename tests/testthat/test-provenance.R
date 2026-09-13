@@ -43,12 +43,14 @@ test_that("source digest ignores generated Python bytecode", {
   writeBin(as.raw(c(0xCA, 0xFE, 0xBA, 0xBE)), generated)
   after <- source_provenance(repo_root)
   expect_identical(after$source_digest_sha256, before$source_digest_sha256)
-  expect_false(generated %in% as.character(before$source_files))
+  before_paths <- vapply(before$source_files, function(record) record$path, character(1))
+  expect_false("analysis/utils/__pycache__/digest-stability-test.pyc" %in% before_paths)
 })
 
 test_that("pinned Krona renderer assets are included in source provenance", {
   repo_root <- normalizePath(file.path("..", ".."), winslash = "/", mustWork = TRUE)
-  relative <- as.character(source_provenance(repo_root)$source_files)
+  relative <- vapply(source_provenance(repo_root)$source_files,
+                     function(record) record$path, character(1))
   expected <- file.path(
     "analysis", "vendor", "krona-2.8.1",
     c("SOURCE.json", "LICENSE.txt", "src/krona-2.0.js", "img/favicon.ico",

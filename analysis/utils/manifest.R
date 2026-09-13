@@ -51,6 +51,81 @@ is_utc_timestamp <- function(x) {
 
 array_values <- function(x) unname(vapply(x, function(item) as.character(item), character(1)))
 
+is_safe_repo_relative_posix <- function(path) {
+  is.character(path) && length(path) == 1L && !is.na(path) && nzchar(path) &&
+    !grepl("\\\\", path) && !grepl("^[A-Za-z]:|^/", path) &&
+    !grepl("(^|/)[.]{1,2}(/|$)", path) && !grepl("//", path) &&
+    !grepl("[[:cntrl:]]", path)
+}
+
+validate_source_inventory <- function(records, path = "source_files") {
+  assert_manifest_array(records, path)
+  paths <- character(0)
+  for (index in seq_along(records)) {
+    record <- records[[index]]
+    if (!is.list(record) || is.null(names(record))) {
+      manifest_fail(sprintf("%s[%d]", path, index), "expected an object.")
+    }
+    assert_manifest_scalar(record$path, sprintf("%s[%d].path", path, index), "character")
+    assert_manifest_scalar(record$sha256, sprintf("%s[%d].sha256", path, index), "character")
+    if (!is_safe_repo_relative_posix(record$path)) {
+      manifest_fail(sprintf("%s[%d].path", path, index), "expected a safe POSIX relative path.")
+    }
+    if (!grepl("^[0-9a-f]{64}$", record$sha256)) {
+      manifest_fail(sprintf("%s[%d].sha256", path, index), "expected lowercase SHA-256.")
+    }
+    paths <- c(paths, record$path)
+  }
+  if (anyDuplicated(paths) || anyDuplicated(tolower(paths))) {
+    manifest_fail(path, "paths must be unique and case-collision free.")
+  }
+  if (!identical(paths, sort(paths, method = "radix"))) {
+    manifest_fail(path, "records must be sorted by path.")
+  }
+  invisible(TRUE)
+}
+
+validate_manifest_exports <- function(exports, manifest) {
+  if (!is.list(exports) || is.null(names(exports))) manifest_fail("exports", "expected an object.")
+  for (name in c("krona", "pavian")) {
+    record <- exports[[name]]
+    path <- paste0("exports.", name)
+    if (!is.list(record) || is.null(names(record))) manifest_fail(path, "expected an object.")
+    assert_manifest_scalar(record$enabled, paste0(path, ".enabled"), "logical")
+    assert_manifest_scalar(record$render_html, paste0(path, ".render_html"), "logical")
+    assert_manifest_scalar(record$provenance_path, paste0(path, ".provenance_path"),
+                           "character", nullable = TRUE)
+    if (!is.null(record$provenance_path) &&
+        !is_safe_repo_relative_posix(record$provenance_path)) {
+      manifest_fail(paste0(path, ".provenance_path"), "expected a safe POSIX relative path.")
+    }
+    if (!isTRUE(record$enabled) && !is.null(record$provenance_path)) {
+      manifest_fail(paste0(path, ".provenance_path"), "disabled exports must use null.")
+    }
+    if (isTRUE(record$enabled) && is.null(record$provenance_path)) {
+      manifest_fail(paste0(path, ".provenance_path"), "enabled exports require a provenance path.")
+    }
+    if (identical(name, "pavian")) {
+      assert_manifest_scalar(record$integration, paste0(path, ".integration"), "character")
+      assert_manifest_scalar(record$official_pavian_compatibility,
+                             paste0(path, ".official_pavian_compatibility"), "character")
+      if (!identical(record$integration,
+                     "official_pavian_upload_plus_builtin_kraken_report_explorer")) {
+        manifest_fail(paste0(path, ".integration"), "unexpected integration identity.")
+      }
+      if (!identical(record$official_pavian_compatibility,
+                     "kraken_report_input_contract_only")) {
+        manifest_fail(paste0(path, ".official_pavian_compatibility"),
+                      "unexpected official Pavian compatibility identity.")
+      }
+      if (isTRUE(record$enabled) && !("kreport" %in% array_values(manifest$cli$modules))) {
+        manifest_fail(path, "Pavian export requires the kreport module.")
+      }
+    }
+  }
+  invisible(TRUE)
+}
+
 validate_manifest_fingerprint <- function(value, path) {
   if (!is.list(value) || is.null(names(value))) manifest_fail(path, "expected a fingerprint object.")
   for (field in c("path", "size_bytes", "mtime_utc", "sha256")) {
@@ -261,13 +336,17 @@ validate_manifest_v2_revision1 <- function(manifest, physical_root = NULL) {
   invisible(manifest)
 }
 
-validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
+validate_manifest_v2_revision_core <- function(manifest, physical_root = NULL,
+                                               revision = 2L, require_revision3 = FALSE) {
   if (!is.list(manifest) || is.null(names(manifest))) manifest_fail("<root>", "expected an object.")
   required <- c("pipeline", "pipeline_version", "schema_version", "schema_revision",
     "config_schema_version", "run_status", "start_time", "end_time", "duration_seconds",
     "samples", "command", "cli", "inputs", "modules", "owned_outputs", "preserved_unowned_outputs",
     "artifacts", "warnings", "package_versions", "environment", "output_root")
   missing <- setdiff(required, names(manifest))
+  if (isTRUE(require_revision3)) {
+    missing <- unique(c(missing, setdiff(c("source_files", "exports"), names(manifest))))
+  }
   if (length(missing)) manifest_fail("<root>", paste("missing required key(s):", paste(missing, collapse = ", ")))
 
   if (!is.null(manifest$transaction_id)) {
@@ -286,7 +365,9 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
     manifest_fail("pipeline_version", "expected SemVer.")
   }
   if (!identical(manifest$schema_version, 2L)) manifest_fail("schema_version", "expected integer 2.")
-  if (!identical(manifest$schema_revision, 2L)) manifest_fail("schema_revision", "expected integer 2.")
+  if (!identical(manifest$schema_revision, revision)) {
+    manifest_fail("schema_revision", sprintf("expected integer %d.", revision))
+  }
   if (!identical(manifest$config_schema_version, 1L)) manifest_fail("config_schema_version", "expected integer 1.")
 
   if (!is.character(manifest$run_status) || length(manifest$run_status) != 1L || is.na(manifest$run_status) ||
@@ -320,6 +401,7 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
   }
   assert_manifest_scalar(manifest$source_digest_sha256, "source_digest_sha256", "character")
   if (!grepl("^[0-9a-f]{64}$", manifest$source_digest_sha256)) manifest_fail("source_digest_sha256", "expected SHA-256.")
+  if (isTRUE(require_revision3)) validate_source_inventory(manifest$source_files)
 
   for (field in c("samples", "owned_outputs", "preserved_unowned_outputs", "warnings")) {
     assert_manifest_array(manifest[[field]], field, "character")
@@ -344,12 +426,15 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
   requested <- array_values(manifest$cli$modules)
   if (!length(requested)) manifest_fail("cli.modules", "expected non-empty requested modules array.")
   if (anyDuplicated(requested)) manifest_fail("cli.modules", "module names must be unique.")
-  for (field in c("validate_only", "keep_going", "overwrite", "allow_unlocked", "allow_dirty",
-                  "online_preflight", "refresh_taxonomy", "krona")) {
+  cli_fields <- c("validate_only", "keep_going", "overwrite", "allow_unlocked", "allow_dirty",
+                  "online_preflight", "refresh_taxonomy", "krona")
+  if (isTRUE(require_revision3)) cli_fields <- c(cli_fields, "allow_large_workload", "pavian")
+  for (field in cli_fields) {
     if (!is.logical(manifest$cli[[field]]) || length(manifest$cli[[field]]) != 1L || is.na(manifest$cli[[field]])) {
       manifest_fail(paste0("cli.", field), "expected one logical value.")
     }
   }
+  if (isTRUE(require_revision3)) validate_manifest_exports(manifest$exports, manifest)
 
   # Inputs validation
   if (!is.list(manifest$inputs) || is.null(names(manifest$inputs))) manifest_fail("inputs", "expected an object.")
@@ -647,10 +732,22 @@ validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
   invisible(manifest)
 }
 
+validate_manifest_v2_revision2 <- function(manifest, physical_root = NULL) {
+  validate_manifest_v2_revision_core(manifest, physical_root = physical_root,
+                                     revision = 2L, require_revision3 = FALSE)
+}
+
+validate_manifest_v2_revision3 <- function(manifest, physical_root = NULL) {
+  validate_manifest_v2_revision_core(manifest, physical_root = physical_root,
+                                     revision = 3L, require_revision3 = TRUE)
+}
+
 validate_manifest_v2 <- function(manifest, physical_root = NULL) {
   if (!is.list(manifest) || is.null(names(manifest))) manifest_fail("<root>", "expected an object.")
   rev <- manifest$schema_revision
-  if (identical(rev, 2L)) {
+  if (identical(rev, 3L)) {
+    validate_manifest_v2_revision3(manifest, physical_root = physical_root)
+  } else if (identical(rev, 2L)) {
     validate_manifest_v2_revision2(manifest, physical_root = physical_root)
   } else if (identical(rev, 1L)) {
     validate_manifest_v2_revision1(manifest, physical_root = physical_root)

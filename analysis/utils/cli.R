@@ -32,7 +32,14 @@ get_cli_parser <- function() {
       action = "store_true",
       default = FALSE,
       dest = "krona",
-      help = "Enable Krona-compatible TSV output; optional HTML rendering requires KronaTools ktImportText"
+      help = "Enable Krona export; builtin offline HTML is the default renderer"
+    ),
+    optparse::make_option(
+      c("--pavian"),
+      action = "store_true",
+      default = FALSE,
+      dest = "pavian",
+      help = "Enable official-Pavian-compatible kreport integration plus the builtin offline Kraken-report explorer"
     ),
     optparse::make_option(
       c("--validate-only"),

@@ -52,6 +52,9 @@ if (length(invalid_modules)) fatal("Configuration error", simpleError(sprintf(
 if (isTRUE(cfg$krona$enabled) && !("kreport" %in% requested_modules)) {
   fatal("Configuration error", simpleError("Krona export requires the 'kreport' module."))
 }
+if (isTRUE(cfg$pavian$enabled) && !("kreport" %in% requested_modules)) {
+  fatal("Configuration error", simpleError("Pavian export requires the 'kreport' module."))
+}
 
 # All release gates run before output mutation or large input parsing.
 tryCatch(validate_output_root(cfg, repo_root), error = function(e) fatal("Preflight error", e))
@@ -470,6 +473,33 @@ for (name in names(module_results)) {
 owned <- sort(unique(c("resolved_config.yml", "session_info.txt", names(module_output_relpaths))))
 owned_with_manifest <- sort(c(owned, "run_manifest.json"))
 
+export_provenance_path <- function(enabled, relative_path, label) {
+  if (!isTRUE(enabled)) return(NULL)
+  if (!(relative_path %in% owned)) {
+    fatal("Manifest export error", simpleError(sprintf(
+      "%s was enabled but its provenance output '%s' was not produced.", label, relative_path)))
+  }
+  relative_path
+}
+krona_enabled <- isTRUE(cfg$krona$enabled)
+pavian_enabled <- isTRUE(cfg$pavian$enabled)
+exports <- list(
+  krona = list(
+    enabled = krona_enabled,
+    render_html = krona_enabled && isTRUE(cfg$krona$render_html),
+    provenance_path = export_provenance_path(
+      krona_enabled, "07_Kreport/krona/krona_provenance.json", "Krona export")
+  ),
+  pavian = list(
+    enabled = pavian_enabled,
+    render_html = pavian_enabled && isTRUE(cfg$pavian$render_html),
+    provenance_path = export_provenance_path(
+      pavian_enabled, "07_Kreport/pavian/pavian_provenance.json", "Pavian export"),
+    integration = "official_pavian_upload_plus_builtin_kraken_report_explorer",
+    official_pavian_compatibility = "kraken_report_input_contract_only"
+  )
+)
+
 # Verify physical stage census before building artifacts array and manifest
 tryCatch(verify_physical_file_census(stage, owned_with_manifest, preserved_unowned_outputs),
          error = function(e) fatal("Physical stage census error", e))
@@ -494,7 +524,8 @@ manifest <- list(
   transaction_id = transaction_id,
   git_commit = source_info$git_commit, git_dirty = source_info$git_dirty,
   source_digest_sha256 = source_info$source_digest_sha256,
-  schema_version = 2L, schema_revision = 2L, config_schema_version = cfg$schema_version,
+  source_files = source_info$source_files,
+  schema_version = 2L, schema_revision = 3L, config_schema_version = cfg$schema_version,
   run_status = if (any_failed) "failed" else "completed",
   start_time = utc_timestamp(start_time), end_time = utc_timestamp(end_time),
   duration_seconds = as.numeric(difftime(end_time, start_time, units = "secs")),
@@ -502,6 +533,7 @@ manifest <- list(
   samples = json_array(context$samples), config_file = cfg$config_file,
   output_root = final_root, command = json_array(commandArgs(trailingOnly = FALSE)),
   cli = utils::modifyList(cfg$cli, list(modules = json_array(requested_modules))),
+  exports = exports,
   inputs = full_inventory, upstream_contract = context$upstream_contract,
   modules = lapply(module_results, manifest_module_record),
   owned_outputs = json_array(owned_with_manifest),

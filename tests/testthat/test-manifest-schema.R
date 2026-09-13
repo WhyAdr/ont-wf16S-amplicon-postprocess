@@ -231,14 +231,43 @@ make_manifest_revision2_fixture <- function(samples = "S1", modules = c("qc")) {
   )
 }
 
+make_manifest_revision3_fixture <- function(samples = "S1", modules = c("qc")) {
+  manifest <- make_manifest_revision2_fixture(samples = samples, modules = modules)
+  manifest$schema_revision <- 3L
+  manifest$source_files <- json_array(list(list(
+    path = "analysis/fixture.R",
+    sha256 = paste(rep("e", 64L), collapse = "")
+  )))
+  manifest$cli$allow_large_workload <- FALSE
+  manifest$cli$pavian <- FALSE
+  manifest$exports <- list(
+    krona = list(enabled = FALSE, render_html = TRUE, provenance_path = NULL),
+    pavian = list(
+      enabled = FALSE, render_html = TRUE, provenance_path = NULL,
+      integration = "official_pavian_upload_plus_builtin_kraken_report_explorer",
+      official_pavian_compatibility = "kraken_report_input_contract_only"
+    )
+  )
+  manifest
+}
+
 test_that("manifest v2 revision 2 validates correctly and rejects invalid states", {
   manifest <- make_manifest_revision2_fixture()
   expect_no_error(validate_manifest_v2(manifest))
 
   # Unsupported revision
   manifest_bad_rev <- manifest
-  manifest_bad_rev$schema_revision <- 3L
+  manifest_bad_rev$schema_revision <- 4L
   expect_error(validate_manifest_v2(manifest_bad_rev), "unsupported schema revision")
+
+  manifest_rev3 <- make_manifest_revision3_fixture()
+  expect_no_error(validate_manifest_v2(manifest_rev3))
+  manifest_rev3_bad_source <- manifest_rev3
+  manifest_rev3_bad_source$source_files[[1]]$path <- "../fixture.R"
+  expect_error(validate_manifest_v2(manifest_rev3_bad_source), "safe POSIX relative path")
+  manifest_rev3_bad_export <- manifest_rev3
+  manifest_rev3_bad_export$exports$pavian$integration <- "builtin_pavian"
+  expect_error(validate_manifest_v2(manifest_rev3_bad_export), "unexpected integration identity")
 
   # Census mismatch: unowned file in physical stage
   rogue_file <- file.path(manifest$output_root, "rogue.txt")

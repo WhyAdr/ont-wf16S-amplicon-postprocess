@@ -61,6 +61,15 @@ test_that("Krona CLI opt-in is recorded in config and manifest settings", {
   expect_true(cfg$cli$krona)
 })
 
+test_that("Pavian CLI opt-in is recorded without adding a pipeline module", {
+  config_path <- file.path("..", "..", "config.yml")
+  cfg <- load_config(config_path, cli_opts = list(pavian = TRUE))
+
+  expect_true(cfg$pavian$enabled)
+  expect_true(cfg$cli$pavian)
+  expect_false("pavian" %in% cfg$cli$modules)
+})
+
 test_that("Requested module parsing preserves order and rejects invalid requests", {
   expect_error(parse_requested_modules(" qc,alpha shared\tkreport "), "strict comma-separated")
   expect_error(parse_requested_modules("qc,qc"), "Duplicate module name")

@@ -94,6 +94,17 @@ validate_config <- function(cfg) {
   if (!cfg$krona$html_renderer %in% c("builtin", "kronatools", "auto")) {
     stop("'krona.html_renderer' must be 'builtin', 'kronatools', or 'auto'.", call. = FALSE)
   }
+  if (!is.list(cfg$pavian)) {
+    stop("'pavian' must be a configuration mapping.", call. = FALSE)
+  }
+  if (!is.logical(cfg$pavian$enabled) || length(cfg$pavian$enabled) != 1L ||
+      is.na(cfg$pavian$enabled)) {
+    stop("'pavian.enabled' must be true or false.", call. = FALSE)
+  }
+  if (!is.logical(cfg$pavian$render_html) || length(cfg$pavian$render_html) != 1L ||
+      is.na(cfg$pavian$render_html)) {
+    stop("'pavian.render_html' must be true or false.", call. = FALSE)
+  }
   if (!is.null(cfg$input$wf16s_output_root)) {
     assert_nonempty_string(cfg$input$wf16s_output_root, "input.wf16s_output_root")
   }
@@ -326,6 +337,10 @@ get_default_config <- function() {
       html_renderer = "builtin",
       executable = "ktImportText"
     ),
+    pavian = list(
+      enabled = FALSE,
+      render_html = TRUE
+    ),
     beta = list(
       distances = c("bray", "jaccard"),
       primary_distance = "bray",
@@ -428,6 +443,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   cli_refresh <- isTRUE(cli_opts$refresh_taxonomy) ||
     isTRUE(cli_opts[["refresh-taxonomy"]])
   cli_krona <- isTRUE(cli_opts$krona) || isTRUE(cli_opts[["krona"]])
+  cli_pavian <- isTRUE(cli_opts$pavian) || isTRUE(cli_opts[["pavian"]])
 
   if (identical(cfg$taxonomy$network_mode, "refresh") && !cli_refresh) {
     stop(paste(
@@ -452,6 +468,9 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
   if (cli_krona) {
     cfg$krona$enabled <- TRUE
   }
+  if (cli_pavian) {
+    cfg$pavian$enabled <- TRUE
+  }
 
   validate_config(cfg)
 
@@ -466,6 +485,7 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     online_preflight = isTRUE(cli_opts$online_preflight) || isTRUE(cli_opts[["online-preflight"]]),
     refresh_taxonomy = cli_refresh,
     krona = isTRUE(cfg$krona$enabled),
+    pavian = isTRUE(cfg$pavian$enabled),
     modules = requested_modules
   )
 

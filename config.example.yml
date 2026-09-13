@@ -81,12 +81,19 @@ faprotax:
   # Plot selection only; all non-zero functions remain in the TSV output.
   top_n_functions: 20
 
-# Optional Krona-compatible export from the kreport tree.
+# Optional Krona export from the kreport tree.
 krona:
   enabled: false
   render_html: true
   html_renderer: "builtin"  # builtin, kronatools, or auto
   executable: "ktImportText"
+
+# Optional official-Pavian-compatible kreport integration plus an original,
+# offline built-in Kraken-report explorer. The upstream Pavian Shiny app is
+# not bundled or relabeled by this pipeline.
+pavian:
+  enabled: false
+  render_html: true
 
 beta:
   distances: ["bray", "jaccard"]

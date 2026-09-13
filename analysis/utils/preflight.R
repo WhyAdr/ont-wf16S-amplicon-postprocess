@@ -250,6 +250,20 @@ source_file_allowed <- function(path) {
     grepl("[.](R|r|py|json|ya?ml)$", path, perl = TRUE)
 }
 
+source_path_is_symlinked <- function(path, repo_root) {
+  root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  normalized <- gsub("\\\\", "/", path)
+  if (!startsWith(normalized, paste0(root, "/"))) return(TRUE)
+  relative <- substring(normalized, nchar(root) + 2L)
+  current <- root
+  for (part in strsplit(relative, "/", fixed = TRUE)[[1]]) {
+    current <- file.path(current, part)
+    link_target <- tryCatch(Sys.readlink(current), error = function(e) "")
+    if (length(link_target) == 1L && nzchar(link_target)) return(TRUE)
+  }
+  FALSE
+}
+
 is_krona_vendor_file <- function(path, repo_root) {
   vendor_root <- normalizePath(file.path(repo_root, "analysis", "vendor", "krona-2.8.1"),
                                winslash = "/", mustWork = FALSE)
@@ -278,14 +292,33 @@ maintained_source_files <- function(repo_root) {
   candidates <- candidates[file.exists(candidates) & !dir.exists(candidates) &
     (source_file_allowed(candidates) | vapply(candidates, is_krona_vendor_file,
                                                logical(1), repo_root = root))]
-  sort(normalizePath(candidates, winslash = "/", mustWork = TRUE))
+  candidates <- gsub("\\\\", "/", candidates)
+  sort(candidates, method = "radix")
 }
 
 source_provenance <- function(repo_root) {
-  files <- maintained_source_files(repo_root)
-  relative <- substring(files, nchar(normalizePath(repo_root, winslash = "/")) + 2L)
-  entries <- paste(relative, vapply(files, compute_file_hash, character(1)), sep = "\t")
-  digest_value <- digest::digest(paste(entries, collapse = "\n"), algo = "sha256", serialize = FALSE)
+  root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  files <- maintained_source_files(root)
+  relative <- substring(files, nchar(root) + 2L)
+  if (any(!vapply(relative, is_safe_repo_relative_posix, logical(1)))) {
+    stop("Source provenance contains an unsafe repository-relative path.", call. = FALSE)
+  }
+  if (any(vapply(files, source_path_is_symlinked, logical(1), repo_root = root))) {
+    stop("Source provenance refuses symlinked producer files.", call. = FALSE)
+  }
+  hashes <- vapply(files, compute_file_hash, character(1))
+  ord <- order(relative, method = "radix")
+  relative <- relative[ord]
+  hashes <- hashes[ord]
+  if (anyDuplicated(relative) || anyDuplicated(tolower(relative))) {
+    stop("Source provenance contains duplicate or case-colliding paths.", call. = FALSE)
+  }
+  records <- lapply(seq_along(relative), function(index) {
+    list(path = relative[[index]], sha256 = hashes[[index]])
+  })
+  canonical_lines <- paste(relative, hashes, sep = "\t")
+  digest_value <- digest::digest(paste(canonical_lines, collapse = "\n"),
+                                 algo = "sha256", serialize = FALSE)
   git_commit <- NULL
   git_dirty <- NULL
   try({
@@ -303,7 +336,7 @@ source_provenance <- function(repo_root) {
     git_dirty <- !identical(dirty$status, 0L) || nzchar(trimws(status$stdout))
   }, silent = TRUE)
   list(git_commit = git_commit, git_dirty = git_dirty, source_digest_sha256 = digest_value,
-       source_files = json_array(relative))
+       source_files = json_array(records))
 }
 
 validate_output_root <- function(cfg, repo_root, extra_paths = character(0)) {
@@ -427,6 +460,25 @@ run_module_preflight <- function(context, modules) {
       if (!identical(validate$status, 0L)) {
         preflight_error("E_KRONA_PREFLIGHT", trimws(paste(validate$stderr, validate$stdout)))
       }
+    }
+  }
+  if (isTRUE(cfg$pavian$enabled)) {
+    viewer_builder <- file.path(cfg$pipeline_root, "analysis", "utils", "kraken_report_viewer.py")
+    if (!file.exists(viewer_builder)) {
+      preflight_error("E_PAVIAN_PREFLIGHT", sprintf(
+        "Builtin Kraken-report explorer is missing: '%s'.", viewer_builder))
+    }
+    python <- tryCatch(find_python(), error = function(e) {
+      preflight_error("E_PAVIAN_PREFLIGHT", e$message)
+    })
+    compile <- processx::run(
+      python,
+      c("-c", "import ast, sys; p = sys.argv[1]; ast.parse(open(p, 'rb').read(), filename=p)",
+        viewer_builder),
+      error_on_status = FALSE
+    )
+    if (!identical(compile$status, 0L)) {
+      preflight_error("E_PAVIAN_PREFLIGHT", trimws(paste(compile$stderr, compile$stdout)))
     }
   }
   invisible(warnings)

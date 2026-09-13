@@ -212,7 +212,8 @@ validate_prior_output <- function(final_root, overwrite) {
                             full.names = FALSE)
   prior_files <- prior_files[!dir.exists(file.path(final_root, prior_files))]
   current_contract <- identical(prior$schema_version, 2L) &&
-    (identical(prior$schema_revision, 1L) || identical(prior$schema_revision, 2L)) &&
+    (identical(prior$schema_revision, 1L) || identical(prior$schema_revision, 2L) ||
+     identical(prior$schema_revision, 3L)) &&
     !is.null(prior$owned_outputs) &&
     is.list(prior$environment) && !is.null(prior$environment$library_paths) &&
     !is.null(prior$environment$package_locations)

@@ -149,6 +149,19 @@ normalize_krona_path <- function(path, index) {
   paste(labels, collapse = "\t")
 }
 
+validate_kreport_label <- function(label, index, context = "Kreport") {
+  if (!is.character(label) || length(label) != 1L || is.na(label) || !nzchar(label)) {
+    stop(sprintf("%s taxonomy label at row %d is empty or invalid.", context, index),
+         call. = FALSE)
+  }
+  if (grepl("[[:cntrl:]]", label, perl = TRUE) || grepl("^[ ]", label, perl = TRUE)) {
+    stop(sprintf(
+      "%s taxonomy label at row %d contains a control character or ambiguous leading indentation.",
+      context, index), call. = FALSE)
+  }
+  label
+}
+
 format_krona_magnitude <- function(value) {
   trimws(formatC(value, format = "f", digits = 0))
 }
@@ -511,6 +524,15 @@ render_builtin_krona_html <- function(python_cmd, builder_path, vendor_dir,
 }
 
 format_kreport_lines <- function(nodes_sorted, total_reads, uncl_reads, taxid_cache = list()) {
+  if (!is.numeric(total_reads) || length(total_reads) != 1L || !is.finite(total_reads) ||
+      total_reads <= 0 || total_reads != round(total_reads)) {
+    stop("Kreport total_reads must be a positive finite integer.", call. = FALSE)
+  }
+  if (!is.numeric(uncl_reads) || length(uncl_reads) != 1L || !is.finite(uncl_reads) ||
+      uncl_reads < 0 || uncl_reads != round(uncl_reads) || uncl_reads > total_reads) {
+    stop("Kreport unclassified reads must be a finite non-negative integer not exceeding total_reads.",
+         call. = FALSE)
+  }
   cl_reads <- total_reads - uncl_reads
 
   lines <- character(nrow(nodes_sorted) + 2)
@@ -524,6 +546,7 @@ format_kreport_lines <- function(nodes_sorted, total_reads, uncl_reads, taxid_ca
                       100 * cl_reads / total_reads, cl_reads, 0L)
 
   for (i in seq_len(nrow(nodes_sorted))) {
+    validate_kreport_label(nodes_sorted$name[i], i + 2L)
     indent <- strrep("  ", nodes_sorted$depth[i])
     p <- nodes_sorted$path[i]
     taxid <- taxid_cache[[p]]
