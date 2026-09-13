@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-13
+
+### Added
+
+- Add a deterministic, stdlib-only taxonomy Sankey renderer with persistent
+  residual lanes, ancestral closure, exact visual ordering, safe integer
+  validation, and canonical UTF-8 JSON output.
+- Add the offline vanilla-JavaScript/SVG Sankey client with transient rank and
+  top-N views, search, percentages, keyboard-accessible nodes, and downloads.
+- Add an independent correspondence verifier, 9,840-node stress coverage,
+  zero-classified and disabled-state fixtures, and cross-OS canonical-byte CI.
+
+### Changed
+
+- Extend Pavian provenance to schema 2 and manifest schema v2 revision 4 with
+  effective parent/child Sankey states, taxonomy-resolution hashes, sample
+  artifact hashes, and explicit Sankey configuration.
+- Keep `.kreport` as the official Pavian interoperability artifact; the built-in
+  explorer and Sankey remain clearly labeled original offline renderers.
+
+### Fixed
+
+- Gate Sankey generation on both `pavian.enabled` and `pavian.sankey.enabled`,
+  and gate Sankey HTML on both effective HTML settings.
+- Replace locale-sensitive JavaScript ordering and reject unsafe browser/network
+  capabilities in standalone Sankey documents.
+
 ## [0.4.7] - 2026-09-13
 
 ### Added
