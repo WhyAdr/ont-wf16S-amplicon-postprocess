@@ -125,10 +125,20 @@ run_kreport <- function(context) {
   krona_vendor <- NULL
   html_status <- if (render_html) "pending" else "not_requested"
   krona_records <- list()
-  pavian_cfg <- cfg$pavian %||% list(enabled = FALSE, render_html = TRUE)
+  pavian_cfg <- cfg$pavian %||% list(
+    enabled = FALSE, render_html = TRUE,
+    sankey = list(enabled = TRUE, render_html = TRUE,
+                  ranks = c("D", "K", "P", "C", "O", "F", "G", "S"),
+                  max_taxa_per_rank = 10L)
+  )
   pavian_enabled <- isTRUE(pavian_cfg$enabled)
   pavian_render_html <- pavian_enabled && isTRUE(pavian_cfg$render_html)
+  pavian_sankey_cfg <- pavian_cfg$sankey
+  pavian_sankey_enabled <- pavian_enabled && isTRUE(pavian_sankey_cfg$enabled)
+  pavian_sankey_render_html <- pavian_sankey_enabled && pavian_render_html &&
+    isTRUE(pavian_sankey_cfg$render_html)
   pavian_dir <- file.path(kreport_dir, "pavian")
+  pavian_sankey_dir <- file.path(pavian_dir, "sankey")
   pavian_provenance_file <- file.path(pavian_dir, "pavian_provenance.json")
   pavian_records <- list()
 
@@ -279,6 +289,20 @@ run_kreport <- function(context) {
     if (!file.exists(viewer_builder)) {
       stop(sprintf("Builtin Kraken-report explorer not found: '%s'.", viewer_builder), call. = FALSE)
     }
+    sankey_builder <- file.path(cfg$pipeline_root, "analysis", "utils", "taxonomy_sankey_renderer.py")
+    sankey_verifier <- file.path(cfg$pipeline_root, "analysis", "utils",
+                                 "verify_taxonomy_sankey_correspondence.py")
+    if (pavian_sankey_enabled && (!file.exists(sankey_builder) || !file.exists(sankey_verifier))) {
+      stop("Builtin taxonomy Sankey renderer or independent verifier is missing.", call. = FALSE)
+    }
+    if (pavian_sankey_enabled) {
+      dir.create(pavian_sankey_dir, recursive = TRUE, showWarnings = FALSE)
+      if (!dir.exists(pavian_sankey_dir)) {
+        stop(sprintf("Could not create Sankey output directory '%s'.", pavian_sankey_dir), call. = FALSE)
+      }
+    }
+    sankey_rank_text <- paste(as.character(pavian_sankey_cfg$ranks), collapse = ",")
+    sankey_max_n <- as.integer(pavian_sankey_cfg$max_taxa_per_rank)
     for (sample_record in sample_kreports) {
       sample_filename <- sanitize_filename(sample_record$sample_id)
       json_out <- file.path(pavian_dir, sprintf("%s.pavian.json", sample_filename))
@@ -311,6 +335,55 @@ run_kreport <- function(context) {
       all_outputs <- c(all_outputs, required_viewer_outputs)
       json_text <- jsonlite::fromJSON(json_out, simplifyVector = FALSE)
       statuses <- vapply(json_text$nodes %||% list(), function(node) as.character(node$status), character(1))
+      sankey_json_out <- NULL
+      sankey_html_out <- NULL
+      if (pavian_sankey_enabled) {
+        sankey_json_out <- file.path(pavian_sankey_dir,
+                                     sprintf("%s.sankey.json", sample_filename))
+        sankey_html_out <- if (pavian_sankey_render_html) {
+          file.path(pavian_sankey_dir, sprintf("%s.sankey.html", sample_filename))
+        } else NULL
+        sankey_args <- c(
+          sankey_builder,
+          "--payload", json_out,
+          "--json-out", sankey_json_out,
+          "--ranks", sankey_rank_text,
+          "--max-taxa-per-rank", as.character(sankey_max_n)
+        )
+        if (!is.null(sankey_html_out)) sankey_args <- c(sankey_args, "--html-out", sankey_html_out)
+        sankey_result <- processx::run(
+          command = python_cmd, args = sankey_args, echo = TRUE, error_on_status = FALSE
+        )
+        if (!identical(sankey_result$status, 0L)) {
+          detail <- trimws(paste(sankey_result$stderr, sankey_result$stdout))
+          stop(sprintf("Builtin taxonomy Sankey renderer failed for sample '%s': %s",
+                       sample_record$sample_id, detail), call. = FALSE)
+        }
+        sankey_outputs <- c(sankey_json_out, sankey_html_out)
+        sankey_outputs <- sankey_outputs[!is.na(sankey_outputs)]
+        if (any(!file.exists(sankey_outputs))) {
+          stop(sprintf("Builtin taxonomy Sankey renderer omitted output for sample '%s'.",
+                       sample_record$sample_id), call. = FALSE)
+        }
+        verifier_args <- c(
+          sankey_verifier,
+          "--payload", json_out,
+          "--sankey-json", sankey_json_out,
+          "--ranks", sankey_rank_text,
+          "--max-taxa-per-rank", as.character(sankey_max_n),
+          "--renderer-version", as.character(json_text$renderer_version)
+        )
+        if (!is.null(sankey_html_out)) verifier_args <- c(verifier_args, "--sankey-html", sankey_html_out)
+        verifier_result <- processx::run(
+          command = python_cmd, args = verifier_args, echo = TRUE, error_on_status = FALSE
+        )
+        if (!identical(verifier_result$status, 0L)) {
+          detail <- trimws(paste(verifier_result$stderr, verifier_result$stdout))
+          stop(sprintf("Independent taxonomy Sankey verification failed for sample '%s': %s",
+                       sample_record$sample_id, detail), call. = FALSE)
+        }
+        all_outputs <- c(all_outputs, sankey_outputs)
+      }
       pavian_records[[length(pavian_records) + 1L]] <- list(
         sample_id = sample_record$sample_id,
         total_reads = sample_record$total_reads,
@@ -324,21 +397,55 @@ run_kreport <- function(context) {
         json_path = krona_artifact_relpath(json_out, cfg$output$base_dir),
         json_sha256 = compute_file_hash(json_out),
         html_path = if (!is.null(html_out)) krona_artifact_relpath(html_out, cfg$output$base_dir) else NULL,
-        html_sha256 = if (!is.null(html_out)) compute_file_hash(html_out) else NULL
+        html_sha256 = if (!is.null(html_out)) compute_file_hash(html_out) else NULL,
+        sankey_json_path = if (!is.null(sankey_json_out)) {
+          krona_artifact_relpath(sankey_json_out, cfg$output$base_dir)
+        } else NULL,
+        sankey_json_sha256 = if (!is.null(sankey_json_out)) compute_file_hash(sankey_json_out) else NULL,
+        sankey_html_path = if (!is.null(sankey_html_out)) {
+          krona_artifact_relpath(sankey_html_out, cfg$output$base_dir)
+        } else NULL,
+        sankey_html_sha256 = if (!is.null(sankey_html_out)) compute_file_hash(sankey_html_out) else NULL
       )
     }
     pavian_provenance <- list(
-      schema_version = 1L,
+      schema_version = 2L,
       path_basis = "run_dir",
-      integration = "official_pavian_upload_plus_builtin_kraken_report_explorer",
+      integration = if (pavian_sankey_enabled) {
+        "official_pavian_upload_plus_builtin_taxonomy_viewers"
+      } else {
+        "official_pavian_upload_plus_builtin_kraken_report_explorer"
+      },
       renderer = "builtin_kraken_report_explorer",
-      renderer_version = "0.4.7",
+      renderer_version = as.character(json_text$renderer_version %||% NA_character_),
       official_pavian_compatibility = "kraken_report_input_contract_only",
       html_status = if (pavian_render_html) "rendered" else "not_requested",
       standalone_html = isTRUE(pavian_render_html),
+      effective = list(
+        pavian_enabled = isTRUE(pavian_enabled),
+        pavian_html = isTRUE(pavian_render_html),
+        sankey_enabled = isTRUE(pavian_sankey_enabled),
+        sankey_html = isTRUE(pavian_sankey_render_html)
+      ),
       count_model = "direct abundance-table taxon counts plus canonical unclassified count",
       denominator = "TotalReads",
       classified_definition = "sum of direct positive-count classified taxonomy rows",
+      taxonomy_resolution = list(
+        path = krona_artifact_relpath(res_summary_file, cfg$output$base_dir),
+        sha256 = compute_file_hash(res_summary_file)
+      ),
+      sankey = list(
+        enabled = isTRUE(pavian_sankey_enabled),
+        render_html = isTRUE(pavian_sankey_render_html),
+        renderer = "builtin_taxonomy_sankey",
+        renderer_version = as.character(json_text$renderer_version %||% NA_character_),
+        schema_version = 1L,
+        ranks = json_array(pavian_sankey_cfg$ranks),
+        max_taxa_per_rank = as.integer(sankey_max_n),
+        count_model = "classified clade-read flow with persistent explicit residual lanes",
+        denominator = "TotalReads",
+        html_status = if (pavian_sankey_render_html) "rendered" else "not_requested"
+      ),
       samples = json_array(pavian_records)
     )
     atomic_write_json(pavian_provenance, pavian_provenance_file)

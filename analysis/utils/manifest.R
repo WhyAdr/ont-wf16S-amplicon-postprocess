@@ -126,6 +126,84 @@ validate_manifest_exports <- function(exports, manifest) {
   invisible(TRUE)
 }
 
+validate_manifest_exports_revision4 <- function(exports, manifest) {
+  if (!is.list(exports) || is.null(names(exports))) manifest_fail("exports", "expected an object.")
+  for (name in c("krona", "pavian")) {
+    record <- exports[[name]]
+    path <- paste0("exports.", name)
+    if (!is.list(record) || is.null(names(record))) manifest_fail(path, "expected an object.")
+    assert_manifest_scalar(record$enabled, paste0(path, ".enabled"), "logical")
+    assert_manifest_scalar(record$render_html, paste0(path, ".render_html"), "logical")
+    assert_manifest_scalar(record$provenance_path, paste0(path, ".provenance_path"),
+                           "character", nullable = TRUE)
+    if (!is.null(record$provenance_path) &&
+        !is_safe_repo_relative_posix(record$provenance_path)) {
+      manifest_fail(paste0(path, ".provenance_path"), "expected a safe POSIX relative path.")
+    }
+    if (!isTRUE(record$enabled) && (!is.null(record$provenance_path) || isTRUE(record$render_html))) {
+      manifest_fail(path, "disabled exports must not advertise provenance or rendered HTML.")
+    }
+    if (isTRUE(record$enabled) && is.null(record$provenance_path)) {
+      manifest_fail(paste0(path, ".provenance_path"), "enabled exports require a provenance path.")
+    }
+    if (identical(name, "krona")) next
+
+    assert_manifest_scalar(record$integration, paste0(path, ".integration"), "character")
+    assert_manifest_scalar(record$official_pavian_compatibility,
+                           paste0(path, ".official_pavian_compatibility"), "character")
+    if (!identical(record$official_pavian_compatibility,
+                   "kraken_report_input_contract_only")) {
+      manifest_fail(paste0(path, ".official_pavian_compatibility"),
+                    "unexpected official Pavian compatibility identity.")
+    }
+    if (!isTRUE(record$enabled) && !identical(record$integration, "disabled")) {
+      manifest_fail(paste0(path, ".integration"), "disabled Pavian exports must use 'disabled'.")
+    }
+    sankey <- record$sankey
+    if (!is.list(sankey) || is.null(names(sankey))) {
+      manifest_fail(paste0(path, ".sankey"), "expected an effective Sankey configuration object.")
+    }
+    assert_manifest_scalar(sankey$enabled, paste0(path, ".sankey.enabled"), "logical")
+    assert_manifest_scalar(sankey$render_html, paste0(path, ".sankey.render_html"), "logical")
+    if (isTRUE(sankey$render_html) && (!isTRUE(record$enabled) || !isTRUE(record$render_html))) {
+      manifest_fail(paste0(path, ".sankey.render_html"),
+                    "Sankey HTML requires effective Pavian and Pavian HTML to be enabled.")
+    }
+    if (isTRUE(sankey$enabled) && !isTRUE(record$enabled)) {
+      manifest_fail(paste0(path, ".sankey.enabled"),
+                    "Sankey requires effective Pavian to be enabled.")
+    }
+    assert_manifest_array(sankey$ranks, paste0(path, ".sankey.ranks"), "character")
+    ranks <- array_values(sankey$ranks)
+    canonical_ranks <- c("D", "K", "P", "C", "O", "F", "G", "S")
+    if (length(ranks) < 2L || length(ranks) > length(canonical_ranks) ||
+        anyDuplicated(ranks) || any(!ranks %in% canonical_ranks) ||
+        any(diff(match(ranks, canonical_ranks)) <= 0)) {
+      manifest_fail(paste0(path, ".sankey.ranks"), "expected a canonical rank subsequence of length 2 through 8.")
+    }
+    if (!is.numeric(sankey$max_taxa_per_rank) || length(sankey$max_taxa_per_rank) != 1L ||
+        is.na(sankey$max_taxa_per_rank) || !is.finite(sankey$max_taxa_per_rank) ||
+        sankey$max_taxa_per_rank != floor(sankey$max_taxa_per_rank) ||
+        sankey$max_taxa_per_rank < 1 || sankey$max_taxa_per_rank > 100) {
+      manifest_fail(paste0(path, ".sankey.max_taxa_per_rank"), "expected an integer from 1 through 100.")
+    }
+    expected_integration <- if (isTRUE(sankey$enabled)) {
+      "official_pavian_upload_plus_builtin_taxonomy_viewers"
+    } else if (isTRUE(record$enabled)) {
+      "official_pavian_upload_plus_builtin_kraken_report_explorer"
+    } else {
+      "disabled"
+    }
+    if (!identical(record$integration, expected_integration)) {
+      manifest_fail(paste0(path, ".integration"), "unexpected v0.4.8 integration identity.")
+    }
+    if (isTRUE(record$enabled) && !("kreport" %in% array_values(manifest$cli$modules))) {
+      manifest_fail(path, "Pavian export requires the kreport module.")
+    }
+  }
+  invisible(TRUE)
+}
+
 validate_manifest_fingerprint <- function(value, path) {
   if (!is.list(value) || is.null(names(value))) manifest_fail(path, "expected a fingerprint object.")
   for (field in c("path", "size_bytes", "mtime_utc", "sha256")) {
@@ -337,14 +415,15 @@ validate_manifest_v2_revision1 <- function(manifest, physical_root = NULL) {
 }
 
 validate_manifest_v2_revision_core <- function(manifest, physical_root = NULL,
-                                               revision = 2L, require_revision3 = FALSE) {
+                                               revision = 2L, require_revision3 = FALSE,
+                                               require_revision4 = FALSE) {
   if (!is.list(manifest) || is.null(names(manifest))) manifest_fail("<root>", "expected an object.")
   required <- c("pipeline", "pipeline_version", "schema_version", "schema_revision",
     "config_schema_version", "run_status", "start_time", "end_time", "duration_seconds",
     "samples", "command", "cli", "inputs", "modules", "owned_outputs", "preserved_unowned_outputs",
     "artifacts", "warnings", "package_versions", "environment", "output_root")
   missing <- setdiff(required, names(manifest))
-  if (isTRUE(require_revision3)) {
+  if (isTRUE(require_revision3) || isTRUE(require_revision4)) {
     missing <- unique(c(missing, setdiff(c("source_files", "exports"), names(manifest))))
   }
   if (length(missing)) manifest_fail("<root>", paste("missing required key(s):", paste(missing, collapse = ", ")))
@@ -428,13 +507,19 @@ validate_manifest_v2_revision_core <- function(manifest, physical_root = NULL,
   if (anyDuplicated(requested)) manifest_fail("cli.modules", "module names must be unique.")
   cli_fields <- c("validate_only", "keep_going", "overwrite", "allow_unlocked", "allow_dirty",
                   "online_preflight", "refresh_taxonomy", "krona")
-  if (isTRUE(require_revision3)) cli_fields <- c(cli_fields, "allow_large_workload", "pavian")
+  if (isTRUE(require_revision3) || isTRUE(require_revision4)) {
+    cli_fields <- c(cli_fields, "allow_large_workload", "pavian")
+  }
   for (field in cli_fields) {
     if (!is.logical(manifest$cli[[field]]) || length(manifest$cli[[field]]) != 1L || is.na(manifest$cli[[field]])) {
       manifest_fail(paste0("cli.", field), "expected one logical value.")
     }
   }
-  if (isTRUE(require_revision3)) validate_manifest_exports(manifest$exports, manifest)
+  if (isTRUE(require_revision4)) {
+    validate_manifest_exports_revision4(manifest$exports, manifest)
+  } else if (isTRUE(require_revision3)) {
+    validate_manifest_exports(manifest$exports, manifest)
+  }
 
   # Inputs validation
   if (!is.list(manifest$inputs) || is.null(names(manifest$inputs))) manifest_fail("inputs", "expected an object.")
@@ -742,11 +827,19 @@ validate_manifest_v2_revision3 <- function(manifest, physical_root = NULL) {
                                      revision = 3L, require_revision3 = TRUE)
 }
 
+validate_manifest_v2_revision4 <- function(manifest, physical_root = NULL) {
+  validate_manifest_v2_revision_core(manifest, physical_root = physical_root,
+                                     revision = 4L, require_revision3 = TRUE,
+                                     require_revision4 = TRUE)
+}
+
 validate_manifest_v2 <- function(manifest, physical_root = NULL) {
   if (!is.list(manifest) || is.null(names(manifest))) manifest_fail("<root>", "expected an object.")
   rev <- manifest$schema_revision
   if (identical(rev, 3L)) {
     validate_manifest_v2_revision3(manifest, physical_root = physical_root)
+  } else if (identical(rev, 4L)) {
+    validate_manifest_v2_revision4(manifest, physical_root = physical_root)
   } else if (identical(rev, 2L)) {
     validate_manifest_v2_revision2(manifest, physical_root = physical_root)
   } else if (identical(rev, 1L)) {

@@ -94,6 +94,11 @@ krona:
 pavian:
   enabled: false
   render_html: true
+  sankey:
+    enabled: true
+    render_html: true
+    ranks: ["D", "K", "P", "C", "O", "F", "G", "S"]
+    max_taxa_per_rank: 10
 
 beta:
   distances: ["bray", "jaccard"]

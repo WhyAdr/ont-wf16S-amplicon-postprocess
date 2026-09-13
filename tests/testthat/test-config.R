@@ -68,6 +68,8 @@ test_that("Pavian CLI opt-in is recorded without adding a pipeline module", {
   expect_true(cfg$pavian$enabled)
   expect_true(cfg$cli$pavian)
   expect_false("pavian" %in% cfg$cli$modules)
+  expect_true(cfg$pavian$sankey$enabled)
+  expect_equal(cfg$pavian$sankey$ranks, c("D", "K", "P", "C", "O", "F", "G", "S"))
 })
 
 test_that("Requested module parsing preserves order and rejects invalid requests", {
@@ -142,6 +144,14 @@ test_that("Krona configuration values fail closed", {
   bad_range$composition$stacked_bar_min_taxa <- 16L
   bad_range$composition$stacked_bar_max_taxa <- 15L
   expect_error(validate_config(bad_range), "min_taxa")
+
+  bad_sankey <- get_default_config()
+  bad_sankey$pavian$sankey$ranks <- c("P", "D")
+  expect_error(validate_config(bad_sankey), "pavian.sankey.ranks")
+
+  bad_sankey_n <- get_default_config()
+  bad_sankey_n$pavian$sankey$max_taxa_per_rank <- 0L
+  expect_error(validate_config(bad_sankey_n), "pavian.sankey.max_taxa_per_rank")
 })
 
 test_that("Legacy scalar heatmap configuration migrates once", {

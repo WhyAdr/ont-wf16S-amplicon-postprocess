@@ -483,6 +483,16 @@ export_provenance_path <- function(enabled, relative_path, label) {
 }
 krona_enabled <- isTRUE(cfg$krona$enabled)
 pavian_enabled <- isTRUE(cfg$pavian$enabled)
+pavian_render_html <- pavian_enabled && isTRUE(cfg$pavian$render_html)
+sankey_enabled <- pavian_enabled && isTRUE(cfg$pavian$sankey$enabled)
+sankey_render_html <- sankey_enabled && pavian_render_html && isTRUE(cfg$pavian$sankey$render_html)
+pavian_integration <- if (sankey_enabled) {
+  "official_pavian_upload_plus_builtin_taxonomy_viewers"
+} else if (pavian_enabled) {
+  "official_pavian_upload_plus_builtin_kraken_report_explorer"
+} else {
+  "disabled"
+}
 exports <- list(
   krona = list(
     enabled = krona_enabled,
@@ -492,11 +502,17 @@ exports <- list(
   ),
   pavian = list(
     enabled = pavian_enabled,
-    render_html = pavian_enabled && isTRUE(cfg$pavian$render_html),
+    render_html = pavian_render_html,
     provenance_path = export_provenance_path(
       pavian_enabled, "07_Kreport/pavian/pavian_provenance.json", "Pavian export"),
-    integration = "official_pavian_upload_plus_builtin_kraken_report_explorer",
-    official_pavian_compatibility = "kraken_report_input_contract_only"
+    integration = pavian_integration,
+    official_pavian_compatibility = "kraken_report_input_contract_only",
+    sankey = list(
+      enabled = sankey_enabled,
+      render_html = sankey_render_html,
+      ranks = json_array(cfg$pavian$sankey$ranks),
+      max_taxa_per_rank = as.integer(cfg$pavian$sankey$max_taxa_per_rank)
+    )
   )
 )
 
@@ -525,7 +541,7 @@ manifest <- list(
   git_commit = source_info$git_commit, git_dirty = source_info$git_dirty,
   source_digest_sha256 = source_info$source_digest_sha256,
   source_files = source_info$source_files,
-  schema_version = 2L, schema_revision = 3L, config_schema_version = cfg$schema_version,
+  schema_version = 2L, schema_revision = 4L, config_schema_version = cfg$schema_version,
   run_status = if (any_failed) "failed" else "completed",
   start_time = utc_timestamp(start_time), end_time = utc_timestamp(end_time),
   duration_seconds = as.numeric(difftime(end_time, start_time, units = "secs")),

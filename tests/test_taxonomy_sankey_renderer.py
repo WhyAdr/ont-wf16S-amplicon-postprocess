@@ -73,6 +73,42 @@ def build_fixture(**kwargs):
     return payload, source_bytes
 
 
+def build_stress_fixture():
+    ranks = ["D", "K", "P", "C", "O", "F", "G", "S"]
+    nodes = []
+    parents = [""]
+    for rank_index, rank in enumerate(ranks):
+        next_parents = []
+        clade = 3 ** (len(ranks) - rank_index - 1)
+        for parent_path in parents:
+            for child_index in range(3):
+                name = f"{rank}{child_index}"
+                path = f"{parent_path};{name}" if parent_path else name
+                nodes.append({
+                    "path": path,
+                    "parent_path": parent_path,
+                    "name": name,
+                    "depth": rank_index + 1,
+                    "rank_code": rank,
+                    "taxid": str(100000 + len(nodes)),
+                    "direct": 1 if rank == "S" else 0,
+                    "clade": 1 if rank == "S" else clade,
+                    "status": "resolved",
+                })
+                next_parents.append(path)
+        parents = next_parents
+    assert len(nodes) == 9840
+    payload = {
+        "schema_version": 1,
+        "sample_id": "stress",
+        "renderer": "builtin_kraken_report_explorer",
+        "renderer_version": "0.4.8",
+        "totals": {"total": len(parents), "classified": len(parents), "unclassified": 0},
+        "nodes": nodes,
+    }
+    return payload, canonical_json_bytes(payload)
+
+
 class TaxonomySankeyRendererTests(unittest.TestCase):
     def test_first_rank_top_n_and_persistent_residual_carries(self):
         payload, source_bytes = build_fixture()
@@ -149,6 +185,20 @@ class TaxonomySankeyRendererTests(unittest.TestCase):
                 # without depending on a browser runtime.
                 from analysis.utils.taxonomy_sankey_renderer import _atomic_write_new
                 _atomic_write_new(path, canonical_json_bytes(document))
+
+    def test_generated_9840_node_taxonomy_conserves_across_rank_and_top_n_views(self):
+        payload, source_bytes = build_stress_fixture()
+        self.assertEqual(len(payload["nodes"]), 9840)
+        rank_sets = [
+            ["D", "K"], ["D", "P"], ["D", "C"], ["D", "G"],
+            ["K", "P"], ["K", "F"], ["P", "G"], ["C", "S"],
+            ["D", "K", "P"], ["D", "P", "G"],
+        ]
+        for ranks in rank_sets:
+            for max_n in (1, 2):
+                document = build_document(payload, source_bytes, ranks, max_n, "0.4.8")
+                self.assertEqual(document["default_view"]["conservation"]["rightmost_flow"], len(payload["nodes"][-6561:]))
+                self.assertTrue(all(link["value"] > 0 for link in document["default_view"]["links"]))
 
 
 if __name__ == "__main__":

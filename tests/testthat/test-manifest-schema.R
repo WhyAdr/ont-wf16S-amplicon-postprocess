@@ -251,14 +251,33 @@ make_manifest_revision3_fixture <- function(samples = "S1", modules = c("qc")) {
   manifest
 }
 
+make_manifest_revision4_fixture <- function(samples = "S1", modules = c("qc")) {
+  manifest <- make_manifest_revision3_fixture(samples = samples, modules = modules)
+  manifest$schema_revision <- 4L
+  manifest$exports$krona$render_html <- FALSE
+  manifest$exports$pavian$render_html <- FALSE
+  manifest$exports$pavian$integration <- "disabled"
+  manifest$exports$pavian$sankey <- list(
+    enabled = FALSE,
+    render_html = FALSE,
+    ranks = json_array(c("D", "K")),
+    max_taxa_per_rank = 10L
+  )
+  manifest
+}
+
 test_that("manifest v2 revision 2 validates correctly and rejects invalid states", {
   manifest <- make_manifest_revision2_fixture()
   expect_no_error(validate_manifest_v2(manifest))
 
-  # Unsupported revision
-  manifest_bad_rev <- manifest
-  manifest_bad_rev$schema_revision <- 4L
-  expect_error(validate_manifest_v2(manifest_bad_rev), "unsupported schema revision")
+  manifest_rev4 <- make_manifest_revision4_fixture()
+  expect_no_error(validate_manifest_v2(manifest_rev4))
+  manifest_rev4_bad_state <- manifest_rev4
+  manifest_rev4_bad_state$exports$pavian$sankey$enabled <- TRUE
+  expect_error(validate_manifest_v2(manifest_rev4_bad_state), "requires effective Pavian")
+  manifest_rev4_bad_rank <- manifest_rev4
+  manifest_rev4_bad_rank$exports$pavian$sankey$ranks <- json_array(c("P", "D"))
+  expect_error(validate_manifest_v2(manifest_rev4_bad_rank), "canonical rank subsequence")
 
   manifest_rev3 <- make_manifest_revision3_fixture()
   expect_no_error(validate_manifest_v2(manifest_rev3))

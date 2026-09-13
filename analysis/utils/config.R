@@ -105,6 +105,25 @@ validate_config <- function(cfg) {
       is.na(cfg$pavian$render_html)) {
     stop("'pavian.render_html' must be true or false.", call. = FALSE)
   }
+  if (!is.list(cfg$pavian$sankey)) {
+    stop("'pavian.sankey' must be a configuration mapping.", call. = FALSE)
+  }
+  for (field in c("enabled", "render_html")) {
+    value <- cfg$pavian$sankey[[field]]
+    if (!is.logical(value) || length(value) != 1L || is.na(value)) {
+      stop(sprintf("'pavian.sankey.%s' must be true or false.", field), call. = FALSE)
+    }
+  }
+  sankey_ranks <- cfg$pavian$sankey$ranks
+  if (!is.character(sankey_ranks) || length(sankey_ranks) < 2L || length(sankey_ranks) > 8L ||
+      anyNA(sankey_ranks) || any(!sankey_ranks %in% c("D", "K", "P", "C", "O", "F", "G", "S")) ||
+      anyDuplicated(sankey_ranks) || any(diff(match(sankey_ranks,
+        c("D", "K", "P", "C", "O", "F", "G", "S"))) <= 0)) {
+    stop("'pavian.sankey.ranks' must be a canonical subsequence of D,K,P,C,O,F,G,S with at least two ranks.",
+         call. = FALSE)
+  }
+  assert_scalar_number(cfg$pavian$sankey$max_taxa_per_rank, "pavian.sankey.max_taxa_per_rank",
+                       lower = 1, upper = 100, integer = TRUE)
   if (!is.null(cfg$input$wf16s_output_root)) {
     assert_nonempty_string(cfg$input$wf16s_output_root, "input.wf16s_output_root")
   }
@@ -339,7 +358,13 @@ get_default_config <- function() {
     ),
     pavian = list(
       enabled = FALSE,
-      render_html = TRUE
+      render_html = TRUE,
+      sankey = list(
+        enabled = TRUE,
+        render_html = TRUE,
+        ranks = c("D", "K", "P", "C", "O", "F", "G", "S"),
+        max_taxa_per_rank = 10L
+      )
     ),
     beta = list(
       distances = c("bray", "jaccard"),

@@ -168,7 +168,8 @@ assert_exact_sample_order <- function(data, expected_order, column, label) {
 stopifnot(identical(manifest$run_status, "completed"))
 stopifnot(manifest$mode %in% c("single", "cohort"))
 stopifnot(identical(manifest$schema_version, 2L))
-stopifnot(identical(manifest$schema_revision, 3L))
+stopifnot(manifest$schema_revision %in% c(3L, 4L))
+is_manifest_revision4 <- identical(manifest$schema_revision, 4L)
 stopifnot(is.character(manifest$transaction_id), length(manifest$transaction_id) == 1L,
           grepl("^tx-[0-9a-f]{64}$", manifest$transaction_id))
 stopifnot(identical(manifest$config_schema_version, 1L))
@@ -237,8 +238,35 @@ verify_export_record("krona", manifest$exports$krona, manifest$cli$krona,
                      "07_Kreport/krona/krona_provenance.json")
 verify_export_record("pavian", manifest$exports$pavian, manifest$cli$pavian,
                      "07_Kreport/pavian/pavian_provenance.json")
-stopifnot(identical(as.character(manifest$exports$pavian$integration),
-                    "official_pavian_upload_plus_builtin_kraken_report_explorer"))
+if (is_manifest_revision4) {
+  pavian_export <- manifest$exports$pavian
+  sankey_export <- pavian_export$sankey
+  stopifnot(is.list(sankey_export),
+            is.logical(sankey_export$enabled), length(sankey_export$enabled) == 1L,
+            is.logical(sankey_export$render_html), length(sankey_export$render_html) == 1L,
+            !isTRUE(sankey_export$enabled) || isTRUE(pavian_export$enabled),
+            !isTRUE(sankey_export$render_html) ||
+              (isTRUE(pavian_export$enabled) && isTRUE(pavian_export$render_html)))
+  sankey_ranks <- array_strings(sankey_export$ranks, "exports.pavian.sankey.ranks")
+  stopifnot(length(sankey_ranks) >= 2L, length(sankey_ranks) <= 8L,
+            !anyDuplicated(sankey_ranks),
+            !any(diff(match(sankey_ranks,
+                            c("D", "K", "P", "C", "O", "F", "G", "S"))) <= 0),
+            is.numeric(sankey_export$max_taxa_per_rank),
+            sankey_export$max_taxa_per_rank >= 1,
+            sankey_export$max_taxa_per_rank <= 100)
+  expected_pavian_integration <- if (isTRUE(sankey_export$enabled)) {
+    "official_pavian_upload_plus_builtin_taxonomy_viewers"
+  } else if (isTRUE(pavian_export$enabled)) {
+    "official_pavian_upload_plus_builtin_kraken_report_explorer"
+  } else {
+    "disabled"
+  }
+  stopifnot(identical(as.character(pavian_export$integration), expected_pavian_integration))
+} else {
+  stopifnot(identical(as.character(manifest$exports$pavian$integration),
+                      "official_pavian_upload_plus_builtin_kraken_report_explorer"))
+}
 stopifnot(identical(as.character(manifest$exports$pavian$official_pavian_compatibility),
                     "kraken_report_input_contract_only"))
 owned_kreport_outputs <- array_strings(manifest$modules$kreport$outputs, "modules.kreport.outputs")
@@ -1076,16 +1104,37 @@ if (isTRUE(manifest$cli$pavian)) {
     stop("Pavian was enabled but '07_Kreport/pavian/pavian_provenance.json' is missing.")
   }
   pavian_provenance <- jsonlite::fromJSON(pavian_provenance_file, simplifyVector = FALSE)
-  stopifnot(identical(pavian_provenance$schema_version, 1L),
+  expected_pavian_schema <- if (is_manifest_revision4) 2L else 1L
+  expected_pavian_integration <- if (is_manifest_revision4 &&
+                                     isTRUE(manifest$exports$pavian$sankey$enabled)) {
+    "official_pavian_upload_plus_builtin_taxonomy_viewers"
+  } else {
+    "official_pavian_upload_plus_builtin_kraken_report_explorer"
+  }
+  stopifnot(identical(pavian_provenance$schema_version, expected_pavian_schema),
             identical(pavian_provenance$path_basis, "run_dir"),
-            identical(pavian_provenance$integration,
-                      "official_pavian_upload_plus_builtin_kraken_report_explorer"),
+            identical(pavian_provenance$integration, expected_pavian_integration),
             identical(pavian_provenance$renderer, "builtin_kraken_report_explorer"),
             identical(as.character(pavian_provenance$renderer_version), expected_pipeline_version),
             identical(pavian_provenance$official_pavian_compatibility,
                       "kraken_report_input_contract_only"),
             identical(isTRUE(pavian_provenance$standalone_html),
                       isTRUE(manifest$exports$pavian$render_html)))
+  if (is_manifest_revision4) {
+    effective <- pavian_provenance$effective
+    stopifnot(is.list(effective),
+              identical(isTRUE(effective$pavian_enabled), isTRUE(manifest$exports$pavian$enabled)),
+              identical(isTRUE(effective$pavian_html), isTRUE(manifest$exports$pavian$render_html)),
+              identical(isTRUE(effective$sankey_enabled),
+                        isTRUE(manifest$exports$pavian$sankey$enabled)),
+              identical(isTRUE(effective$sankey_html),
+                        isTRUE(manifest$exports$pavian$sankey$render_html)))
+    resolution <- pavian_provenance$taxonomy_resolution
+    stopifnot(is.list(resolution), identical(as.character(resolution$path),
+                                             "07_Kreport/taxonomy_resolution.tsv"),
+                identical(as.character(resolution$sha256),
+                          sha256_file(file.path(root, resolution$path))))
+  }
   expected_html_status <- if (isTRUE(manifest$exports$pavian$render_html)) "rendered" else "not_requested"
   stopifnot(identical(as.character(pavian_provenance$html_status), expected_html_status))
   pavian_records <- require_json_array(pavian_provenance$samples, "pavian_provenance.samples")
@@ -1099,6 +1148,18 @@ if (isTRUE(manifest$cli$pavian)) {
   } else character(0)
   stopifnot(identical(sort(list.files(pavian_dir, pattern = "[.]pavian[.]json$")), expected_json))
   stopifnot(identical(sort(list.files(pavian_dir, pattern = "[.]pavian[.]html$")), expected_html))
+  if (is_manifest_revision4 && isTRUE(manifest$exports$pavian$sankey$enabled)) {
+    sankey_dir <- file.path(pavian_dir, "sankey")
+    expected_sankey_json <- sort(paste0(vapply(release_samples, sanitize_release_filename, character(1)), ".sankey.json"))
+    expected_sankey_html <- if (isTRUE(manifest$exports$pavian$sankey$render_html)) {
+      sort(paste0(vapply(release_samples, sanitize_release_filename, character(1)), ".sankey.html"))
+    } else character(0)
+    stopifnot(dir.exists(sankey_dir),
+              identical(sort(list.files(sankey_dir, pattern = "[.]sankey[.]json$")), expected_sankey_json),
+              identical(sort(list.files(sankey_dir, pattern = "[.]sankey[.]html$")), expected_sankey_html))
+  } else if (is_manifest_revision4) {
+    stopifnot(!dir.exists(file.path(pavian_dir, "sankey")))
+  }
   resolution_file <- file.path(root, "07_Kreport", "taxonomy_resolution.tsv")
   stopifnot(file.exists(resolution_file))
   viewer_verifier <- file.path(repo_root, "analysis", "utils",
@@ -1130,6 +1191,45 @@ if (isTRUE(manifest$cli$pavian)) {
       html_arg <- c("--html", html_path)
     } else {
       stopifnot(is.null(record$html_path), is.null(record$html_sha256))
+    }
+    if (is_manifest_revision4 && isTRUE(manifest$exports$pavian$sankey$enabled)) {
+      sankey_json_rel <- as.character(record$sankey_json_path)
+      sankey_json_path <- resolve_run_artifact(root, sankey_json_rel)
+      stopifnot(grepl("^07_Kreport/pavian/sankey/", sankey_json_rel),
+                file.exists(sankey_json_path),
+                grepl("^[0-9a-f]{64}$", as.character(record$sankey_json_sha256)),
+                identical(sha256_file(sankey_json_path), as.character(record$sankey_json_sha256)))
+      sankey_html_path <- NULL
+      sankey_html_arg <- character(0)
+      if (isTRUE(manifest$exports$pavian$sankey$render_html)) {
+        sankey_html_rel <- as.character(record$sankey_html_path)
+        sankey_html_path <- resolve_run_artifact(root, sankey_html_rel)
+        stopifnot(grepl("^07_Kreport/pavian/sankey/", sankey_html_rel),
+                  file.exists(sankey_html_path),
+                  grepl("^[0-9a-f]{64}$", as.character(record$sankey_html_sha256)),
+                  identical(sha256_file(sankey_html_path), as.character(record$sankey_html_sha256)))
+        sankey_html_arg <- c("--sankey-html", sankey_html_path)
+      } else {
+        stopifnot(is.null(record$sankey_html_path), is.null(record$sankey_html_sha256))
+      }
+      sankey_verifier <- file.path(repo_root, "analysis", "utils",
+                                   "verify_taxonomy_sankey_correspondence.py")
+      sankey_result <- processx::run(
+        python,
+        c(sankey_verifier, "--payload", json_path, "--sankey-json", sankey_json_path,
+          "--ranks", paste(array_strings(manifest$exports$pavian$sankey$ranks,
+                                         "exports.pavian.sankey.ranks"), collapse = ","),
+          "--max-taxa-per-rank", as.character(manifest$exports$pavian$sankey$max_taxa_per_rank),
+          "--renderer-version", expected_pipeline_version, sankey_html_arg),
+        error_on_status = FALSE
+      )
+      if (!identical(sankey_result$status, 0L)) {
+        stop(sprintf("Taxonomy Sankey correspondence verification failed for '%s': %s",
+                     sample_id, trimws(paste(sankey_result$stdout, sankey_result$stderr))))
+      }
+    } else if (is_manifest_revision4) {
+      stopifnot(is.null(record$sankey_json_path), is.null(record$sankey_json_sha256),
+                is.null(record$sankey_html_path), is.null(record$sankey_html_sha256))
     }
     verifier_result <- processx::run(
       python,

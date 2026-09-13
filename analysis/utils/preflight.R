@@ -480,6 +480,29 @@ run_module_preflight <- function(context, modules) {
     if (!identical(compile$status, 0L)) {
       preflight_error("E_PAVIAN_PREFLIGHT", trimws(paste(compile$stderr, compile$stdout)))
     }
+    if (isTRUE(cfg$pavian$sankey$enabled)) {
+      for (sankey_script in c("taxonomy_sankey_renderer.py",
+                              "verify_taxonomy_sankey_correspondence.py")) {
+        script <- file.path(cfg$pipeline_root, "analysis", "utils", sankey_script)
+        if (!file.exists(script)) {
+          preflight_error("E_PAVIAN_PREFLIGHT", sprintf(
+            "Builtin taxonomy Sankey component is missing: '%s'.", script))
+        }
+        compile <- processx::run(
+          python,
+          c("-c", "import ast, sys; p = sys.argv[1]; ast.parse(open(p, 'rb').read(), filename=p)", script),
+          error_on_status = FALSE
+        )
+        if (!identical(compile$status, 0L)) {
+          preflight_error("E_PAVIAN_PREFLIGHT", trimws(paste(compile$stderr, compile$stdout)))
+        }
+      }
+      client <- file.path(cfg$pipeline_root, "analysis", "utils", "taxonomy_sankey_client.js")
+      if (!file.exists(client)) {
+        preflight_error("E_PAVIAN_PREFLIGHT", sprintf(
+          "Builtin taxonomy Sankey client is missing: '%s'.", client))
+      }
+    }
   }
   invisible(warnings)
 }
