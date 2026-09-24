@@ -9,6 +9,7 @@ import datetime
 import email.utils
 import gzip
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -484,6 +485,22 @@ def request_payload(endpoint, params, limiter, events, attempts=MAX_REQUEST_ATTE
             events.emit("request_retry", phase=endpoint, attempt=attempt,
                         code="E_NCBI_REQUEST", message=message, retry_after_seconds=delay)
             sleep(delay)
+        except http.client.IncompleteRead:
+            message = f"{endpoint} transient HTTP body failure (IncompleteRead)"
+            if attempt == attempts:
+                raise SafeRequestFailure("E_NCBI_REQUEST", message) from None
+            delay = min(2 ** (attempt - 1), MAX_RETRY_AFTER_SECONDS)
+            events.emit("request_retry", phase=endpoint, attempt=attempt,
+                        code="E_NCBI_REQUEST", message=message, retry_after_seconds=delay)
+            sleep(delay)
+        except http.client.HTTPException as exc:
+            message = f"{endpoint} transient HTTP protocol failure ({type(exc).__name__})"
+            if attempt == attempts:
+                raise SafeRequestFailure("E_NCBI_REQUEST", message) from None
+            delay = min(2 ** (attempt - 1), MAX_RETRY_AFTER_SECONDS)
+            events.emit("request_retry", phase=endpoint, attempt=attempt,
+                        code="E_NCBI_REQUEST", message=message, retry_after_seconds=delay)
+            sleep(delay)
         except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError) as exc:
             message = f"{endpoint} transient request failure ({type(exc).__name__})"
             if attempt == attempts:
@@ -535,7 +552,7 @@ def _parse_search_payload(payload):
 def _parse_taxonomy_context(payload, taxid):
     try:
         root = ET.fromstring(payload)
-    except ET.ParseError:
+    except (ET.ParseError, LookupError):
         raise InvalidResponse("efetch returned malformed XML") from None
     error_node = root.find(".//ERROR")
     if error_node is not None:

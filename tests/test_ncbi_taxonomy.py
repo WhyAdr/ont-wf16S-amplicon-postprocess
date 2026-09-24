@@ -7,6 +7,7 @@ import csv
 import tempfile
 import threading
 import unittest
+from http import client
 from unittest import mock
 from urllib import error, request
 
@@ -217,6 +218,74 @@ class TaxonomyResolverTests(unittest.TestCase):
             )
         self.assertEqual(outcome.status, "response_invalid")
         self.assertEqual(outcome.code, "E_NCBI_RESPONSE")
+
+    def test_interrupted_http_body_retries_then_writes_failure_summary_through_main(self):
+        before = hashlib.sha256(self.cache.read_bytes()).hexdigest()
+        diagnostics = self.work / "interrupted diagnostics"
+        diagnostics.mkdir()
+        transaction_id = "tx-" + "b" * 64
+        args = self.args(mode="refresh") + [
+            "--diagnostics-dir", str(diagnostics), "--transaction-id", transaction_id
+        ]
+
+        def interrupted_response():
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.__exit__.return_value = False
+            response.read.side_effect = client.IncompleteRead(b"partial", 99)
+            return response
+
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(request, "urlopen", side_effect=[
+                 interrupted_response(), interrupted_response(), interrupted_response()
+             ]) as urlopen, \
+             mock.patch.object(taxonomy.time, "sleep"), \
+             mock.patch("sys.argv", args):
+            self.assertEqual(taxonomy.main(), 1)
+
+        self.assertEqual(urlopen.call_count, taxonomy.MAX_REQUEST_ATTEMPTS)
+        self.assertEqual(hashlib.sha256(self.cache.read_bytes()).hexdigest(), before)
+        summary = json.loads((diagnostics / "taxonomy_failure.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["code"], "E_NCBI_REQUEST")
+        self.assertEqual(summary["outcome"], "request_failed")
+        self.assertIn("IncompleteRead", summary["message"])
+        events = (diagnostics / "taxonomy_events.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(events.count('"event": "request_retry"'), 2)
+        self.assertIn('"event": "lookup_failure"', events)
+
+    def test_unsupported_xml_encoding_is_response_invalid_through_main(self):
+        before = hashlib.sha256(self.cache.read_bytes()).hexdigest()
+        diagnostics = self.work / "encoding diagnostics"
+        diagnostics.mkdir()
+        transaction_id = "tx-" + "c" * 64
+        args = self.args(mode="refresh") + [
+            "--diagnostics-dir", str(diagnostics), "--transaction-id", transaction_id
+        ]
+        esearch = json.dumps({
+            "esearchresult": {"count": "1", "idlist": ["11"]}
+        }).encode()
+        efetch = b'<?xml version="1.0" encoding="x-not-installed"?><TaxaSet/>'
+
+        def response(payload):
+            item = mock.MagicMock()
+            item.__enter__.return_value = item
+            item.__exit__.return_value = False
+            item.read.return_value = payload
+            return item
+
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(request, "urlopen", side_effect=[response(esearch), response(efetch)]) as urlopen, \
+             mock.patch("sys.argv", args):
+            self.assertEqual(taxonomy.main(), 1)
+
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(hashlib.sha256(self.cache.read_bytes()).hexdigest(), before)
+        summary = json.loads((diagnostics / "taxonomy_failure.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["code"], "E_NCBI_RESPONSE")
+        self.assertEqual(summary["outcome"], "response_invalid")
+        self.assertEqual(summary["message"], "efetch returned malformed XML")
 
     def test_search_count_mismatch_is_not_treated_as_unique(self):
         payload = json.dumps({"esearchresult": {"count": "2", "idlist": ["11"]}}).encode()
