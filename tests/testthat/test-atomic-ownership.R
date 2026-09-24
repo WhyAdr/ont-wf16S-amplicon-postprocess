@@ -383,6 +383,20 @@ test_that("prepare, publish, and cleanup module staging work correctly", {
   expect_false(dir.exists(mod_stage))
 })
 
+test_that("taxonomy diagnostics are transaction-specific and outside output staging", {
+  root <- tempfile("diagnostics_root_")
+  dir.create(root)
+  final_root <- file.path(root, "published output")
+  transaction_id <- new_transaction_id()
+  diagnostics <- create_taxonomy_diagnostics_dir(final_root, transaction_id)
+
+  expect_true(dir.exists(diagnostics))
+  expect_identical(basename(diagnostics), transaction_id)
+  expect_identical(basename(dirname(diagnostics)), ".wf16s-diagnostics")
+  expect_false(startsWith(tolower(diagnostics), paste0(tolower(final_root), "/")))
+  expect_error(create_taxonomy_diagnostics_dir(final_root, transaction_id), "already exists")
+})
+
 test_that("publish_module_staging rejects collisions without changing either file", {
   root <- tempfile("module_stage_collision_")
   stage <- file.path(root, "run_stage")

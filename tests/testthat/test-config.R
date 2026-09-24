@@ -206,6 +206,25 @@ test_that("taxonomy refresh requires explicit CLI opt-in", {
   expect_true(resolved$cli$refresh_taxonomy)
 })
 
+test_that("online taxonomy preflight is explicit validation-only mode", {
+  tmp <- tempfile("online_preflight_config_")
+  dir.create(tmp)
+  cfg <- get_default_config()
+  path <- file.path(tmp, "config.yml")
+  yaml::write_yaml(cfg, path)
+
+  expect_error(
+    load_config(path, cli_opts = list(online_preflight = TRUE)),
+    "E_ONLINE_PREFLIGHT_MODE"
+  )
+  resolved <- load_config(path, cli_opts = list(
+    validate_only = TRUE, online_preflight = TRUE, refresh_taxonomy = TRUE
+  ))
+  expect_true(resolved$cli$validate_only)
+  expect_true(resolved$cli$online_preflight)
+  expect_equal(resolved$taxonomy$network_mode, "refresh")
+})
+
 test_that("Configuration rejects base seeds outside R's supported integer range", {
   cfg <- get_default_config()
   cfg$seed <- .Machine$integer.max + 1

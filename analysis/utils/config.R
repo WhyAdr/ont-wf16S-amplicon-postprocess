@@ -513,6 +513,12 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     pavian = isTRUE(cfg$pavian$enabled),
     modules = requested_modules
   )
+  if (isTRUE(cfg$cli$online_preflight) && !isTRUE(cfg$cli$validate_only)) {
+    stop(paste(
+      "E_ONLINE_PREFLIGHT_MODE: --online-preflight requires --validate-only.",
+      "Remove --online-preflight for normal one-pass taxonomy refresh execution."
+    ), call. = FALSE)
+  }
 
   # Path resolution against config_dir
   cfg$input$abundance_table <- resolve_path(cfg$input$abundance_table, config_dir)

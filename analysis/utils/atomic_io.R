@@ -123,6 +123,43 @@ prepare_run_staging <- function(final_root) {
   normalizePath(stage, winslash = "/", mustWork = TRUE)
 }
 
+create_taxonomy_diagnostics_dir <- function(final_root, transaction_id) {
+  if (!grepl("^tx-[0-9a-f]{64}$", transaction_id)) {
+    stop("Invalid transaction identity for taxonomy diagnostics.", call. = FALSE)
+  }
+  output_parent <- dirname(normalizePath(final_root, winslash = "/", mustWork = FALSE))
+  if (!dir.exists(output_parent) && !dir.create(output_parent, recursive = TRUE, showWarnings = FALSE)) {
+    stop(sprintf("Could not create output parent '%s'.", output_parent), call. = FALSE)
+  }
+  output_parent <- normalizePath(output_parent, winslash = "/", mustWork = TRUE)
+  diagnostics_root <- file.path(output_parent, ".wf16s-diagnostics")
+  if (file.exists(diagnostics_root) && nzchar(Sys.readlink(diagnostics_root))) {
+    stop("Taxonomy diagnostics root must not be a symbolic link.", call. = FALSE)
+  }
+  if (!dir.exists(diagnostics_root) &&
+      !dir.create(diagnostics_root, recursive = FALSE, showWarnings = FALSE)) {
+    stop(sprintf("Could not create taxonomy diagnostics root '%s'.", diagnostics_root),
+         call. = FALSE)
+  }
+  diagnostics_root <- normalizePath(diagnostics_root, winslash = "/", mustWork = TRUE)
+  diagnostics_dir <- file.path(diagnostics_root, transaction_id)
+  if (file.exists(diagnostics_dir) || dir.exists(diagnostics_dir)) {
+    stop("Taxonomy diagnostics transaction directory already exists.", call. = FALSE)
+  }
+  if (!dir.create(diagnostics_dir, recursive = FALSE, showWarnings = FALSE)) {
+    stop(sprintf("Could not create taxonomy diagnostics directory '%s'.", diagnostics_dir),
+         call. = FALSE)
+  }
+  resolved <- normalizePath(diagnostics_dir, winslash = "/", mustWork = TRUE)
+  expected_parent <- normalizePath(dirname(resolved), winslash = "/", mustWork = TRUE)
+  if (!identical(tolower(expected_parent), tolower(diagnostics_root)) ||
+      nzchar(Sys.readlink(resolved))) {
+    unlink(resolved, recursive = TRUE, force = TRUE)
+    stop("Taxonomy diagnostics directory failed containment validation.", call. = FALSE)
+  }
+  resolved
+}
+
 snapshot_staging_directory <- function(stage) {
   parent <- dirname(stage)
   snapshot <- tempfile(pattern = paste0(".", basename(stage), ".snapshot-"), tmpdir = parent)

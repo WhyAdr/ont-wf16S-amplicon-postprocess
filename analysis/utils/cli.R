@@ -88,7 +88,7 @@ get_cli_parser <- function() {
       action = "store_true",
       default = FALSE,
       dest = "online_preflight",
-      help = "Permit network credential/connectivity checks during taxonomy refresh preflight"
+      help = "With --validate-only, perform full read-only online taxonomy resolution; invalid during execution"
     ),
     optparse::make_option(
       c("--allow-large-workload"),

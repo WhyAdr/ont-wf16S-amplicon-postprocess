@@ -50,6 +50,11 @@ run_kreport <- function(context) {
     cmd_args <- c(cmd_args, "--defer-cache-commit", "--cache-lock-held",
                   "--cache-lock-owner-pid", as.character(Sys.getpid()),
                   "--transaction-id", context$transaction_id)
+    if (is.null(context$diagnostics_dir) || !dir.exists(context$diagnostics_dir)) {
+      stop("Refresh execution requires a pre-created durable taxonomy diagnostics directory.",
+           call. = FALSE)
+    }
+    cmd_args <- c(cmd_args, "--diagnostics-dir", context$diagnostics_dir)
   }
   assignment_paths <- unname(unlist(context$assignments, use.names = FALSE))
   if (length(assignment_paths) > 0L) {
@@ -72,11 +77,18 @@ run_kreport <- function(context) {
     command = python_cmd,
     args = cmd_args,
     echo = TRUE,
-    error_on_status = FALSE
+    error_on_status = FALSE,
+    cleanup_tree = TRUE
   )
   if (!identical(resolver$status, 0L)) {
-    stop(sprintf("NCBI taxonomy resolver failed with exit status %d", resolver$status),
-         call. = FALSE)
+    detail <- trimws(paste(resolver$stderr, resolver$stdout))
+    detail <- gsub("https?://[^[:space:]]+", "[REDACTED_URL]", detail)
+    detail <- gsub("(?i)(api[_-]?key|email)=([^&[:space:]]+)", "\\1=[REDACTED]",
+                   detail, perl = TRUE)
+    if (!nzchar(detail)) detail <- "no child-process detail was returned"
+    detail <- substr(detail, 1L, 1200L)
+    stop(sprintf("Taxonomy resolver failed (%d): %s; diagnostics: %s",
+                 resolver$status, detail, context$diagnostics_dir), call. = FALSE)
   }
 
   required_resolver_outputs <- c(

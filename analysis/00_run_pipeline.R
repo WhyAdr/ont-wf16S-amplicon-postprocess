@@ -132,6 +132,7 @@ if (isTRUE(cfg$cli$validate_only)) {
 final_root <- normalizePath(cfg$output$base_dir, winslash = "/", mustWork = FALSE)
 transaction_id <- new_transaction_id()
 context$transaction_id <- transaction_id
+context$diagnostics_dir <- NULL
 
 # Acquire exclusive output lock before reading/staging prior output
 output_lock <- tryCatch(acquire_output_lock(final_root),
@@ -145,7 +146,14 @@ tryCatch(recover_publication_journal(final_root),
          error = function(e) fatal("Output recovery error", e))
 
 prior_manifest <- tryCatch(validate_prior_output(final_root, cfg$cli$overwrite),
-                           error = function(e) fatal("Output validation error", e))
+                            error = function(e) fatal("Output validation error", e))
+
+if (identical(cfg$taxonomy$network_mode, "refresh") && "kreport" %in% requested_modules) {
+  context$diagnostics_dir <- tryCatch(
+    create_taxonomy_diagnostics_dir(final_root, transaction_id),
+    error = function(e) fatal("Taxonomy diagnostics error", e)
+  )
+}
 
 taxonomy_cache_state <- "unchanged" # unchanged, candidate_committed, restored, output_published, committed
 taxonomy_cache_backup_file <- NULL

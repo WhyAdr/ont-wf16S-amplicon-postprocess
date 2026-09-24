@@ -426,8 +426,20 @@ run_module_preflight <- function(context, modules) {
     probe <- processx::run(python, args, error_on_status = FALSE)
     if (probe$status != 0L) {
       err_text <- trimws(paste(probe$stderr, probe$stdout))
-      code <- if (grepl("E_ONLINE_PREFLIGHT_REQUIRED", err_text)) "E_ONLINE_PREFLIGHT_REQUIRED" else "E_KREPORT_PREFLIGHT"
-      preflight_error(code, err_text)
+      preflight_error("E_KREPORT_PREFLIGHT", err_text)
+    }
+    if (grepl('"taxonomy_resolution"[[:space:]]*:[[:space:]]*"pending_online"',
+              probe$stdout)) {
+      pending_match <- regmatches(probe$stdout, regexpr(
+        '"pending_count"[[:space:]]*:[[:space:]]*[0-9]+', probe$stdout))
+      pending_count <- if (length(pending_match) && nzchar(pending_match)) {
+        sub('.*:[[:space:]]*', '', pending_match)
+      } else {
+        "unknown"
+      }
+      warnings <- c(warnings, sprintf(
+        "taxonomy_resolution=pending_online; pending_count=%s; no NCBI requests were made",
+        pending_count))
     }
   }
   if (isTRUE(cfg$krona$enabled) && isTRUE(cfg$krona$render_html)) {
