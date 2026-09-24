@@ -4,6 +4,9 @@
 import argparse
 import contextlib
 import csv
+import dataclasses
+import datetime
+import email.utils
 import gzip
 import hashlib
 import json
@@ -14,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -25,8 +29,123 @@ MAX_READ_LENGTH = 2147483647
 PLACEHOLDER_NAMES = {"unknown", "unclassified", "uncultured", "unidentified"}
 READ_LENGTH_RE = re.compile(r"^[0-9]+$|^[0-9]+\|[1-9][0-9]*$")
 EXPECTED_RANKS = ("superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species")
+CELLULAR_DOMAINS = {"bacteria", "archaea", "eukaryota"}
+FATAL_OUTCOMES = {"request_failed", "response_invalid"}
+SEMANTIC_OUTCOMES = {"not_found", "ambiguous", "context_mismatch"}
+MAX_REQUEST_ATTEMPTS = 3
+MAX_RETRY_AFTER_SECONDS = 30.0
 _ACTIVE_CACHE_LOCKS = set()
 _ACTIVE_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+@dataclasses.dataclass(frozen=True)
+class LookupOutcome:
+    status: str
+    taxid: int = 0
+    candidates: tuple = ()
+    code: str = None
+    message: str = None
+    expected_rank: str = None
+    returned_rank: str = None
+    rank_rule: str = None
+
+
+class SafeRequestFailure(Exception):
+    """A credential-safe, classified request failure."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.safe_message = message
+
+
+class InvalidResponse(Exception):
+    """A credential-safe response validation failure."""
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.safe_message = message
+
+
+class RequestLimiter:
+    def __init__(self, interval, monotonic=time.monotonic, sleep=time.sleep):
+        self.interval = float(interval)
+        self.monotonic = monotonic
+        self.sleep = sleep
+        self._last_request = None
+
+    def wait_for_request_slot(self):
+        now = self.monotonic()
+        if self._last_request is not None:
+            remaining = self.interval - (now - self._last_request)
+            if remaining > 0:
+                self.sleep(remaining)
+                now = self.monotonic()
+        self._last_request = now
+
+
+class EventWriter:
+    """Flush bounded, credential-safe JSONL diagnostics for execution failures."""
+
+    MAX_MESSAGE_LENGTH = 500
+
+    def __init__(self, diagnostics_dir=None, transaction_id=None):
+        self.path = None
+        self.summary_path = None
+        self._handle = None
+        self.started = time.monotonic()
+        if diagnostics_dir:
+            if not transaction_id:
+                raise ValueError("--diagnostics-dir requires --transaction-id.")
+            directory = os.path.abspath(diagnostics_dir)
+            if not os.path.isdir(directory) or os.path.islink(directory):
+                raise ValueError("Diagnostics directory must be a pre-created, non-symlink directory.")
+            self.path = os.path.join(directory, "taxonomy_events.jsonl")
+            self.summary_path = os.path.join(directory, "taxonomy_failure.json")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open(self.path, flags, 0o600)
+            self._handle = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+
+    @staticmethod
+    def _safe_text(value):
+        text = " ".join(str(value).split())
+        text = re.sub(r"(?i)(api[_-]?key|email)=([^&\s]+)", r"\1=[REDACTED]", text)
+        text = re.sub(r"https?://\S+", "[REDACTED_URL]", text)
+        return text[:EventWriter.MAX_MESSAGE_LENGTH]
+
+    def emit(self, event, **fields):
+        record = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "elapsed_seconds": round(time.monotonic() - self.started, 3),
+            "event": self._safe_text(event),
+        }
+        for key, value in fields.items():
+            if value is not None:
+                record[key] = self._safe_text(value) if isinstance(value, str) else value
+        line = json.dumps(record, sort_keys=True, ensure_ascii=True)
+        print(line, file=sys.stderr, flush=True)
+        if self._handle is not None:
+            self._handle.write(line + "\n")
+            self._handle.flush()
+
+    def write_failure_summary(self, outcome, completed, total):
+        if not self.summary_path:
+            return
+        payload = {
+            "status": "failed",
+            "code": outcome.code,
+            "outcome": outcome.status,
+            "message": self._safe_text(outcome.message or "taxonomy resolution failed"),
+            "completed": completed,
+            "total": total,
+            "events_file": os.path.basename(self.path),
+        }
+        atomic_write_json(self.summary_path, payload)
+
+    def close(self):
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
 
 
 def _try_lock_fd(fd):
@@ -321,71 +440,192 @@ def iter_taxon_nodes(abundance_paths):
     return [nodes[path] for path in sorted(nodes)]
 
 
-def fetch_taxonomy_context(taxid, email, api_key):
-    params = {
-        "db": "taxonomy",
-        "id": str(taxid),
-        "retmode": "xml",
-        "tool": TOOL_NAME,
-        "email": email,
-    }
-    if api_key:
-        params["api_key"] = api_key
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(url, headers={"User-Agent": f"{TOOL_NAME}/1.0"})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        root = ET.fromstring(response.read())
-    taxon = root.find(".//Taxon")
-    if taxon is None:
-        raise ValueError(f"NCBI returned no taxonomy record for TaxID {taxid}.")
+def _retry_after_seconds(headers):
+    value = headers.get("Retry-After") if headers is not None else None
+    try:
+        return min(MAX_RETRY_AFTER_SECONDS, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        try:
+            parsed = email.utils.parsedate_to_datetime(value)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            remaining = parsed.timestamp() - time.time()
+            return min(MAX_RETRY_AFTER_SECONDS, max(0.0, remaining))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _safe_http_message(endpoint, status, retryable):
+    disposition = "transient" if retryable else "permanent"
+    return f"{endpoint} {disposition} HTTP failure (status {status})"
+
+
+def request_payload(endpoint, params, limiter, events, attempts=MAX_REQUEST_ATTEMPTS,
+                    opener=None, sleep=None):
+    """Fetch one endpoint with request-level limiting and bounded classified retries."""
+    opener = opener or urllib.request.urlopen
+    sleep = sleep or time.sleep
+    url = (f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/{endpoint}.fcgi?" +
+           urllib.parse.urlencode(params))
+    for attempt in range(1, attempts + 1):
+        limiter.wait_for_request_slot()
+        events.emit("request_start", phase=endpoint, attempt=attempt)
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": f"{TOOL_NAME}/1.0"})
+            with opener(request, timeout=15) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code == 429 or 500 <= exc.code <= 599
+            message = _safe_http_message(endpoint, exc.code, retryable)
+            if not retryable or attempt == attempts:
+                raise SafeRequestFailure("E_NCBI_REQUEST", message) from None
+            retry_after = _retry_after_seconds(exc.headers)
+            delay = retry_after if retry_after is not None else min(2 ** (attempt - 1), MAX_RETRY_AFTER_SECONDS)
+            events.emit("request_retry", phase=endpoint, attempt=attempt,
+                        code="E_NCBI_REQUEST", message=message, retry_after_seconds=delay)
+            sleep(delay)
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError) as exc:
+            message = f"{endpoint} transient request failure ({type(exc).__name__})"
+            if attempt == attempts:
+                raise SafeRequestFailure("E_NCBI_REQUEST", message) from None
+            delay = min(2 ** (attempt - 1), MAX_RETRY_AFTER_SECONDS)
+            events.emit("request_retry", phase=endpoint, attempt=attempt,
+                        code="E_NCBI_REQUEST", message=message, retry_after_seconds=delay)
+            sleep(delay)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except OSError as exc:
+            message = f"{endpoint} request failure ({type(exc).__name__})"
+            raise SafeRequestFailure("E_NCBI_REQUEST", message) from None
+    raise AssertionError("unreachable")
+
+
+def _parse_search_payload(payload):
+    try:
+        result = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise InvalidResponse("esearch returned malformed JSON") from None
+    if not isinstance(result, dict) or "error" in result:
+        raise InvalidResponse("esearch returned an explicit API error or non-object payload")
+    search = result.get("esearchresult")
+    if not isinstance(search, dict) or "idlist" not in search or "count" not in search:
+        raise InvalidResponse("esearch response is missing esearchresult.idlist or count")
+    if any(str(key).casefold() == "error" for key in search):
+        raise InvalidResponse("esearch returned an explicit API error")
+    idlist = search["idlist"]
+    if not isinstance(idlist, list):
+        raise InvalidResponse("esearchresult.idlist is not an array")
+    try:
+        count = parse_taxid(search["count"], "esearch result count")
+        parsed_ids = [parse_taxid(value, "esearch TaxID") for value in idlist]
+    except (TypeError, ValueError) as exc:
+        raise InvalidResponse(f"esearch response contains an invalid count or TaxID: {exc}") from None
+    unique_ids = tuple(sorted(set(parsed_ids)))
+    if any(taxid <= 0 for taxid in unique_ids):
+        raise InvalidResponse("esearch returned a non-positive candidate TaxID")
+    if count != len(idlist):
+        raise InvalidResponse(
+            f"esearch result count {count} does not match returned ID count {len(idlist)}"
+        )
+    if len(unique_ids) != len(idlist):
+        raise InvalidResponse("esearch returned duplicate candidate TaxIDs")
+    return unique_ids
+
+
+def _parse_taxonomy_context(payload, taxid):
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError:
+        raise InvalidResponse("efetch returned malformed XML") from None
+    error_node = root.find(".//ERROR")
+    if error_node is not None:
+        raise InvalidResponse("efetch returned an explicit API error")
+    taxa = root.findall("./Taxon") if root.tag == "TaxaSet" else root.findall(".//Taxon")
+    if len(taxa) != 1:
+        raise InvalidResponse(f"efetch returned {len(taxa)} top-level taxonomy records")
+    taxon = taxa[0]
     returned_taxid = taxon.findtext("TaxId")
-    if returned_taxid is None or parse_taxid(returned_taxid, "NCBI returned TaxID") != int(taxid):
-        raise ValueError(f"NCBI taxonomy response did not identify requested TaxID {taxid}.")
+    try:
+        returned = parse_taxid(returned_taxid, "NCBI returned TaxID")
+    except (TypeError, ValueError):
+        raise InvalidResponse("efetch record has a missing or invalid TaxID") from None
+    if returned != int(taxid):
+        raise InvalidResponse(f"efetch TaxID {returned} does not match requested TaxID {taxid}")
     scientific_name = taxon.findtext("ScientificName")
     rank = taxon.findtext("Rank")
     lineage = [node.findtext("ScientificName") for node in taxon.findall("./LineageEx/Taxon")]
-    lineage = [value for value in lineage if value]
-    if not scientific_name or not rank:
-        raise ValueError(f"NCBI taxonomy record for TaxID {taxid} lacks name or rank.")
+    if not scientific_name or not rank or any(not value for value in lineage):
+        raise InvalidResponse(f"efetch record for TaxID {taxid} lacks required taxonomy fields")
     return {"scientific_name": scientific_name, "rank": rank, "lineage": lineage}
+
+
+def fetch_taxonomy_context(taxid, email, api_key, limiter=None, events=None,
+                           attempts=MAX_REQUEST_ATTEMPTS, opener=None, sleep=None):
+    params = {"db": "taxonomy", "id": str(taxid), "retmode": "xml",
+              "tool": TOOL_NAME, "email": email}
+    if api_key:
+        params["api_key"] = api_key
+    limiter = limiter or RequestLimiter(0.12 if api_key else 0.35)
+    events = events or EventWriter()
+    payload = request_payload("efetch", params, limiter, events, attempts, opener, sleep)
+    return _parse_taxonomy_context(payload, taxid)
 
 
 def _normalized_taxon_name(value):
     return " ".join(str(value).split()).casefold()
 
 
+def compatible_rank(expected, returned, name):
+    expected_normalized = str(expected).strip().casefold()
+    returned_normalized = str(returned).strip().casefold()
+    if expected_normalized == returned_normalized:
+        return True, "exact"
+    if (_normalized_taxon_name(name) in CELLULAR_DOMAINS and
+            {expected_normalized, returned_normalized} == {"superkingdom", "domain"}):
+        return True, "cellular_domain_legacy_alias"
+    return False, None
+
+
 def validate_taxonomy_context(record, name, expected_rank=None, ancestor_names=None):
     if _normalized_taxon_name(record["scientific_name"]) != _normalized_taxon_name(name):
-        return "NCBI TaxID scientific name does not exactly match the requested name."
-    if expected_rank and record["rank"].casefold() != expected_rank.casefold():
-        return (f"NCBI TaxID rank mismatch for {name!r}: expected {expected_rank!r}, "
-                f"found {record['rank']!r}.")
+        return ("E_TAXONOMY_NAME", "NCBI TaxID scientific name does not exactly match the requested name.", None)
+    rank_rule = "exact"
+    if expected_rank:
+        accepted, rank_rule = compatible_rank(expected_rank, record["rank"], name)
+        if not accepted:
+            return ("E_TAXONOMY_CONTEXT",
+                    f"NCBI TaxID rank mismatch for {name!r}: expected {expected_rank!r}, found {record['rank']!r}.",
+                    None)
     if not ancestor_names:
-        return None
+        return None, None, rank_rule
     normalized_lineage = [_normalized_taxon_name(val) for val in record.get("lineage", [])]
     expected_ancestors = [_normalized_taxon_name(val) for val in ancestor_names]
 
     missing = [anc for anc in expected_ancestors if anc not in normalized_lineage]
     if missing:
-        return (f"NCBI TaxID ancestry mismatch for {name!r}; missing ancestor context: "
-                + ", ".join(missing))
+        return ("E_TAXONOMY_CONTEXT",
+                f"NCBI TaxID ancestry mismatch for {name!r}; missing ancestor context: " + ", ".join(missing),
+                None)
 
     last_idx = -1
     for anc in expected_ancestors:
         indices = [i for i, val in enumerate(normalized_lineage) if val == anc]
         if len(indices) > 1:
-            return (f"NCBI TaxID ancestry ambiguity for {name!r}; ancestor {anc!r} "
-                    f"appears {len(indices)} times in NCBI lineage.")
+            return ("E_TAXONOMY_CONTEXT",
+                    f"NCBI TaxID ancestry ambiguity for {name!r}; ancestor {anc!r} appears {len(indices)} times in NCBI lineage.",
+                    None)
         idx = indices[0]
         if idx <= last_idx:
-            return (f"NCBI TaxID ancestry order mismatch for {name!r}; ancestor {anc!r} "
-                    f"appears out of order or reversed in NCBI lineage.")
+            return ("E_TAXONOMY_CONTEXT",
+                    f"NCBI TaxID ancestry order mismatch for {name!r}; ancestor {anc!r} appears out of order or reversed in NCBI lineage.",
+                    None)
         last_idx = idx
-    return None
+    return None, None, rank_rule
 
 
-def query_exact_scientific_name(name, email, api_key, attempts=3,
-                                expected_rank=None, ancestor_names=None):
+def query_exact_scientific_name(name, email, api_key, attempts=MAX_REQUEST_ATTEMPTS,
+                                expected_rank=None, ancestor_names=None, limiter=None,
+                                events=None, opener=None, sleep=None):
     params = {
         "db": "taxonomy",
         "term": f'"{name}"[Scientific Name]',
@@ -395,30 +635,32 @@ def query_exact_scientific_name(name, email, api_key, attempts=3,
     }
     if api_key:
         params["api_key"] = api_key
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(params)
-    last_error = None
-    for attempt in range(attempts):
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": f"{TOOL_NAME}/1.0"})
-            with urllib.request.urlopen(request, timeout=15) as response:
-                result = json.loads(response.read().decode("utf-8"))
-            ids = sorted({int(taxid) for taxid in result.get("esearchresult", {}).get("idlist", [])})
-            if len(ids) > 1:
-                return 0, None, ids
-            if not ids:
-                return 0, None, []
-            record = fetch_taxonomy_context(ids[0], email, api_key)
-            context_error = validate_taxonomy_context(
-                record, name, expected_rank=expected_rank, ancestor_names=ancestor_names
-            )
-            if context_error:
-                return 0, context_error, []
-            return ids[0], None, []
-        except Exception as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
-            if attempt + 1 < attempts:
-                time.sleep(2 ** attempt)
-    return 0, last_error, []
+    limiter = limiter or RequestLimiter(0.12 if api_key else 0.35)
+    events = events or EventWriter()
+    try:
+        search_payload = request_payload("esearch", params, limiter, events, attempts, opener, sleep)
+        ids = _parse_search_payload(search_payload)
+        if not ids:
+            return LookupOutcome("not_found", code="E_TAXONOMY_NOT_FOUND",
+                                 message=f"No exact NCBI scientific-name match for {name!r}")
+        if len(ids) > 1:
+            return LookupOutcome("ambiguous", candidates=ids, code="E_TAXONOMY_AMBIGUOUS",
+                                 message=f"Multiple exact NCBI scientific-name matches for {name!r}")
+        record = fetch_taxonomy_context(ids[0], email, api_key, limiter=limiter,
+                                        events=events, attempts=attempts,
+                                        opener=opener, sleep=sleep)
+        code, context_error, rank_rule = validate_taxonomy_context(
+            record, name, expected_rank=expected_rank, ancestor_names=ancestor_names
+        )
+        if context_error:
+            return LookupOutcome("context_mismatch", code=code, message=context_error,
+                                 expected_rank=expected_rank, returned_rank=record["rank"])
+        return LookupOutcome("resolved", taxid=ids[0], expected_rank=expected_rank,
+                             returned_rank=record["rank"], rank_rule=rank_rule)
+    except SafeRequestFailure as exc:
+        return LookupOutcome("request_failed", code=exc.code, message=exc.safe_message)
+    except InvalidResponse as exc:
+        return LookupOutcome("response_invalid", code="E_NCBI_RESPONSE", message=exc.safe_message)
 
 
 def write_unresolved_tsv(path, unresolved):
@@ -474,9 +716,19 @@ def main():
     parser.add_argument("--cache-lock-held", action="store_true")
     parser.add_argument("--cache-lock-owner-pid", type=int)
     parser.add_argument("--transaction-id")
+    parser.add_argument("--diagnostics-dir",
+                        help="Pre-created execution-only directory for durable operational diagnostics")
     args = parser.parse_args()
 
+    events = None
     try:
+        if args.online_preflight and not args.validate_only:
+            raise ValueError(
+                "E_ONLINE_PREFLIGHT_MODE: --online-preflight is only valid with --validate-only; "
+                "remove it for normal one-pass refresh execution."
+            )
+        if args.validate_only and args.diagnostics_dir:
+            raise ValueError("--diagnostics-dir is not permitted with --validate-only.")
         if args.cache_lock_held:
             if args.mode != "refresh" or not args.defer_cache_commit:
                 raise ValueError("--cache-lock-held requires deferred refresh mode.")
@@ -491,6 +743,7 @@ def main():
             raise ValueError(
                 "--transaction-id must be tx- followed by 64 lowercase hex characters."
             )
+        events = EventWriter(args.diagnostics_dir, args.transaction_id)
         expected_inputs = {}
         for specification in args.expected_input:
             if "\t" in specification:
@@ -546,6 +799,9 @@ def main():
             unresolved = find_unresolved(abundance_paths, cache)
             query_failures = []
             ambiguous_queries = []
+            taxonomy_mismatches = []
+            lookup_outcomes = []
+            rank_compatibility = []
             cache_updated = False
 
             if args.mode == "refresh" and unresolved:
@@ -554,14 +810,17 @@ def main():
                     raise ValueError(f"Environment variable {args.email_env!r} is required for refresh mode.")
                 if args.validate_only and not args.online_preflight:
                     print(
-                        f"[taxonomy] ERROR: E_ONLINE_PREFLIGHT_REQUIRED: {len(unresolved)} node(s) require online refresh, but --online-preflight was not specified.",
-                        file=sys.stderr,
+                        json.dumps({"taxonomy_resolution": "pending_online",
+                                    "pending_count": len(unresolved)}, sort_keys=True),
+                        flush=True,
                     )
-                    return 1
+                    return 0
                 api_key = os.environ.get(args.api_key_env, "").strip() or None
-                delay = 0.12 if api_key else 0.35
+                limiter = RequestLimiter(0.12 if api_key else 0.35)
                 name_results = {}
-                for item in unresolved:
+                fatal_outcome = None
+                total_unresolved = len(unresolved)
+                for completed, item in enumerate(unresolved, start=1):
                     name = item["name"]
                     expected_rank = EXPECTED_RANKS[item["depth"] - 1] if item["depth"] <= len(EXPECTED_RANKS) else None
                     ancestor_names = [part for part in item["path"].split(";")[:-1]
@@ -570,21 +829,60 @@ def main():
                     if query_key not in name_results:
                         name_results[query_key] = query_exact_scientific_name(
                             name, email, api_key, expected_rank=expected_rank,
-                            ancestor_names=ancestor_names
+                            ancestor_names=ancestor_names, limiter=limiter, events=events
                         )
-                        time.sleep(delay)
-                    taxid, error, ambiguous_taxids = name_results[query_key]
-                    if error:
-                        query_failures.append({"path": item["path"], "name": name, "error": error})
-                    elif ambiguous_taxids:
+                    outcome = name_results[query_key]
+                    outcome_record = {
+                        "path": item["path"], "name": name, "status": outcome.status,
+                        "code": outcome.code, "message": outcome.message,
+                    }
+                    if outcome.expected_rank is not None:
+                        outcome_record["expected_rank"] = outcome.expected_rank
+                    if outcome.returned_rank is not None:
+                        outcome_record["returned_rank"] = outcome.returned_rank
+                    if outcome.rank_rule is not None:
+                        outcome_record["rank_rule"] = outcome.rank_rule
+                    lookup_outcomes.append(outcome_record)
+                    events.emit("lookup_progress", phase="taxonomy_resolution", name=name,
+                                code=outcome.code, outcome=outcome.status,
+                                message=outcome.message,
+                                expected_rank=outcome.expected_rank,
+                                returned_rank=outcome.returned_rank,
+                                rank_rule=outcome.rank_rule,
+                                completed=completed, total=total_unresolved)
+                    if outcome.status in FATAL_OUTCOMES:
+                        query_failures.append(outcome_record)
+                        fatal_outcome = outcome
+                        events.emit("lookup_failure", phase="taxonomy_resolution", name=name,
+                                    code=outcome.code, message=outcome.message,
+                                    completed=completed, total=total_unresolved)
+                        events.write_failure_summary(outcome, completed, total_unresolved)
+                        break
+                    if outcome.status == "context_mismatch":
+                        taxonomy_mismatches.append(outcome_record)
+                    elif outcome.status == "ambiguous":
                         ambiguous_queries.append({
-                            "path": item["path"], "name": name, "taxids": ambiguous_taxids
+                            "path": item["path"], "name": name, "taxids": list(outcome.candidates)
                         })
-                    elif taxid > 0:
-                        cache[item["path"]] = taxid
+                    elif outcome.status == "resolved":
+                        cache[item["path"]] = outcome.taxid
                         resolution_sources[item["path"]] = "ncbi_refresh"
+                        if outcome.rank_rule != "exact":
+                            rank_compatibility.append({
+                                "path": item["path"], "name": name,
+                                "expected_rank": outcome.expected_rank,
+                                "returned_rank": outcome.returned_rank,
+                                "rule": outcome.rank_rule,
+                            })
 
                 unresolved = find_unresolved(abundance_paths, cache)
+                if fatal_outcome is not None:
+                    print(
+                        f"[taxonomy] ERROR: {fatal_outcome.code}: "
+                        f"{EventWriter._safe_text(fatal_outcome.message)}; "
+                        "source cache preserved.", file=sys.stderr, flush=True
+                    )
+                    return 1
             candidate_cache = {key: str(value) for key, value in cache.items()}
             cache_sha_candidate = compute_json_sha256(candidate_cache)
             if args.validate_only:
@@ -641,6 +939,9 @@ def main():
                 "conflicts": conflicts,
                 "query_failures": query_failures,
                 "ambiguous_queries": ambiguous_queries,
+                "taxonomy_mismatches": taxonomy_mismatches,
+                "lookup_outcomes": lookup_outcomes,
+                "rank_compatibility": rank_compatibility,
                 "resolution_source_counts": source_counts,
             }
             atomic_write_json(args.provenance, provenance)
@@ -649,11 +950,21 @@ def main():
                 print(f"[taxonomy] ERROR: {len(query_failures)} NCBI query failure(s); source cache preserved.", file=sys.stderr)
                 return 1
             if args.unresolved_policy == "error" and unresolved:
+                events.write_failure_summary(
+                    LookupOutcome("context_mismatch", code="E_TAXONOMY_UNRESOLVED",
+                                  message=f"{len(unresolved)} taxonomy nodes remain unresolved"),
+                    len(lookup_outcomes), len(lookup_outcomes)
+                )
                 print(f"[taxonomy] ERROR: {len(unresolved)} taxonomy nodes remain unresolved.", file=sys.stderr)
                 return 1
             if args.mode == "refresh":
                 current_cache_sha = compute_sha256(args.cache)
                 if current_cache_sha != cache_sha_before:
+                    events.write_failure_summary(
+                        LookupOutcome("request_failed", code="E_TAXONOMY_CACHE_CHANGED",
+                                      message="source taxonomy cache changed during query execution"),
+                        len(lookup_outcomes), len(lookup_outcomes)
+                    )
                     print(
                         f"[taxonomy] ERROR: E_TAXONOMY_CACHE_CHANGED: source cache '{args.cache}' "
                         f"was mutated during query execution (expected {cache_sha_before}, found {current_cache_sha}).",
@@ -670,8 +981,16 @@ def main():
             print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
             return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"[taxonomy] ERROR: {exc}", file=sys.stderr)
+        if events is not None:
+            outcome = LookupOutcome("response_invalid", code="E_TAXONOMY_EXECUTION",
+                                    message=EventWriter._safe_text(exc))
+            events.emit("execution_failure", code=outcome.code, message=outcome.message)
+            events.write_failure_summary(outcome, 0, 0)
+        print(f"[taxonomy] ERROR: {EventWriter._safe_text(exc)}", file=sys.stderr)
         return 1
+    finally:
+        if events is not None:
+            events.close()
 
 
 if __name__ == "__main__":

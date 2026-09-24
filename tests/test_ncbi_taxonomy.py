@@ -8,7 +8,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
-from urllib import request
+from urllib import error, request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "analysis" / "utils" / "ncbi_taxonomy.py"
@@ -80,7 +80,8 @@ class TaxonomyResolverTests(unittest.TestCase):
         before = hashlib.sha256(self.cache.read_bytes()).hexdigest()
         with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
              mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
-             mock.patch.object(taxonomy, "query_exact_scientific_name", return_value=(0, "simulated failure", [])), \
+             mock.patch.object(taxonomy, "query_exact_scientific_name", return_value=taxonomy.LookupOutcome(
+                 "request_failed", code="E_NCBI_REQUEST", message="simulated failure")), \
              mock.patch("sys.argv", self.args(mode="refresh")):
             self.assertEqual(taxonomy.main(), 1)
         after = hashlib.sha256(self.cache.read_bytes()).hexdigest()
@@ -150,20 +151,19 @@ class TaxonomyResolverTests(unittest.TestCase):
             taxonomy.read_abundance_paths(self.abundance, "tax", "0" * 64)
 
     def test_ambiguous_exact_name_query_is_not_silently_selected(self):
-        payload = json.dumps({"esearchresult": {"idlist": ["22", "11", "22"]}}).encode()
+        payload = json.dumps({"esearchresult": {"count": "2", "idlist": ["22", "11"]}}).encode()
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = payload
         response.__exit__.return_value = False
         with mock.patch.object(request, "urlopen", return_value=response):
-            taxid, error, ambiguous = taxonomy.query_exact_scientific_name(
+            outcome = taxonomy.query_exact_scientific_name(
                 "Example", "test@example.org", None, attempts=1
             )
-        self.assertEqual(taxid, 0)
-        self.assertIsNone(error)
-        self.assertEqual(ambiguous, [11, 22])
+        self.assertEqual(outcome.status, "ambiguous")
+        self.assertEqual(outcome.candidates, (11, 22))
 
     def test_exact_name_query_validates_rank_and_ancestry(self):
-        esearch = json.dumps({"esearchresult": {"idlist": ["11"]}}).encode()
+        esearch = json.dumps({"esearchresult": {"count": "1", "idlist": ["11"]}}).encode()
         efetch = b"""<TaxaSet><Taxon><TaxId>11</TaxId><ScientificName>Bacillus</ScientificName><Rank>genus</Rank><LineageEx><Taxon><ScientificName>Bacteria</ScientificName></Taxon></LineageEx></Taxon></TaxaSet>"""
 
         def response(payload):
@@ -173,13 +173,221 @@ class TaxonomyResolverTests(unittest.TestCase):
             return item
 
         with mock.patch.object(request, "urlopen", side_effect=[response(esearch), response(efetch)]):
-            taxid, error, ambiguous = taxonomy.query_exact_scientific_name(
+            outcome = taxonomy.query_exact_scientific_name(
                 "Bacillus", "test@example.org", None, attempts=1,
                 expected_rank="genus", ancestor_names=["Bacteria"]
             )
-        self.assertEqual(taxid, 11)
-        self.assertIsNone(error)
-        self.assertEqual(ambiguous, [])
+        self.assertEqual(outcome.status, "resolved")
+        self.assertEqual(outcome.taxid, 11)
+        self.assertEqual(outcome.rank_rule, "exact")
+
+    def test_current_cellular_domain_rank_is_narrowly_accepted(self):
+        for name in ("Bacteria", "Archaea", "Eukaryota"):
+            record = {"scientific_name": name, "rank": "domain", "lineage": []}
+            code, message, rule = taxonomy.validate_taxonomy_context(
+                record, name, expected_rank="superkingdom", ancestor_names=[]
+            )
+            self.assertIsNone(code)
+            self.assertIsNone(message)
+            self.assertEqual(rule, "cellular_domain_legacy_alias")
+
+        rejected = [
+            ({"scientific_name": "Viruses", "rank": "domain", "lineage": []},
+             "Viruses", "superkingdom"),
+            ({"scientific_name": "Bacteria", "rank": "realm", "lineage": []},
+             "Bacteria", "superkingdom"),
+            ({"scientific_name": "Bacillus", "rank": "domain", "lineage": ["Bacteria"]},
+             "Bacillus", "genus"),
+        ]
+        for record, name, rank in rejected:
+            code, message, rule = taxonomy.validate_taxonomy_context(
+                record, name, expected_rank=rank, ancestor_names=[]
+            )
+            self.assertEqual(code, "E_TAXONOMY_CONTEXT")
+            self.assertIn("rank mismatch", message)
+            self.assertIsNone(rule)
+
+    def test_missing_search_fields_are_fatal_response_invalid(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"esearchresult": {}}'
+        response.__exit__.return_value = False
+        with mock.patch.object(request, "urlopen", return_value=response):
+            outcome = taxonomy.query_exact_scientific_name(
+                "Example", "test@example.org", None, attempts=1
+            )
+        self.assertEqual(outcome.status, "response_invalid")
+        self.assertEqual(outcome.code, "E_NCBI_RESPONSE")
+
+    def test_search_count_mismatch_is_not_treated_as_unique(self):
+        payload = json.dumps({"esearchresult": {"count": "2", "idlist": ["11"]}}).encode()
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        response.__exit__.return_value = False
+        with mock.patch.object(request, "urlopen", return_value=response):
+            outcome = taxonomy.query_exact_scientific_name(
+                "Example", "test@example.org", None, attempts=1
+            )
+        self.assertEqual(outcome.status, "response_invalid")
+        self.assertIn("count", outcome.message)
+
+    def test_efetch_retry_does_not_repeat_successful_esearch(self):
+        esearch = json.dumps({"esearchresult": {"count": "1", "idlist": ["11"]}}).encode()
+        efetch = b"""<TaxaSet><Taxon><TaxId>11</TaxId><ScientificName>Bacillus</ScientificName><Rank>genus</Rank><LineageEx><Taxon><ScientificName>Bacteria</ScientificName></Taxon></LineageEx></Taxon></TaxaSet>"""
+
+        def response(payload):
+            item = mock.MagicMock()
+            item.__enter__.return_value.read.return_value = payload
+            item.__exit__.return_value = False
+            return item
+
+        calls = [response(esearch), error.URLError("temporary"), response(efetch)]
+        with mock.patch.object(request, "urlopen", side_effect=calls) as urlopen:
+            outcome = taxonomy.query_exact_scientific_name(
+                "Bacillus", "test@example.org", None, attempts=2,
+                expected_rank="genus", ancestor_names=["Bacteria"], sleep=mock.Mock()
+            )
+        self.assertEqual(outcome.status, "resolved")
+        self.assertEqual(urlopen.call_count, 3)
+        endpoints = [call.args[0].full_url for call in urlopen.call_args_list]
+        self.assertEqual(sum("esearch.fcgi" in url for url in endpoints), 1)
+        self.assertEqual(sum("efetch.fcgi" in url for url in endpoints), 2)
+
+    def test_permanent_http_failure_is_not_retried_or_leaked(self):
+        failure = error.HTTPError(
+            "https://example.invalid/?api_key=SECRET&email=user@example.org",
+            401, "unauthorized SECRET", {}, None
+        )
+        with mock.patch.object(request, "urlopen", side_effect=failure) as urlopen:
+            outcome = taxonomy.query_exact_scientific_name(
+                "Example", "test@example.org", "SECRET", attempts=3
+            )
+        self.assertEqual(outcome.status, "request_failed")
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertNotIn("SECRET", outcome.message)
+        self.assertNotIn("user@example.org", outcome.message)
+
+    def test_retry_limiter_runs_before_every_request_attempt(self):
+        limiter = mock.Mock()
+        limiter.wait_for_request_slot = mock.Mock()
+        events = mock.Mock()
+        failure = error.HTTPError("https://example.invalid", 503, "down", {}, None)
+        with self.assertRaises(taxonomy.SafeRequestFailure):
+            taxonomy.request_payload(
+                "esearch", {}, limiter, events, attempts=3,
+                opener=mock.Mock(side_effect=failure), sleep=mock.Mock()
+            )
+        self.assertEqual(limiter.wait_for_request_slot.call_count, 3)
+
+    def test_local_refresh_validation_reports_pending_without_network_or_writes(self):
+        args = self.args(mode="refresh") + ["--validate-only"]
+        before = {path.name for path in self.work.iterdir()}
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(request, "urlopen") as urlopen, \
+             mock.patch("sys.argv", args), \
+             mock.patch("builtins.print") as printer:
+            self.assertEqual(taxonomy.main(), 0)
+        urlopen.assert_not_called()
+        self.assertEqual(before, {path.name for path in self.work.iterdir()})
+        self.assertTrue(any("pending_online" in str(call) for call in printer.call_args_list))
+
+    def test_online_preflight_fatal_request_fails_under_both_policies(self):
+        for policy in ("warn", "error"):
+            args = self.args(mode="refresh") + ["--validate-only", "--online-preflight"]
+            policy_index = args.index("--unresolved-policy") + 1
+            args[policy_index] = policy
+            with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+                 mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+                 mock.patch.object(
+                     taxonomy, "query_exact_scientific_name",
+                     return_value=taxonomy.LookupOutcome(
+                         "request_failed", code="E_NCBI_REQUEST", message="esearch timeout"
+                     )
+                 ), \
+                 mock.patch("sys.argv", args):
+                self.assertEqual(taxonomy.main(), 1)
+
+    def test_online_preflight_flag_requires_validate_only(self):
+        args = self.args(mode="refresh") + ["--online-preflight"]
+        with mock.patch("sys.argv", args), mock.patch.object(request, "urlopen") as urlopen:
+            self.assertEqual(taxonomy.main(), 1)
+        urlopen.assert_not_called()
+
+    def test_semantic_mismatch_warns_and_continues_but_error_policy_fails(self):
+        parts = self.lineage.split(";")
+        self.cache.write_text(json.dumps({
+            ";".join(parts[:depth]): depth for depth in range(1, 7)
+        }), encoding="utf-8")
+        outcomes = [
+            taxonomy.LookupOutcome(
+                "context_mismatch", code="E_TAXONOMY_CONTEXT",
+                message="expected genus, returned family",
+                expected_rank="genus", returned_rank="family"
+            ),
+            taxonomy.LookupOutcome(
+                "resolved", taxid=777, expected_rank="species",
+                returned_rank="species", rank_rule="exact"
+            ),
+        ]
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(taxonomy, "query_exact_scientific_name", side_effect=outcomes), \
+             mock.patch("sys.argv", self.args(mode="refresh")):
+            self.assertEqual(taxonomy.main(), 0)
+        provenance = json.loads((self.work / "provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(provenance["taxonomy_mismatches"]), 1)
+        self.assertEqual(provenance["query_failures"], [])
+        resolved = json.loads((self.work / "resolved.json").read_text(encoding="utf-8"))
+        self.assertEqual(resolved[self.lineage], "777")
+        self.assertNotIn(";".join(parts[:7]), resolved)
+
+        self.cache.write_text(json.dumps({
+            ";".join(parts[:depth]): depth for depth in range(1, 7)
+        }), encoding="utf-8")
+        error_args = self.args(mode="refresh")
+        error_args[error_args.index("--unresolved-policy") + 1] = "error"
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(taxonomy, "query_exact_scientific_name", side_effect=outcomes), \
+             mock.patch("sys.argv", error_args):
+            self.assertEqual(taxonomy.main(), 1)
+
+    def test_fatal_lookup_stops_before_later_nodes(self):
+        self.cache.write_text("{}", encoding="utf-8")
+        query = mock.Mock(return_value=taxonomy.LookupOutcome(
+            "response_invalid", code="E_NCBI_RESPONSE", message="malformed payload"
+        ))
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(taxonomy, "query_exact_scientific_name", query), \
+             mock.patch("sys.argv", self.args(mode="refresh")):
+            self.assertEqual(taxonomy.main(), 1)
+        self.assertEqual(query.call_count, 1)
+
+    def test_execution_failure_diagnostics_survive_and_redact(self):
+        diagnostics = self.work / "diagnostics"
+        diagnostics.mkdir()
+        transaction_id = "tx-" + "a" * 64
+        args = self.args(mode="refresh") + [
+            "--diagnostics-dir", str(diagnostics), "--transaction-id", transaction_id
+        ]
+        with mock.patch.dict(os.environ, {
+                 "NCBI_EMAIL": "private@example.org", "NCBI_API_KEY": "SECRETKEY"
+             }), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(
+                 taxonomy, "query_exact_scientific_name",
+                 return_value=taxonomy.LookupOutcome(
+                     "request_failed", code="E_NCBI_REQUEST",
+                     message="https://example.invalid/?api_key=SECRETKEY&email=private@example.org"
+                 )
+             ), \
+             mock.patch("sys.argv", args):
+            self.assertEqual(taxonomy.main(), 1)
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in diagnostics.iterdir())
+        self.assertIn("E_NCBI_REQUEST", combined)
+        self.assertNotIn("SECRETKEY", combined)
+        self.assertNotIn("private@example.org", combined)
 
     def test_refresh_records_all_resolution_source_labels(self):
         parts = self.lineage.split(";")
@@ -191,7 +399,10 @@ class TaxonomyResolverTests(unittest.TestCase):
              mock.patch.object(
                  taxonomy,
                  "query_exact_scientific_name",
-                 side_effect=[(777, None, [])],
+                 side_effect=[taxonomy.LookupOutcome("resolved", taxid=777,
+                                                     expected_rank="genus",
+                                                     returned_rank="genus",
+                                                     rank_rule="exact")],
              ), \
              mock.patch("sys.argv", self.args(mode="refresh")):
             self.assertEqual(taxonomy.main(), 0)
@@ -216,14 +427,15 @@ class TaxonomyResolverTests(unittest.TestCase):
             "lineage": ["Bacteria", "Bacillota", "Bacilli", "Bacillales", "Bacillaceae", "Bacillus"],
         }
         # Positive case
-        err = taxonomy.validate_taxonomy_context(
+        code, err, rule = taxonomy.validate_taxonomy_context(
             record, "Bacillus subtilis", expected_rank="species",
             ancestor_names=["Bacteria", "Bacillota", "Bacillus"]
         )
         self.assertIsNone(err)
+        self.assertEqual(rule, "exact")
 
         # Reversed order
-        err = taxonomy.validate_taxonomy_context(
+        _, err, _ = taxonomy.validate_taxonomy_context(
             record, "Bacillus subtilis", expected_rank="species",
             ancestor_names=["Bacillus", "Bacteria"]
         )
@@ -231,7 +443,7 @@ class TaxonomyResolverTests(unittest.TestCase):
         self.assertIn("out of order or reversed", err)
 
         # Missing ancestor
-        err = taxonomy.validate_taxonomy_context(
+        _, err, _ = taxonomy.validate_taxonomy_context(
             record, "Bacillus subtilis", expected_rank="species",
             ancestor_names=["Archaea"]
         )
@@ -239,7 +451,7 @@ class TaxonomyResolverTests(unittest.TestCase):
         self.assertIn("missing ancestor context", err)
 
         # Wrong rank
-        err = taxonomy.validate_taxonomy_context(
+        _, err, _ = taxonomy.validate_taxonomy_context(
             record, "Bacillus subtilis", expected_rank="genus",
             ancestor_names=["Bacteria"]
         )
@@ -247,7 +459,7 @@ class TaxonomyResolverTests(unittest.TestCase):
         self.assertIn("rank mismatch", err)
 
         # Wrong name
-        err = taxonomy.validate_taxonomy_context(
+        _, err, _ = taxonomy.validate_taxonomy_context(
             record, "Escherichia coli", expected_rank="species",
             ancestor_names=["Bacteria"]
         )
@@ -260,7 +472,7 @@ class TaxonomyResolverTests(unittest.TestCase):
             "rank": "species",
             "lineage": ["Bacteria", "Bacillus", "Bacillaceae", "Bacillus"],
         }
-        err = taxonomy.validate_taxonomy_context(
+        _, err, _ = taxonomy.validate_taxonomy_context(
             record_dup, "Bacillus subtilis", expected_rank="species",
             ancestor_names=["Bacteria", "Bacillus"]
         )
@@ -276,7 +488,9 @@ class TaxonomyResolverTests(unittest.TestCase):
 
         def mutate_cache(*args, **kwargs):
             self.cache.write_text(json.dumps({"external_mutation": 9999}), encoding="utf-8")
-            return 777, None, []
+            return taxonomy.LookupOutcome("resolved", taxid=777,
+                                          expected_rank="genus", returned_rank="genus",
+                                          rank_rule="exact")
 
         with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
              mock.patch.object(taxonomy, "query_exact_scientific_name", side_effect=mutate_cache), \
