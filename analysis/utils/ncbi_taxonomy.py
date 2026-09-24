@@ -522,7 +522,7 @@ def _parse_search_payload(payload):
         result = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise InvalidResponse("esearch returned malformed JSON") from None
-    if not isinstance(result, dict) or "error" in result:
+    if not isinstance(result, dict) or any(str(key).casefold() == "error" for key in result):
         raise InvalidResponse("esearch returned an explicit API error or non-object payload")
     search = result.get("esearchresult")
     if not isinstance(search, dict) or "idlist" not in search or "count" not in search:

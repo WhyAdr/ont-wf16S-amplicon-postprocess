@@ -321,6 +321,25 @@ class TaxonomyResolverTests(unittest.TestCase):
         self.assertEqual(sum("esearch.fcgi" in url for url in endpoints), 1)
         self.assertEqual(sum("efetch.fcgi" in url for url in endpoints), 2)
 
+    def test_top_level_api_errors_are_invalid_even_with_zero_or_valid_results(self):
+        payloads = [
+            {"ERROR": "simulated service failure",
+             "esearchresult": {"count": "0", "idlist": []}},
+            {"Error": "simulated service failure",
+             "esearchresult": {"count": "1", "idlist": ["11"]}},
+        ]
+        for payload in payloads:
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.__exit__.return_value = False
+            response.read.return_value = json.dumps(payload).encode()
+            with mock.patch.object(request, "urlopen", return_value=response):
+                outcome = taxonomy.query_exact_scientific_name(
+                    "Example", "test@example.org", None, attempts=1
+                )
+            self.assertEqual(outcome.status, "response_invalid")
+            self.assertEqual(outcome.code, "E_NCBI_RESPONSE")
+
     def test_permanent_http_failure_is_not_retried_or_leaked(self):
         failure = error.HTTPError(
             "https://example.invalid/?api_key=SECRET&email=user@example.org",
