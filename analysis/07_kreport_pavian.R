@@ -8,6 +8,82 @@ suppressMessages({
   library(processx)
 })
 
+taxonomy_scalar_text <- function(value) {
+  if (is.null(value) || length(value) != 1L || is.list(value)) return(NULL)
+  value <- as.character(value)
+  if (is.na(value) || !nzchar(trimws(value))) return(NULL)
+  trimws(value)
+}
+
+taxonomy_diagnostics_label <- function(diagnostics_dir) {
+  value <- taxonomy_scalar_text(diagnostics_dir)
+  if (!is.null(value)) value else "not configured (cache-only mode)"
+}
+
+read_taxonomy_failure_summary <- function(diagnostics_dir) {
+  value <- taxonomy_scalar_text(diagnostics_dir)
+  if (is.null(value) || !dir.exists(value)) return(NULL)
+  path <- file.path(value, "taxonomy_failure.json")
+  if (!file.exists(path) || dir.exists(path)) return(NULL)
+  tryCatch(
+    jsonlite::fromJSON(path, simplifyVector = FALSE),
+    error = function(e) NULL
+  )
+}
+
+taxonomy_summary_detail <- function(summary) {
+  if (!is.list(summary)) return(NULL)
+  code <- taxonomy_scalar_text(summary$code)
+  message <- taxonomy_scalar_text(summary$message)
+  if (is.null(message)) return(NULL)
+  detail <- if (is.null(code)) message else paste0(code, ": ", message)
+  completed <- taxonomy_scalar_text(summary$completed)
+  total <- taxonomy_scalar_text(summary$total)
+  if (!is.null(completed) && !is.null(total)) {
+    detail <- paste0(detail, " (completed ", completed, "/", total, ")")
+  }
+  detail
+}
+
+taxonomy_output_lines <- function(value) {
+  value <- taxonomy_scalar_text(value)
+  if (is.null(value)) return(character(0))
+  lines <- unlist(strsplit(value, "\\r?\\n", perl = TRUE), use.names = FALSE)
+  lines[nzchar(trimws(lines))]
+}
+
+taxonomy_resolver_failure_detail <- function(resolver, diagnostics_dir = NULL) {
+  detail <- taxonomy_summary_detail(read_taxonomy_failure_summary(diagnostics_dir))
+  stderr_lines <- taxonomy_output_lines(resolver$stderr)
+  stdout_lines <- taxonomy_output_lines(resolver$stdout)
+  error_pattern <- "(?i)(error|failed|failure|exception|traceback|E_[A-Z][A-Z0-9_]*)"
+
+  if (is.null(detail) && length(stderr_lines) > 0L) {
+    error_lines <- stderr_lines[grepl(error_pattern, stderr_lines, perl = TRUE)]
+    if (length(error_lines) > 0L) detail <- tail(error_lines, 1L)
+  }
+  if (is.null(detail) && length(stdout_lines) > 0L) {
+    error_lines <- stdout_lines[grepl(error_pattern, stdout_lines, perl = TRUE)]
+    if (length(error_lines) > 0L) detail <- tail(error_lines, 1L)
+  }
+  if (is.null(detail)) {
+    fallback_lines <- if (length(stderr_lines) > 0L) stderr_lines else stdout_lines
+    if (length(fallback_lines) > 0L) detail <- paste(tail(fallback_lines, 40L), collapse = "\n")
+  }
+  if (is.null(detail)) detail <- "no child-process detail was returned"
+
+  detail <- gsub("https?://[^[:space:]]+", "[REDACTED_URL]", detail)
+  detail <- gsub("(?i)(api[_-]?key|email)=([^&[:space:]]+)", "\\1=[REDACTED]",
+                 detail, perl = TRUE)
+  detail <- trimws(detail)
+  if (nchar(detail, type = "chars") > 1200L) {
+    detail <- substr(detail, nchar(detail, type = "chars") - 1199L,
+                     nchar(detail, type = "chars"))
+  }
+  if (!nzchar(detail)) detail <- "no child-process detail was returned"
+  detail
+}
+
 run_kreport <- function(context) {
   cfg <- context$config
   kreport_dir <- cfg$output$dirs$kreport
@@ -81,14 +157,10 @@ run_kreport <- function(context) {
     cleanup_tree = TRUE
   )
   if (!identical(resolver$status, 0L)) {
-    detail <- trimws(paste(resolver$stderr, resolver$stdout))
-    detail <- gsub("https?://[^[:space:]]+", "[REDACTED_URL]", detail)
-    detail <- gsub("(?i)(api[_-]?key|email)=([^&[:space:]]+)", "\\1=[REDACTED]",
-                   detail, perl = TRUE)
-    if (!nzchar(detail)) detail <- "no child-process detail was returned"
-    detail <- substr(detail, 1L, 1200L)
+    detail <- taxonomy_resolver_failure_detail(resolver, context$diagnostics_dir)
+    diagnostics_label <- taxonomy_diagnostics_label(context$diagnostics_dir)
     stop(sprintf("Taxonomy resolver failed (%d): %s; diagnostics: %s",
-                 resolver$status, detail, context$diagnostics_dir), call. = FALSE)
+                 resolver$status, detail, diagnostics_label), call. = FALSE)
   }
 
   required_resolver_outputs <- c(

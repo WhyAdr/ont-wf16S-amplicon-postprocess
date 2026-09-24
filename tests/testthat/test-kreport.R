@@ -11,6 +11,47 @@ source(file.path("..", "..", "analysis", "utils", "atomic_io.R"))
 source(file.path("..", "..", "analysis", "utils", "kreport.R"))
 source(file.path("..", "..", "analysis", "07_kreport_pavian.R"))
 
+test_that("taxonomy resolver failures prefer durable summaries and scalar diagnostics labels", {
+  root <- tempfile("taxonomy diagnostics ")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  jsonlite::write_json(
+    list(code = "E_NCBI_REQUEST", message = "terminal incomplete body", completed = 11L, total = 42L),
+    file.path(root, "taxonomy_failure.json"), auto_unbox = TRUE
+  )
+  resolver <- list(
+    status = 1L,
+    stderr = paste(c("progress event 1", "progress event 2", "[taxonomy] ERROR: stale output"),
+                   collapse = "\n"),
+    stdout = ""
+  )
+
+  detail <- taxonomy_resolver_failure_detail(resolver, root)
+  expect_match(detail, "E_NCBI_REQUEST: terminal incomplete body", fixed = TRUE)
+  expect_match(detail, "completed 11/42", fixed = TRUE)
+  expect_false(grepl("progress event|stale output", detail))
+  expect_identical(taxonomy_diagnostics_label(NULL), "not configured (cache-only mode)")
+  expect_length(taxonomy_diagnostics_label(NULL), 1L)
+})
+
+test_that("taxonomy resolver details use the final error line before a bounded stderr tail", {
+  resolver <- list(
+    status = 1L,
+    stderr = paste(c("progress event", "[taxonomy] ERROR: final resolver reason"), collapse = "\n"),
+    stdout = ""
+  )
+  expect_identical(
+    taxonomy_resolver_failure_detail(resolver, NULL),
+    "[taxonomy] ERROR: final resolver reason"
+  )
+
+  long_stderr <- paste(rep("progress output", 200L), collapse = " ")
+  detail <- taxonomy_resolver_failure_detail(
+    list(status = 1L, stderr = long_stderr, stdout = ""), NULL
+  )
+  expect_lte(nchar(detail, type = "chars"), 1200L)
+  expect_true(nzchar(detail))
+})
+
 test_that("kreport tree builder uses standard rank codes D, K, P, C, O, F, G, S", {
   ranks_template <- "Bacteria;Bacillati;Bacillota;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_subtilis"
   unclass_lineage <- "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown"
