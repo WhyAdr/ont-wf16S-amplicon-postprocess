@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-24
+
+### Added
+
+- Add typed NCBI lookup outcomes that distinguish not-found, ambiguity, and
+  taxonomy-context mismatches from fatal request and response failures.
+- Retain credential-safe, flushed taxonomy event logs and failure summaries in
+  transaction-specific `.wf16s-diagnostics` directories outside disposable
+  module staging.
+
+### Changed
+
+- Make ordinary refresh preflight local and read-only, reporting pending online
+  resolution without performing the same full NCBI lookup pass twice.
+- Restrict full online preflight to explicit `--validate-only` use and apply the
+  same fatal-outcome and unresolved-policy decisions as execution.
+- Rate-limit every ESearch and EFetch attempt, retry transient failures at the
+  request boundary, and stop issuing lookups after a fatal outcome.
+
+### Fixed
+
+- Accept NCBI's current `domain` rank for the canonical Bacteria, Archaea, and
+  Eukaryota roots while retaining legacy `superkingdom` output conventions and
+  strict name, ancestry, and all other rank checks.
+- Reject malformed, truncated, explicit-error, or TaxID-inconsistent NCBI
+  payloads instead of treating them as valid zero-hit responses.
+- Propagate bounded resolver failure details and the durable diagnostics path
+  through the R module error without exposing email or API-key values.
+
 ## [0.4.8] - 2026-09-13
 
 ### Added

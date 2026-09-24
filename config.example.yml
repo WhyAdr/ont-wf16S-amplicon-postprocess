@@ -121,6 +121,8 @@ taxonomy:
   cache: "wf16s-inputs/output_AAy/taxonomy_cache.json"
   # YAML is deliberately offline-only. Use --refresh-taxonomy for an online run.
   network_mode: "cache_only"
+  # Semantic not-found/ambiguous/context mismatches warn or error; request and
+  # invalid-response failures are always fatal. Local validation reports pending.
   unresolved_policy: "warn"  # 'warn' or 'error'
   email_env: "NCBI_EMAIL"
   api_key_env: "NCBI_API_KEY"
