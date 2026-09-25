@@ -7,6 +7,8 @@ import csv
 import tempfile
 import threading
 import unittest
+import contextlib
+import io
 from http import client
 from unittest import mock
 from urllib import error, request
@@ -401,6 +403,102 @@ class TaxonomyResolverTests(unittest.TestCase):
             self.assertEqual(taxonomy.main(), 1)
         urlopen.assert_not_called()
 
+        cache_only_args = self.args() + ["--validate-only", "--online-preflight"]
+        with mock.patch("sys.argv", cache_only_args), mock.patch.object(request, "urlopen") as urlopen:
+            self.assertEqual(taxonomy.main(), 1)
+        urlopen.assert_not_called()
+
+    def test_refresh_execution_enters_one_online_resolution_phase(self):
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(
+                 taxonomy, "query_exact_scientific_name",
+                 return_value=taxonomy.LookupOutcome(
+                     "resolved", taxid=777, expected_rank="species",
+                     returned_rank="species", rank_rule="exact"
+                 ),
+             ), \
+             mock.patch.object(
+                 taxonomy, "resolve_unresolved_online",
+                 wraps=taxonomy.resolve_unresolved_online,
+             ) as resolve_phase, \
+             mock.patch("sys.argv", self.args(mode="refresh")):
+            self.assertEqual(taxonomy.main(), 0)
+        resolve_phase.assert_called_once()
+
+    def test_mixed_semantic_unresolved_nodes_keep_lookup_statuses_in_terminal_failure(self):
+        second_lineage = self.lineage.replace("Bacillus subtilis", "Bacillus cereus")
+        self.abundance.write_text(
+            "tax\tS1\ttotal\n"
+            "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown\t1\t1\n"
+            f"{self.lineage}\t2\t2\n"
+            f"{second_lineage}\t3\t3\n",
+            encoding="utf-8",
+        )
+        parts = self.lineage.split(";")
+        second_parts = second_lineage.split(";")
+        cache_payload = {
+            ";".join(parts[:depth]): depth for depth in range(1, 8)
+        }
+        cache_payload.update({
+            ";".join(second_parts[:depth]): depth for depth in range(1, 8)
+        })
+        cache_payload[self.lineage] = 0
+        cache_payload[second_lineage] = 0
+        self.cache.write_text(json.dumps(cache_payload), encoding="utf-8")
+        diagnostics = self.work / "mixed diagnostics"
+        diagnostics.mkdir()
+        args = self.args(mode="refresh") + [
+            "--diagnostics-dir", str(diagnostics),
+            "--transaction-id", "tx-" + "d" * 64,
+        ]
+        outcomes = [
+            taxonomy.LookupOutcome(
+                "not_found", code="E_TAXONOMY_NOT_FOUND", message="species not found"
+            ),
+            taxonomy.LookupOutcome(
+                "ambiguous", candidates=(11, 22), code="E_TAXONOMY_AMBIGUOUS",
+                message="species ambiguous"
+            ),
+        ]
+        args[args.index("--unresolved-policy") + 1] = "error"
+        with mock.patch.dict(os.environ, {"NCBI_EMAIL": "test@example.org"}), \
+             mock.patch.object(taxonomy, "read_assignment_taxids", return_value=({}, [])), \
+             mock.patch.object(taxonomy, "query_exact_scientific_name", side_effect=outcomes), \
+             mock.patch("sys.argv", args):
+            self.assertEqual(taxonomy.main(), 1)
+
+        events = [
+            json.loads(line)
+            for line in (diagnostics / "taxonomy_events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        progress = [event for event in events if event["event"] == "lookup_progress"]
+        self.assertEqual([event["outcome"] for event in progress], ["not_found", "ambiguous"])
+        summary = json.loads((diagnostics / "taxonomy_failure.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["code"], "E_TAXONOMY_UNRESOLVED")
+        self.assertEqual(summary["outcome"], "unresolved")
+        self.assertNotEqual(summary["outcome"], "context_mismatch")
+
+    def test_local_failure_is_execution_failure_and_typed_boundary_failures_keep_classification(self):
+        for exception, expected_code, expected_outcome in (
+            (OSError("local filesystem failure"), "E_TAXONOMY_EXECUTION", "execution_failed"),
+            (taxonomy.SafeRequestFailure("E_NCBI_REQUEST", "transport failure"),
+             "E_NCBI_REQUEST", "request_failed"),
+            (taxonomy.InvalidResponse("malformed response"), "E_NCBI_RESPONSE", "response_invalid"),
+        ):
+            diagnostics = self.work / f"boundary-{expected_outcome}"
+            diagnostics.mkdir()
+            args = self.args() + [
+                "--diagnostics-dir", str(diagnostics),
+                "--transaction-id", "tx-" + "e" * 64,
+            ]
+            with mock.patch.object(taxonomy, "read_assignment_taxids", side_effect=exception), \
+                 mock.patch("sys.argv", args):
+                self.assertEqual(taxonomy.main(), 1)
+            summary = json.loads((diagnostics / "taxonomy_failure.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["code"], expected_code)
+            self.assertEqual(summary["outcome"], expected_outcome)
+
     def test_semantic_mismatch_warns_and_continues_but_error_policy_fails(self):
         parts = self.lineage.split(";")
         self.cache.write_text(json.dumps({
@@ -467,15 +565,21 @@ class TaxonomyResolverTests(unittest.TestCase):
                  taxonomy, "query_exact_scientific_name",
                  return_value=taxonomy.LookupOutcome(
                      "request_failed", code="E_NCBI_REQUEST",
-                     message="https://example.invalid/?api_key=SECRETKEY&email=private@example.org"
+                     message=(
+                         "contact private@example.org; api_key=SECRETKEY; "
+                         "https://user:URLSECRET@example.invalid/?email=private@example.org"
+                     )
                  )
              ), \
-             mock.patch("sys.argv", args):
+             mock.patch("sys.argv", args), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(taxonomy.main(), 1)
         combined = "\n".join(path.read_text(encoding="utf-8") for path in diagnostics.iterdir())
+        combined += "\n" + stderr.getvalue()
         self.assertIn("E_NCBI_REQUEST", combined)
         self.assertNotIn("SECRETKEY", combined)
         self.assertNotIn("private@example.org", combined)
+        self.assertNotIn("URLSECRET", combined)
 
     def test_refresh_records_all_resolution_source_labels(self):
         parts = self.lineage.split(";")

@@ -51,6 +51,15 @@ class LookupOutcome:
     rank_rule: str = None
 
 
+@dataclasses.dataclass(frozen=True)
+class TerminalFailure:
+    """A failure for the whole resolver operation, not one taxonomy lookup."""
+
+    outcome: str
+    code: str
+    message: str
+
+
 class SafeRequestFailure(Exception):
     """A credential-safe, classified request failure."""
 
@@ -111,6 +120,11 @@ class EventWriter:
     def _safe_text(value):
         text = " ".join(str(value).split())
         text = re.sub(r"(?i)(api[_-]?key|email)=([^&\s]+)", r"\1=[REDACTED]", text)
+        text = re.sub(
+            r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+            "[REDACTED_EMAIL]",
+            text,
+        )
         text = re.sub(r"https?://\S+", "[REDACTED_URL]", text)
         return text[:EventWriter.MAX_MESSAGE_LENGTH]
 
@@ -132,10 +146,11 @@ class EventWriter:
     def write_failure_summary(self, outcome, completed, total):
         if not self.summary_path:
             return
+        outcome_name = getattr(outcome, "outcome", None) or getattr(outcome, "status", None)
         payload = {
             "status": "failed",
             "code": outcome.code,
-            "outcome": outcome.status,
+            "outcome": outcome_name,
             "message": self._safe_text(outcome.message or "taxonomy resolution failed"),
             "completed": completed,
             "total": total,
@@ -520,7 +535,7 @@ def request_payload(endpoint, params, limiter, events, attempts=MAX_REQUEST_ATTE
 def _parse_search_payload(payload):
     try:
         result = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (AttributeError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
         raise InvalidResponse("esearch returned malformed JSON") from None
     if not isinstance(result, dict) or any(str(key).casefold() == "error" for key in result):
         raise InvalidResponse("esearch returned an explicit API error or non-object payload")
@@ -552,7 +567,7 @@ def _parse_search_payload(payload):
 def _parse_taxonomy_context(payload, taxid):
     try:
         root = ET.fromstring(payload)
-    except (ET.ParseError, LookupError):
+    except (ET.ParseError, LookupError, TypeError, ValueError):
         raise InvalidResponse("efetch returned malformed XML") from None
     error_node = root.find(".//ERROR")
     if error_node is not None:
@@ -680,6 +695,105 @@ def query_exact_scientific_name(name, email, api_key, attempts=MAX_REQUEST_ATTEM
         return LookupOutcome("response_invalid", code="E_NCBI_RESPONSE", message=exc.safe_message)
 
 
+def resolve_unresolved_online(unresolved, cache, resolution_sources, email, api_key, events):
+    """Resolve the current unresolved set in one online-capable phase."""
+    limiter = RequestLimiter(0.12 if api_key else 0.35)
+    name_results = {}
+    query_failures = []
+    ambiguous_queries = []
+    taxonomy_mismatches = []
+    lookup_outcomes = []
+    rank_compatibility = []
+    fatal_outcome = None
+    total_unresolved = len(unresolved)
+
+    for completed, item in enumerate(unresolved, start=1):
+        name = item["name"]
+        expected_rank = EXPECTED_RANKS[item["depth"] - 1] if item["depth"] <= len(EXPECTED_RANKS) else None
+        ancestor_names = [part for part in item["path"].split(";")[:-1]
+                          if part.strip().lower() not in PLACEHOLDER_NAMES]
+        query_key = (name, expected_rank, tuple(ancestor_names))
+        if query_key not in name_results:
+            name_results[query_key] = query_exact_scientific_name(
+                name, email, api_key, expected_rank=expected_rank,
+                ancestor_names=ancestor_names, limiter=limiter, events=events
+            )
+        outcome = name_results[query_key]
+        outcome_record = {
+            "path": item["path"], "name": name, "status": outcome.status,
+            "code": outcome.code, "message": outcome.message,
+        }
+        if outcome.expected_rank is not None:
+            outcome_record["expected_rank"] = outcome.expected_rank
+        if outcome.returned_rank is not None:
+            outcome_record["returned_rank"] = outcome.returned_rank
+        if outcome.rank_rule is not None:
+            outcome_record["rank_rule"] = outcome.rank_rule
+        lookup_outcomes.append(outcome_record)
+        events.emit("lookup_progress", phase="taxonomy_resolution", name=name,
+                    code=outcome.code, outcome=outcome.status,
+                    message=outcome.message,
+                    expected_rank=outcome.expected_rank,
+                    returned_rank=outcome.returned_rank,
+                    rank_rule=outcome.rank_rule,
+                    completed=completed, total=total_unresolved)
+        if outcome.status in FATAL_OUTCOMES:
+            query_failures.append(outcome_record)
+            fatal_outcome = outcome
+            events.emit("lookup_failure", phase="taxonomy_resolution", name=name,
+                        code=outcome.code, message=outcome.message,
+                        completed=completed, total=total_unresolved)
+            events.write_failure_summary(outcome, completed, total_unresolved)
+            break
+        if outcome.status == "context_mismatch":
+            taxonomy_mismatches.append(outcome_record)
+        elif outcome.status == "ambiguous":
+            ambiguous_queries.append({
+                "path": item["path"], "name": name, "taxids": list(outcome.candidates)
+            })
+        elif outcome.status == "resolved":
+            cache[item["path"]] = outcome.taxid
+            resolution_sources[item["path"]] = "ncbi_refresh"
+            if outcome.rank_rule != "exact":
+                rank_compatibility.append({
+                    "path": item["path"], "name": name,
+                    "expected_rank": outcome.expected_rank,
+                    "returned_rank": outcome.returned_rank,
+                    "rule": outcome.rank_rule,
+                })
+
+    return {
+        "query_failures": query_failures,
+        "ambiguous_queries": ambiguous_queries,
+        "taxonomy_mismatches": taxonomy_mismatches,
+        "lookup_outcomes": lookup_outcomes,
+        "rank_compatibility": rank_compatibility,
+        "fatal_outcome": fatal_outcome,
+    }
+
+
+def terminal_failure_for_exception(exc):
+    """Classify an otherwise-unhandled exception at the CLI boundary."""
+    if isinstance(exc, SafeRequestFailure):
+        return TerminalFailure("request_failed", exc.code, exc.safe_message)
+    if isinstance(exc, InvalidResponse):
+        return TerminalFailure("response_invalid", "E_NCBI_RESPONSE", exc.safe_message)
+    return TerminalFailure("execution_failed", "E_TAXONOMY_EXECUTION", EventWriter._safe_text(exc))
+
+
+def record_terminal_failure(events, failure, completed=0, total=0):
+    if events is None:
+        return
+    event_name = {
+        "request_failed": "request_failure",
+        "response_invalid": "response_failure",
+        "unresolved": "resolution_failure",
+    }.get(failure.outcome, "execution_failure")
+    events.emit(event_name, phase="taxonomy_resolution", code=failure.code,
+                outcome=failure.outcome, message=failure.message)
+    events.write_failure_summary(failure, completed, total)
+
+
 def write_unresolved_tsv(path, unresolved):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as handle:
@@ -739,10 +853,10 @@ def main():
 
     events = None
     try:
-        if args.online_preflight and not args.validate_only:
+        if args.online_preflight and (args.mode != "refresh" or not args.validate_only):
             raise ValueError(
-                "E_ONLINE_PREFLIGHT_MODE: --online-preflight is only valid with --validate-only; "
-                "remove it for normal one-pass refresh execution."
+                "E_ONLINE_PREFLIGHT_MODE: --online-preflight requires --mode refresh and "
+                "--validate-only; remove it for cache-only validation and normal execution."
             )
         if args.validate_only and args.diagnostics_dir:
             raise ValueError("--diagnostics-dir is not permitted with --validate-only.")
@@ -833,64 +947,15 @@ def main():
                     )
                     return 0
                 api_key = os.environ.get(args.api_key_env, "").strip() or None
-                limiter = RequestLimiter(0.12 if api_key else 0.35)
-                name_results = {}
-                fatal_outcome = None
-                total_unresolved = len(unresolved)
-                for completed, item in enumerate(unresolved, start=1):
-                    name = item["name"]
-                    expected_rank = EXPECTED_RANKS[item["depth"] - 1] if item["depth"] <= len(EXPECTED_RANKS) else None
-                    ancestor_names = [part for part in item["path"].split(";")[:-1]
-                                      if part.strip().lower() not in PLACEHOLDER_NAMES]
-                    query_key = (name, expected_rank, tuple(ancestor_names))
-                    if query_key not in name_results:
-                        name_results[query_key] = query_exact_scientific_name(
-                            name, email, api_key, expected_rank=expected_rank,
-                            ancestor_names=ancestor_names, limiter=limiter, events=events
-                        )
-                    outcome = name_results[query_key]
-                    outcome_record = {
-                        "path": item["path"], "name": name, "status": outcome.status,
-                        "code": outcome.code, "message": outcome.message,
-                    }
-                    if outcome.expected_rank is not None:
-                        outcome_record["expected_rank"] = outcome.expected_rank
-                    if outcome.returned_rank is not None:
-                        outcome_record["returned_rank"] = outcome.returned_rank
-                    if outcome.rank_rule is not None:
-                        outcome_record["rank_rule"] = outcome.rank_rule
-                    lookup_outcomes.append(outcome_record)
-                    events.emit("lookup_progress", phase="taxonomy_resolution", name=name,
-                                code=outcome.code, outcome=outcome.status,
-                                message=outcome.message,
-                                expected_rank=outcome.expected_rank,
-                                returned_rank=outcome.returned_rank,
-                                rank_rule=outcome.rank_rule,
-                                completed=completed, total=total_unresolved)
-                    if outcome.status in FATAL_OUTCOMES:
-                        query_failures.append(outcome_record)
-                        fatal_outcome = outcome
-                        events.emit("lookup_failure", phase="taxonomy_resolution", name=name,
-                                    code=outcome.code, message=outcome.message,
-                                    completed=completed, total=total_unresolved)
-                        events.write_failure_summary(outcome, completed, total_unresolved)
-                        break
-                    if outcome.status == "context_mismatch":
-                        taxonomy_mismatches.append(outcome_record)
-                    elif outcome.status == "ambiguous":
-                        ambiguous_queries.append({
-                            "path": item["path"], "name": name, "taxids": list(outcome.candidates)
-                        })
-                    elif outcome.status == "resolved":
-                        cache[item["path"]] = outcome.taxid
-                        resolution_sources[item["path"]] = "ncbi_refresh"
-                        if outcome.rank_rule != "exact":
-                            rank_compatibility.append({
-                                "path": item["path"], "name": name,
-                                "expected_rank": outcome.expected_rank,
-                                "returned_rank": outcome.returned_rank,
-                                "rule": outcome.rank_rule,
-                            })
+                online_result = resolve_unresolved_online(
+                    unresolved, cache, resolution_sources, email, api_key, events
+                )
+                query_failures = online_result["query_failures"]
+                ambiguous_queries = online_result["ambiguous_queries"]
+                taxonomy_mismatches = online_result["taxonomy_mismatches"]
+                lookup_outcomes = online_result["lookup_outcomes"]
+                rank_compatibility = online_result["rank_compatibility"]
+                fatal_outcome = online_result["fatal_outcome"]
 
                 unresolved = find_unresolved(abundance_paths, cache)
                 if fatal_outcome is not None:
@@ -904,7 +969,14 @@ def main():
             cache_sha_candidate = compute_json_sha256(candidate_cache)
             if args.validate_only:
                 if args.unresolved_policy == "error" and unresolved:
-                    raise ValueError(f"{len(unresolved)} taxonomy nodes remain unresolved.")
+                    failure = TerminalFailure(
+                        "unresolved", "E_TAXONOMY_UNRESOLVED",
+                        f"{len(unresolved)} taxonomy nodes remain unresolved",
+                    )
+                    record_terminal_failure(events, failure, len(lookup_outcomes), len(lookup_outcomes))
+                    print(f"[taxonomy] ERROR: {failure.code}: {failure.message}",
+                          file=sys.stderr, flush=True)
+                    return 1
                 print(f"[taxonomy] Preflight complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
                 return 0
 
@@ -967,19 +1039,22 @@ def main():
                 print(f"[taxonomy] ERROR: {len(query_failures)} NCBI query failure(s); source cache preserved.", file=sys.stderr)
                 return 1
             if args.unresolved_policy == "error" and unresolved:
-                events.write_failure_summary(
-                    LookupOutcome("context_mismatch", code="E_TAXONOMY_UNRESOLVED",
-                                  message=f"{len(unresolved)} taxonomy nodes remain unresolved"),
-                    len(lookup_outcomes), len(lookup_outcomes)
+                failure = TerminalFailure(
+                    "unresolved", "E_TAXONOMY_UNRESOLVED",
+                    f"{len(unresolved)} taxonomy nodes remain unresolved",
                 )
-                print(f"[taxonomy] ERROR: {len(unresolved)} taxonomy nodes remain unresolved.", file=sys.stderr)
+                record_terminal_failure(events, failure, len(lookup_outcomes), len(lookup_outcomes))
+                print(f"[taxonomy] ERROR: {failure.code}: {failure.message}", file=sys.stderr)
                 return 1
             if args.mode == "refresh":
                 current_cache_sha = compute_sha256(args.cache)
                 if current_cache_sha != cache_sha_before:
                     events.write_failure_summary(
-                        LookupOutcome("request_failed", code="E_TAXONOMY_CACHE_CHANGED",
-                                      message="source taxonomy cache changed during query execution"),
+                        TerminalFailure(
+                            "execution_failed", "E_TAXONOMY_EXECUTION",
+                            "source taxonomy cache changed during query execution "
+                            "(E_TAXONOMY_CACHE_CHANGED)",
+                        ),
                         len(lookup_outcomes), len(lookup_outcomes)
                     )
                     print(
@@ -997,13 +1072,23 @@ def main():
                     atomic_write_json(args.provenance, provenance)
             print(f"[taxonomy] Resolution complete: {len(unresolved)} unresolved, {len(conflicts)} conflicts.")
             return 0
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        if events is not None:
-            outcome = LookupOutcome("response_invalid", code="E_TAXONOMY_EXECUTION",
-                                    message=EventWriter._safe_text(exc))
-            events.emit("execution_failure", code=outcome.code, message=outcome.message)
-            events.write_failure_summary(outcome, 0, 0)
-        print(f"[taxonomy] ERROR: {EventWriter._safe_text(exc)}", file=sys.stderr)
+    except SafeRequestFailure as exc:
+        failure = terminal_failure_for_exception(exc)
+        record_terminal_failure(events, failure)
+        print(f"[taxonomy] ERROR: {failure.code}: {EventWriter._safe_text(failure.message)}",
+              file=sys.stderr)
+        return 1
+    except InvalidResponse as exc:
+        failure = terminal_failure_for_exception(exc)
+        record_terminal_failure(events, failure)
+        print(f"[taxonomy] ERROR: {failure.code}: {EventWriter._safe_text(failure.message)}",
+              file=sys.stderr)
+        return 1
+    except Exception as exc:
+        failure = terminal_failure_for_exception(exc)
+        record_terminal_failure(events, failure)
+        print(f"[taxonomy] ERROR: {failure.code}: {EventWriter._safe_text(failure.message)}",
+              file=sys.stderr)
         return 1
     finally:
         if events is not None:
