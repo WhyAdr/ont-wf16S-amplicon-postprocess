@@ -181,20 +181,22 @@ cleanup_empty_taxonomy_diagnostics <- function(path, expected_parent) {
     entries <- list.files(candidate, all.files = TRUE, no.. = TRUE,
                           recursive = FALSE, include.dirs = TRUE)
     if (length(entries) != 0L) return(FALSE)
-    removed <- if (identical(.Platform$OS.type, "windows")) {
-      # Base R's non-recursive unlink does not remove directories reliably on
-      # Windows. `rmdir` is the native non-recursive equivalent and still
-      # refuses to remove a directory that gained an entry after the census.
-      status <- tryCatch(system2(
+    # R's non-recursive unlink is not a portable empty-directory removal
+    # primitive: on Unix it can return a failure for directories, while on
+    # Windows it does not reliably remove them. Use each platform's native
+    # nonrecursive rmdir operation. It still refuses to remove a directory
+    # that gained an entry after the census above.
+    status <- if (identical(.Platform$OS.type, "windows")) {
+      tryCatch(system2(
         Sys.getenv("COMSPEC", unset = "cmd.exe"),
         c("/d", "/c", "rmdir", "/q", shQuote(candidate)),
         stdout = FALSE, stderr = FALSE
       ), error = function(e) NA_integer_)
-      identical(status, 0L) && !dir.exists(candidate)
     } else {
-      status <- unlink(candidate, recursive = FALSE, force = TRUE)
-      status == 0L && !dir.exists(candidate)
+      tryCatch(system2("rmdir", candidate, stdout = FALSE, stderr = FALSE),
+               error = function(e) NA_integer_)
     }
+    removed <- identical(status, 0L) && !dir.exists(candidate)
     if (!isTRUE(removed)) {
       warning(sprintf("Could not clean empty taxonomy diagnostics directory '%s'.",
                       candidate), call. = FALSE)

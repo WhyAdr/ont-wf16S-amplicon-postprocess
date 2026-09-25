@@ -186,6 +186,31 @@ test_that("a later failure rolls back a deferred local taxonomy refresh and clea
   expect_false(startsWith(tolower(diagnostic_runs), paste0(tolower(output), "/")))
 })
 
+test_that("an early module failure removes its empty transaction diagnostics directory", {
+  fixture <- create_unresolved_refresh_fixture(
+    tempfile("refresh_early_failure_"), "warn"
+  )
+  result <- run_transaction_process(c(
+    "--config", fixture$config,
+    "--modules", "qc,kreport",
+    "--refresh-taxonomy",
+    "--output-dir", fixture$output
+  ), tempdir(), env = c(
+    NCBI_EMAIL = "redaction-test@example.invalid",
+    WF16S_TEST_MODE = "1",
+    WF16S_INJECT_MODULE_FAILURE = "qc"
+  ))
+
+  expect_gt(result$status, 0L)
+  expect_match(paste(result$stderr, result$stdout),
+               "Injected failure after module 'qc'")
+  expect_true(dir.exists(fixture$diagnostics_root))
+  expect_length(
+    list.dirs(fixture$diagnostics_root, recursive = FALSE, full.names = TRUE),
+    0L
+  )
+})
+
 test_that("refresh validate-only stays local and leaves no outputs or cache mutations", {
   for (policy in c("warn", "error")) {
     fixture <- create_unresolved_refresh_fixture(
