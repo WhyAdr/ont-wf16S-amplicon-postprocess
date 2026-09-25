@@ -520,6 +520,12 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
       "Remove it for cache-only validation and normal one-pass execution."
     ), call. = FALSE)
   }
+  if (isTRUE(cfg$cli$online_preflight) && !("kreport" %in% requested_modules)) {
+    stop(paste(
+      "E_ONLINE_PREFLIGHT_MODULE: --online-preflight requires the 'kreport' module.",
+      "Include kreport in --modules or remove --online-preflight."
+    ), call. = FALSE)
+  }
 
   # Path resolution against config_dir
   cfg$input$abundance_table <- resolve_path(cfg$input$abundance_table, config_dir)

@@ -40,8 +40,9 @@ All notable changes to this project are documented in this file.
   failure classifications.
 - Keep refresh validation local and mutation-free unless the explicit
   `--validate-only --refresh-taxonomy --online-preflight` mode is selected,
-  and retain non-empty transaction diagnostics while cleaning only empty
-  transaction-owned directories during normal unwinding.
+  reject online preflight when `kreport` is not requested, and retain
+  non-empty transaction diagnostics while cleaning only empty transaction-
+  owned directories during normal unwinding.
 
 ## [0.4.8] - 2026-09-13
 
