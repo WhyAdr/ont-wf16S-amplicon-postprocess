@@ -32,6 +32,16 @@ All notable changes to this project are documented in this file.
   payloads instead of treating them as valid zero-hit responses.
 - Propagate bounded resolver failure details and the durable diagnostics path
   through the R module error without exposing email or API-key values.
+- Serialize aggregate unresolved-policy failures as
+  `E_TAXONOMY_UNRESOLVED`/`unresolved` while retaining each lookup's
+  `not_found`, `ambiguous`, or `context_mismatch` outcome.
+- Classify local resolver failures as `E_TAXONOMY_EXECUTION`/
+  `execution_failed` while preserving distinct NCBI request and response
+  failure classifications.
+- Keep refresh validation local and mutation-free unless the explicit
+  `--validate-only --refresh-taxonomy --online-preflight` mode is selected,
+  and retain non-empty transaction diagnostics while cleaning only empty
+  transaction-owned directories during normal unwinding.
 
 ## [0.4.8] - 2026-09-13
 
