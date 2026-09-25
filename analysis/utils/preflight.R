@@ -370,9 +370,20 @@ validate_output_root <- function(cfg, repo_root, extra_paths = character(0)) {
   invisible(output)
 }
 
-run_module_preflight <- function(context, modules) {
+run_taxonomy_resolver <- function(python, args, runner = processx::run, echo = FALSE) {
+  runner(
+    command = python,
+    args = args,
+    echo = echo,
+    error_on_status = FALSE,
+    cleanup_tree = TRUE
+  )
+}
+
+run_module_preflight <- function(context, modules, resolver_runner = NULL) {
   cfg <- context$config
   warnings <- character(0)
+  resolver_runner <- resolver_runner %||% context$taxonomy_resolver_runner %||% processx::run
   if ("alpha" %in% modules) {
     registry <- alpha_metric_registry(context$config$alpha$hill_orders,
                                       context$config$alpha$renyi_orders)
@@ -423,7 +434,7 @@ run_module_preflight <- function(context, modules) {
         function(record) paste(record$path, record$sha256, sep = "\t"), character(1))
       args <- c(args, as.vector(rbind("--expected-input", expected_specs)))
     }
-    probe <- processx::run(python, args, error_on_status = FALSE)
+    probe <- run_taxonomy_resolver(python, args, runner = resolver_runner)
     if (probe$status != 0L) {
       err_text <- trimws(paste(probe$stderr, probe$stdout))
       preflight_error("E_KREPORT_PREFLIGHT", err_text)

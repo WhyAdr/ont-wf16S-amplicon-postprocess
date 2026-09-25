@@ -513,10 +513,11 @@ load_config <- function(config_path = "config.yml", cli_opts = list()) {
     pavian = isTRUE(cfg$pavian$enabled),
     modules = requested_modules
   )
-  if (isTRUE(cfg$cli$online_preflight) && !isTRUE(cfg$cli$validate_only)) {
+  if (isTRUE(cfg$cli$online_preflight) &&
+      (!isTRUE(cfg$cli$validate_only) || !identical(cfg$taxonomy$network_mode, "refresh"))) {
     stop(paste(
-      "E_ONLINE_PREFLIGHT_MODE: --online-preflight requires --validate-only.",
-      "Remove --online-preflight for normal one-pass taxonomy refresh execution."
+      "E_ONLINE_PREFLIGHT_MODE: --online-preflight requires --validate-only --refresh-taxonomy.",
+      "Remove it for cache-only validation and normal one-pass execution."
     ), call. = FALSE)
   }
 

@@ -217,6 +217,10 @@ test_that("online taxonomy preflight is explicit validation-only mode", {
     load_config(path, cli_opts = list(online_preflight = TRUE)),
     "E_ONLINE_PREFLIGHT_MODE"
   )
+  expect_error(
+    load_config(path, cli_opts = list(validate_only = TRUE, online_preflight = TRUE)),
+    "E_ONLINE_PREFLIGHT_MODE"
+  )
   resolved <- load_config(path, cli_opts = list(
     validate_only = TRUE, online_preflight = TRUE, refresh_taxonomy = TRUE
   ))

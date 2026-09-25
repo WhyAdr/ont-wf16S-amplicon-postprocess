@@ -75,6 +75,8 @@ taxonomy_resolver_failure_detail <- function(resolver, diagnostics_dir = NULL) {
   detail <- gsub("https?://[^[:space:]]+", "[REDACTED_URL]", detail)
   detail <- gsub("(?i)(api[_-]?key|email)=([^&[:space:]]+)", "\\1=[REDACTED]",
                  detail, perl = TRUE)
+  detail <- gsub("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b",
+                 "[REDACTED_EMAIL]", detail, perl = TRUE)
   detail <- trimws(detail)
   if (nchar(detail, type = "chars") > 1200L) {
     detail <- substr(detail, nchar(detail, type = "chars") - 1199L,
@@ -84,8 +86,9 @@ taxonomy_resolver_failure_detail <- function(resolver, diagnostics_dir = NULL) {
   detail
 }
 
-run_kreport <- function(context) {
+run_kreport <- function(context, resolver_runner = NULL) {
   cfg <- context$config
+  resolver_runner <- resolver_runner %||% context$taxonomy_resolver_runner %||% processx::run
   kreport_dir <- cfg$output$dirs$kreport
   dir.create(kreport_dir, recursive = TRUE, showWarnings = FALSE)
 
@@ -149,12 +152,8 @@ run_kreport <- function(context) {
   }
 
   # processx passes a true argument vector on Windows and Unix; do not shell-quote.
-  resolver <- processx::run(
-    command = python_cmd,
-    args = cmd_args,
-    echo = TRUE,
-    error_on_status = FALSE,
-    cleanup_tree = TRUE
+  resolver <- run_taxonomy_resolver(
+    python_cmd, cmd_args, runner = resolver_runner, echo = TRUE
   )
   if (!identical(resolver$status, 0L)) {
     detail <- taxonomy_resolver_failure_detail(resolver, context$diagnostics_dir)

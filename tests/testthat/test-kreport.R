@@ -8,6 +8,7 @@ source(file.path("..", "..", "analysis", "utils", "version.R"))
 source(file.path("..", "..", "analysis", "utils", "io.R"))
 source(file.path("..", "..", "analysis", "utils", "manifest.R"))
 source(file.path("..", "..", "analysis", "utils", "atomic_io.R"))
+source(file.path("..", "..", "analysis", "utils", "preflight.R"))
 source(file.path("..", "..", "analysis", "utils", "kreport.R"))
 source(file.path("..", "..", "analysis", "07_kreport_pavian.R"))
 
@@ -33,6 +34,39 @@ test_that("taxonomy resolver failures prefer durable summaries and scalar diagno
   expect_length(taxonomy_diagnostics_label(NULL), 1L)
 })
 
+test_that("R taxonomy failure details preserve stable codes and redact sentinels", {
+  cases <- list(
+    list(code = "E_TAXONOMY_EXECUTION", outcome = "execution_failed", message = "local failure"),
+    list(code = "E_TAXONOMY_UNRESOLVED", outcome = "unresolved", message = "nodes remain unresolved"),
+    list(code = "E_NCBI_RESPONSE", outcome = "response_invalid", message = "malformed response"),
+    list(code = "E_NCBI_REQUEST", outcome = "request_failed", message = "request failed")
+  )
+  for (case in cases) {
+    root <- tempfile("taxonomy summary ")
+    dir.create(root, recursive = TRUE, showWarnings = FALSE)
+    jsonlite::write_json(case, file.path(root, "taxonomy_failure.json"), auto_unbox = TRUE)
+    detail <- taxonomy_resolver_failure_detail(
+      list(status = 1L, stderr = "", stdout = ""), root
+    )
+    expect_match(detail, case$code, fixed = TRUE)
+    expect_match(detail, case$message, fixed = TRUE)
+  }
+
+  root <- tempfile("taxonomy summary redaction ")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  jsonlite::write_json(
+    list(code = "E_NCBI_REQUEST", outcome = "request_failed",
+         message = paste(
+           "contact private@example.org api_key=SECRETKEY",
+           "https://user:URLSECRET@example.invalid/?email=private@example.org"
+         )),
+    file.path(root, "taxonomy_failure.json"), auto_unbox = TRUE
+  )
+  detail <- taxonomy_resolver_failure_detail(list(status = 1L, stderr = "", stdout = ""), root)
+  expect_match(detail, "E_NCBI_REQUEST", fixed = TRUE)
+  expect_false(grepl("private@example.org|SECRETKEY|URLSECRET", detail))
+})
+
 test_that("taxonomy resolver details use the final error line before a bounded stderr tail", {
   resolver <- list(
     status = 1L,
@@ -50,6 +84,85 @@ test_that("taxonomy resolver details use the final error line before a bounded s
   )
   expect_lte(nchar(detail, type = "chars"), 1200L)
   expect_true(nzchar(detail))
+})
+
+test_that("ordinary refresh uses one local preflight and one execution resolver invocation", {
+  root <- tempfile("taxonomy resolver seam ")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  lineage <- paste(c("Bacteria", "Bacillati", "Bacillota", "Bacilli", "Bacillales",
+                     "Bacillaceae", "Bacillus", "Bacillus cereus"), collapse = ";")
+  abundance <- file.path(root, "abundance.tsv")
+  writeLines(c(
+    "tax\tS1\ttotal",
+    "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown\t1\t1",
+    paste(lineage, "2", "2", sep = "\t")
+  ), abundance)
+  parts <- strsplit(lineage, ";", fixed = TRUE)[[1]]
+  cache <- file.path(root, "taxonomy.json")
+  cache_payload <- stats::setNames(as.list(seq_len(7L)),
+                                   vapply(seq_len(7L), function(i) {
+                                     paste(parts[seq_len(i)], collapse = ";")
+                                   }, character(1)))
+  cache_payload[[lineage]] <- 0L
+  jsonlite::write_json(cache_payload, cache, auto_unbox = TRUE, pretty = TRUE)
+
+  cfg <- get_default_config()
+  cfg$pipeline_root <- normalizePath(file.path("..", ".."), winslash = "/")
+  cfg$input$abundance_table <- abundance
+  cfg$input$params_json <- create_temp_params(root)
+  cfg$input$assignments <- NULL
+  cfg$taxonomy$cache <- cache
+  cfg$taxonomy$network_mode <- "refresh"
+  cfg$output$base_dir <- file.path(root, "output")
+  cfg$output$dirs <- list(kreport = file.path(root, "output", "07_Kreport"))
+  cfg$cli <- list(modules = "kreport", validate_only = FALSE,
+                  online_preflight = FALSE)
+  context <- build_context(cfg)
+  context$input_inventory <- list(
+    abundance_table = list(path = abundance, sha256 = compute_file_hash(abundance)),
+    taxonomy_cache = list(path = cache, sha256 = compute_file_hash(cache)),
+    assignments = list()
+  )
+  context$transaction_id <- paste0("tx-", strrep("f", 64L))
+  context$diagnostics_dir <- file.path(root, ".wf16s-diagnostics", context$transaction_id)
+  dir.create(context$diagnostics_dir, recursive = TRUE)
+
+  calls <- list()
+  recording_runner <- function(command, args, ...) {
+    calls[[length(calls) + 1L]] <<- list(command = command, args = args)
+    if ("--validate-only" %in% args) {
+      return(list(status = 0L,
+                  stdout = '{"taxonomy_resolution":"pending_online","pending_count":1}',
+                  stderr = ""))
+    }
+    list(
+      status = 7L,
+      stdout = "",
+      stderr = paste(
+        "E_NCBI_REQUEST: contact private@example.org api_key=SECRETKEY",
+        "https://user:URLSECRET@example.invalid/?email=private@example.org"
+      )
+    )
+  }
+
+  warnings <- run_module_preflight(context, "kreport", resolver_runner = recording_runner)
+  expect_match(paste(warnings, collapse = "\n"), "pending_online")
+  failure <- tryCatch(
+    run_kreport(context, resolver_runner = recording_runner),
+    error = identity
+  )
+  expect_s3_class(failure, "simpleError")
+  failure_text <- conditionMessage(failure)
+  expect_match(failure_text, "Taxonomy resolver failed")
+  expect_match(failure_text, "E_NCBI_REQUEST")
+  expect_false(grepl("SECRETKEY|private@example.org|URLSECRET", failure_text))
+  expect_length(calls, 2L)
+  expect_true("--validate-only" %in% calls[[1]]$args)
+  expect_false("--online-preflight" %in% calls[[1]]$args)
+  expect_equal(calls[[1]]$args[which(calls[[1]]$args == "--mode") + 1L], "refresh")
+  expect_false("--validate-only" %in% calls[[2]]$args)
+  expect_false("--online-preflight" %in% calls[[2]]$args)
+  expect_equal(calls[[2]]$args[which(calls[[2]]$args == "--mode") + 1L], "refresh")
 })
 
 test_that("kreport tree builder uses standard rank codes D, K, P, C, O, F, G, S", {
