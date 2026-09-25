@@ -160,6 +160,56 @@ create_taxonomy_diagnostics_dir <- function(final_root, transaction_id) {
   resolved
 }
 
+cleanup_empty_taxonomy_diagnostics <- function(path, expected_parent) {
+  check <- function() {
+    if (is.null(path) || length(path) != 1L || is.na(path) || !nzchar(path) ||
+        is.null(expected_parent) || length(expected_parent) != 1L ||
+        is.na(expected_parent) || !nzchar(expected_parent) ||
+        !dir.exists(path) || !dir.exists(expected_parent)) {
+      return(FALSE)
+    }
+    if (isTRUE(nzchar(Sys.readlink(path))) || isTRUE(nzchar(Sys.readlink(expected_parent)))) {
+      return(FALSE)
+    }
+    candidate <- normalizePath(path, winslash = "/", mustWork = TRUE)
+    root <- normalizePath(expected_parent, winslash = "/", mustWork = TRUE)
+    if (!identical(basename(root), ".wf16s-diagnostics") ||
+        !valid_transaction_id(basename(candidate)) ||
+        !paths_are_same(dirname(candidate), root)) {
+      return(FALSE)
+    }
+    entries <- list.files(candidate, all.files = TRUE, no.. = TRUE,
+                          recursive = FALSE, include.dirs = TRUE)
+    if (length(entries) != 0L) return(FALSE)
+    removed <- if (identical(.Platform$OS.type, "windows")) {
+      # Base R's non-recursive unlink does not remove directories reliably on
+      # Windows. `rmdir` is the native non-recursive equivalent and still
+      # refuses to remove a directory that gained an entry after the census.
+      status <- tryCatch(system2(
+        Sys.getenv("COMSPEC", unset = "cmd.exe"),
+        c("/d", "/c", "rmdir", "/q", shQuote(candidate)),
+        stdout = FALSE, stderr = FALSE
+      ), error = function(e) NA_integer_)
+      identical(status, 0L) && !dir.exists(candidate)
+    } else {
+      status <- unlink(candidate, recursive = FALSE, force = TRUE)
+      status == 0L && !dir.exists(candidate)
+    }
+    if (!isTRUE(removed)) {
+      warning(sprintf("Could not clean empty taxonomy diagnostics directory '%s'.",
+                      candidate), call. = FALSE)
+      return(FALSE)
+    }
+    TRUE
+  }
+
+  result <- tryCatch(check(), error = function(e) {
+    warning("Could not clean empty taxonomy diagnostics directory.", call. = FALSE)
+    FALSE
+  })
+  invisible(isTRUE(result))
+}
+
 snapshot_staging_directory <- function(stage) {
   parent <- dirname(stage)
   snapshot <- tempfile(pattern = paste0(".", basename(stage), ".snapshot-"), tmpdir = parent)

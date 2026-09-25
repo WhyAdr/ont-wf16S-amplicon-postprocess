@@ -397,6 +397,47 @@ test_that("taxonomy diagnostics are transaction-specific and outside output stag
   expect_error(create_taxonomy_diagnostics_dir(final_root, transaction_id), "already exists")
 })
 
+test_that("empty taxonomy diagnostics are cleaned without removing the shared root", {
+  root <- tempfile("diagnostics_cleanup_empty_")
+  dir.create(root)
+  final_root <- file.path(root, "published output")
+  diagnostics <- create_taxonomy_diagnostics_dir(final_root, new_transaction_id())
+  diagnostics_root <- dirname(diagnostics)
+
+  expect_true(cleanup_empty_taxonomy_diagnostics(diagnostics, diagnostics_root))
+  expect_false(dir.exists(diagnostics))
+  expect_true(dir.exists(diagnostics_root))
+})
+
+test_that("taxonomy diagnostics evidence and unexpected entries are retained", {
+  root <- tempfile("diagnostics_cleanup_evidence_")
+  dir.create(root)
+  final_root <- file.path(root, "published output")
+  diagnostics_root <- NULL
+  for (entry in c("taxonomy_events.jsonl", "taxonomy_failure.json", "unexpected.txt")) {
+    diagnostics <- create_taxonomy_diagnostics_dir(final_root, new_transaction_id())
+    diagnostics_root <- dirname(diagnostics)
+    writeLines("evidence", file.path(diagnostics, entry))
+    expect_false(cleanup_empty_taxonomy_diagnostics(diagnostics, diagnostics_root))
+    expect_true(dir.exists(diagnostics))
+    expect_true(file.exists(file.path(diagnostics, entry)))
+  }
+  expect_true(dir.exists(diagnostics_root))
+})
+
+test_that("taxonomy diagnostics cleanup fails closed for an unowned directory", {
+  root <- tempfile("diagnostics_cleanup_ownership_")
+  dir.create(root)
+  final_root <- file.path(root, "published output")
+  diagnostics <- create_taxonomy_diagnostics_dir(final_root, new_transaction_id())
+  wrong_parent <- file.path(root, "other diagnostics")
+  dir.create(wrong_parent)
+
+  expect_false(cleanup_empty_taxonomy_diagnostics(diagnostics, wrong_parent))
+  expect_true(dir.exists(diagnostics))
+  expect_true(dir.exists(dirname(diagnostics)))
+})
+
 test_that("publish_module_staging rejects collisions without changing either file", {
   root <- tempfile("module_stage_collision_")
   stage <- file.path(root, "run_stage")

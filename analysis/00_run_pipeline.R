@@ -148,13 +148,6 @@ tryCatch(recover_publication_journal(final_root),
 prior_manifest <- tryCatch(validate_prior_output(final_root, cfg$cli$overwrite),
                             error = function(e) fatal("Output validation error", e))
 
-if (identical(cfg$taxonomy$network_mode, "refresh") && "kreport" %in% requested_modules) {
-  context$diagnostics_dir <- tryCatch(
-    create_taxonomy_diagnostics_dir(final_root, transaction_id),
-    error = function(e) fatal("Taxonomy diagnostics error", e)
-  )
-}
-
 taxonomy_cache_state <- "unchanged" # unchanged, candidate_committed, restored, output_published, committed
 taxonomy_cache_backup_file <- NULL
 taxonomy_cache_original_sha256 <- full_inventory$taxonomy_cache$sha256
@@ -271,6 +264,23 @@ on.exit({
   }
   if (stage_active && dir.exists(stage)) unlink(stage, recursive = TRUE, force = TRUE)
 }, add = TRUE)
+
+if (identical(cfg$taxonomy$network_mode, "refresh") && "kreport" %in% requested_modules) {
+  context$diagnostics_dir <- tryCatch(
+    create_taxonomy_diagnostics_dir(final_root, transaction_id),
+    error = function(e) fatal("Taxonomy diagnostics error", e)
+  )
+}
+diagnostics_root <- if (!is.null(context$diagnostics_dir)) {
+  dirname(context$diagnostics_dir)
+} else NULL
+if (!is.null(context$diagnostics_dir)) {
+  # This is registered after cache rollback and staging cleanup so it runs
+  # after those handlers during ordinary R stack unwinding.
+  on.exit({
+    cleanup_empty_taxonomy_diagnostics(context$diagnostics_dir, diagnostics_root)
+  }, add = TRUE)
+}
 
 preserved_unowned_outputs <- tryCatch(preserve_unowned_outputs(final_root, stage, prior_manifest),
                                       error = function(e) fatal("Output staging error", e))

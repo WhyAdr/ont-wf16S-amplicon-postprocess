@@ -38,6 +38,80 @@ write_transaction_config <- function(root, abundance, cache, assignments = NULL,
   normalizePath(path, winslash = "/")
 }
 
+create_unresolved_refresh_fixture <- function(root, unresolved_policy = "warn") {
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  lineage <- paste(c("Bacteria", "Bacillati", "Bacillota", "Bacilli", "Bacillales",
+                     "Bacillaceae", "Bacillus", "Bacillus cereus"), collapse = ";")
+  abundance <- file.path(root, "unresolved abundance.tsv")
+  writeLines(c(
+    "tax\tS1\ttotal",
+    "Unclassified;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown;Unknown\t1\t1",
+    paste(lineage, "2", "2", sep = "\t")
+  ), abundance)
+  cache <- file.path(root, "taxonomy cache.json")
+  parts <- strsplit(lineage, ";", fixed = TRUE)[[1]]
+  parents <- stats::setNames(as.list(seq_len(7L)),
+                             vapply(seq_len(7L), function(i) {
+                               paste(parts[seq_len(i)], collapse = ";")
+                             }, character(1)))
+  parents[[lineage]] <- 0L
+  jsonlite::write_json(parents, cache, auto_unbox = TRUE, pretty = TRUE)
+  output <- file.path(root, "refresh output")
+  config <- write_transaction_config(root, abundance, cache, output = output)
+  cfg <- yaml::read_yaml(config)
+  cfg$taxonomy$unresolved_policy <- unresolved_policy
+  yaml::write_yaml(cfg, config)
+  list(
+    config = normalizePath(config, winslash = "/"),
+    abundance = normalizePath(abundance, winslash = "/"),
+    cache = normalizePath(cache, winslash = "/"),
+    output = output,
+    diagnostics_root = file.path(dirname(output), ".wf16s-diagnostics")
+  )
+}
+
+fingerprint_cache_and_transaction_sidecars <- function(cache) {
+  list(
+    bytes = readBin(cache, "raw", n = file.info(cache)$size),
+    journal = file.exists(get_taxonomy_journal_path(cache)),
+    backups = sort(list.files(dirname(cache), pattern = "^\\.wf16s_tax_backup_",
+                              all.files = TRUE, full.names = TRUE))
+  )
+}
+
+create_controlled_python <- function(root) {
+  bin <- file.path(root, "controlled python bin")
+  dir.create(bin, recursive = TRUE, showWarnings = FALSE)
+  if (.Platform$OS.type == "windows") {
+    script <- c(
+      "@echo off",
+      "if \"%~1\"==\"--version\" goto version",
+      "if \"%~1\"==\"-c\" exit /b 0",
+      "echo E_NCBI_REQUEST: controlled resolver failure 1>&2",
+      "exit /b 1",
+      ":version",
+      "echo Python 3.12.0",
+      "exit /b 0"
+    )
+    writeLines(script, file.path(bin, "python.cmd"))
+    writeLines(script, file.path(bin, "python3.cmd"))
+  } else {
+    script <- c(
+      "#!/bin/sh",
+      "if [ \"$1\" = \"--version\" ]; then echo 'Python 3.12.0'; exit 0; fi",
+      "if [ \"$1\" = \"-c\" ]; then exit 0; fi",
+      "echo 'E_NCBI_REQUEST: controlled resolver failure' >&2",
+      "exit 1"
+    )
+    for (name in c("python", "python3")) {
+      path <- file.path(bin, name)
+      writeLines(script, path)
+      Sys.chmod(path, mode = "0755")
+    }
+  }
+  bin
+}
+
 test_that("a held output lock rejects a subprocess without mutating the output tree", {
   root <- tempfile("output_lock_process_")
   dir.create(root)
@@ -110,4 +184,79 @@ test_that("a later failure rolls back a deferred local taxonomy refresh and clea
   expect_length(diagnostic_runs, 1L)
   expect_true(file.exists(file.path(diagnostic_runs, "taxonomy_events.jsonl")))
   expect_false(startsWith(tolower(diagnostic_runs), paste0(tolower(output), "/")))
+})
+
+test_that("refresh validate-only stays local and leaves no outputs or cache mutations", {
+  for (policy in c("warn", "error")) {
+    fixture <- create_unresolved_refresh_fixture(
+      tempfile(sprintf("refresh_validate_%s_", policy)), policy
+    )
+    before <- fingerprint_cache_and_transaction_sidecars(fixture$cache)
+    result <- run_transaction_process(c(
+      "--config", fixture$config,
+      "--modules", "kreport",
+      "--refresh-taxonomy",
+      "--validate-only",
+      "--output-dir", fixture$output
+    ), tempdir(), env = c(NCBI_EMAIL = "redaction-test@example.invalid"))
+
+    expect_identical(result$status, 0L, info = paste(result$stderr, result$stdout))
+    output_text <- paste(result$stdout, result$stderr)
+    expect_match(output_text, "pending_online")
+    expect_match(output_text, "Validation check PASSED")
+    expect_identical(fingerprint_cache_and_transaction_sidecars(fixture$cache), before)
+    expect_false(dir.exists(fixture$output))
+    expect_false(dir.exists(fixture$diagnostics_root))
+  }
+})
+
+test_that("online-preflight mode constraints fail before output or cache mutation", {
+  fixture <- create_unresolved_refresh_fixture(tempfile("refresh_mode_matrix_"), "error")
+  before <- fingerprint_cache_and_transaction_sidecars(fixture$cache)
+
+  execution_mode <- run_transaction_process(c(
+    "--config", fixture$config,
+    "--modules", "kreport",
+    "--refresh-taxonomy",
+    "--online-preflight",
+    "--output-dir", fixture$output
+  ), tempdir())
+  expect_gt(execution_mode$status, 0L)
+  expect_match(paste(execution_mode$stderr, execution_mode$stdout), "E_ONLINE_PREFLIGHT_MODE")
+  expect_identical(fingerprint_cache_and_transaction_sidecars(fixture$cache), before)
+  expect_false(dir.exists(fixture$output))
+
+  cache_only <- run_transaction_process(c(
+    "--config", fixture$config,
+    "--modules", "kreport",
+    "--validate-only",
+    "--online-preflight",
+    "--output-dir", fixture$output
+  ), tempdir())
+  expect_gt(cache_only$status, 0L)
+  expect_match(paste(cache_only$stderr, cache_only$stdout), "E_ONLINE_PREFLIGHT_MODE")
+  expect_identical(fingerprint_cache_and_transaction_sidecars(fixture$cache), before)
+  expect_false(dir.exists(fixture$output))
+})
+
+test_that("accepted online-preflight propagates a controlled resolver failure without publication", {
+  fixture <- create_unresolved_refresh_fixture(tempfile("refresh_online_preflight_"), "error")
+  before <- fingerprint_cache_and_transaction_sidecars(fixture$cache)
+  controlled_bin <- create_controlled_python(dirname(fixture$config))
+  withr::local_envvar(PATH = paste(controlled_bin, Sys.getenv("PATH"), sep = .Platform$path.sep))
+
+  result <- run_transaction_process(c(
+    "--config", fixture$config,
+    "--modules", "kreport",
+    "--refresh-taxonomy",
+    "--validate-only",
+    "--online-preflight",
+    "--output-dir", fixture$output
+  ), tempdir(), env = c(NCBI_EMAIL = "redaction-test@example.invalid"))
+
+  expect_gt(result$status, 0L)
+  expect_match(paste(result$stderr, result$stdout), "E_KREPORT_PREFLIGHT")
+  expect_identical(fingerprint_cache_and_transaction_sidecars(fixture$cache), before)
+  expect_false(dir.exists(fixture$output))
+  expect_false(dir.exists(fixture$diagnostics_root))
 })
