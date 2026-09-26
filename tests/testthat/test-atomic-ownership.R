@@ -409,6 +409,19 @@ test_that("empty taxonomy diagnostics are cleaned without removing the shared ro
   expect_true(dir.exists(diagnostics_root))
 })
 
+test_that("empty taxonomy diagnostics cleanup quotes paths with spaces and shell metacharacters", {
+  root <- file.path(tempdir(), "diagnostics cleanup & [shell]")
+  dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  final_root <- file.path(root, "published output")
+  diagnostics <- create_taxonomy_diagnostics_dir(final_root, new_transaction_id())
+  diagnostics_root <- dirname(diagnostics)
+
+  expect_true(cleanup_empty_taxonomy_diagnostics(diagnostics, diagnostics_root))
+  expect_false(dir.exists(diagnostics))
+  expect_true(dir.exists(diagnostics_root))
+})
+
 test_that("taxonomy diagnostics evidence and unexpected entries are retained", {
   root <- tempfile("diagnostics_cleanup_evidence_")
   dir.create(root)

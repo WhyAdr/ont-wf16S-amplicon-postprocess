@@ -193,7 +193,8 @@ cleanup_empty_taxonomy_diagnostics <- function(path, expected_parent) {
         stdout = FALSE, stderr = FALSE
       ), error = function(e) NA_integer_)
     } else {
-      tryCatch(system2("rmdir", candidate, stdout = FALSE, stderr = FALSE),
+      tryCatch(system2("rmdir", shQuote(candidate, type = "sh"),
+                       stdout = FALSE, stderr = FALSE),
                error = function(e) NA_integer_)
     }
     removed <- identical(status, 0L) && !dir.exists(candidate)
